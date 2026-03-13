@@ -1,0 +1,7 @@
+bounded_context: "lending"
+service_id: "svc-ln-loan-lifecycle"
+application_id: "app.ln.loan-lifecycle"
+data_owner_pattern: "db_ln_loan_lifecycle_prod"
+event_namespace: "evt.ln.loan"
+owning_squad: "Loan Lifecycle Squad"
+wave: "3"
