@@ -1,0 +1,60 @@
+// =================================================================
+// LOAN APPLICATION MODULE
+// =================================================================
+// Application services, DTOs, and use case orchestration
+// Coordinates loan operations and external integrations
+// =================================================================
+
+apply plugin: 'jacoco'
+
+description = 'Loan Application - Application services and use case orchestration'
+
+dependencies {
+    // Domain Layer
+    api project(':loan-context:loan-domain')
+    
+    // Infrastructure
+    api project(':shared-infrastructure')
+    
+    // Application Services
+    implementation 'org.springframework.boot:spring-boot-starter'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework:spring-tx'
+    
+    // Mapping
+    implementation "org.mapstruct:mapstruct:${project.rootProject.ext.mapstructVersion}"
+    annotationProcessor "org.mapstruct:mapstruct-processor:${project.rootProject.ext.mapstructVersion}"
+    
+    // Testing
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework:spring-test'
+    testImplementation 'com.tngtech.archunit:archunit-junit5:1.4.1'
+}
+
+jacoco {
+    toolVersion = "0.8.14"
+}
+
+jacocoTestReport {
+    dependsOn test
+    reports {
+        xml.required = true
+        html.required = true
+        csv.required = false
+    }
+}
+
+jacocoTestCoverageVerification {
+    dependsOn jacocoTestReport
+    violationRules {
+        rule {
+            limit {
+                counter = 'LINE'
+                value = 'COVEREDRATIO'
+                minimum = 0.85
+            }
+        }
+    }
+}
+
+check.dependsOn jacocoTestCoverageVerification
