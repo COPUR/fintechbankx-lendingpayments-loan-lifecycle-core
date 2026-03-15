@@ -17,3 +17,12 @@ regexes = [
 paths = [
   '''README\.md'''
 ]
+
+[[allowlists]]
+description = "Allow deterministic internal JWT secret fixtures in test sources"
+regexes = [
+  '''openfinance\.internal\.security\.jwt-hmac-secret='''
+]
+paths = [
+  '''src/test/.*'''
+]
