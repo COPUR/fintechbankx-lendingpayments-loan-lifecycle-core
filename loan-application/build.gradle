@@ -11,10 +11,7 @@ description = 'Loan Application - Application services and use case orchestratio
 
 dependencies {
     // Domain Layer
-    api project(':loan-context:loan-domain')
-    
-    // Infrastructure
-    api project(':shared-infrastructure')
+    api project(':loan-domain')
     
     // Application Services
     implementation 'org.springframework.boot:spring-boot-starter'
@@ -22,8 +19,8 @@ dependencies {
     implementation 'org.springframework:spring-tx'
     
     // Mapping
-    implementation "org.mapstruct:mapstruct:${project.rootProject.ext.mapstructVersion}"
-    annotationProcessor "org.mapstruct:mapstruct-processor:${project.rootProject.ext.mapstructVersion}"
+    implementation "org.mapstruct:mapstruct:1.6.3"
+    annotationProcessor "org.mapstruct:mapstruct-processor:1.6.3"
     
     // Testing
     testImplementation 'org.springframework.boot:spring-boot-starter-test'

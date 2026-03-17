@@ -11,10 +11,7 @@ description = 'Loan Infrastructure - Persistence and external service implementa
 
 dependencies {
     // Application Layer
-    api project(':loan-context:loan-application')
-    
-    // Infrastructure
-    api project(':shared-infrastructure')
+    api project(':loan-application')
     
     // Persistence
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
@@ -26,10 +23,11 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-webflux'
     implementation 'org.springframework.boot:spring-boot-starter-hateoas'
+    implementation 'org.springframework.boot:spring-boot-starter-security'
 
     // API Documentation
-    implementation libs.springdoc.openapi.starter.webmvc.ui
-    implementation libs.swagger.annotations
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.2.0'
+    implementation 'io.swagger.core.v3:swagger-annotations:2.2.22'
     
     // Messaging
     implementation 'org.springframework.kafka:spring-kafka'
