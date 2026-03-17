@@ -6,9 +6,9 @@ The Loan Context implements a **Hexagonal Architecture** (Ports & Adapters) patt
 
 ## 🏗️ Architecture Diagram
 
-![Loan Context Architecture](../docs/images/loan-context-architecture.svg)
+![Loan Context Architecture](docs/images/loan-context-architecture.svg)
 
-**PlantUML Source**: [loan-context-architecture.puml](../docs/puml/bounded-contexts/loan-context-architecture.puml)
+**PlantUML Source**: [loan-context-architecture.puml](docs/puml/bounded-contexts/loan-context-architecture.puml)
 
 ## 🎯 Domain Responsibilities
 
@@ -499,3 +499,9 @@ curl -X POST http://localhost:8080/api/v1/loans/loan-123/payments \
 **Version**: 1.0  
 **Security Level**: PCI-DSS v4.0 Compliant  
 **Architecture Pattern**: Hexagonal Architecture + DDD
+
+
+## Publication Guardrails
+
+- Follow [Publication Guardrails](docs/publication/PUBLICATION_GUARDRAILS.md).
+- Do not commit local paths, personal identifiers, or secrets.

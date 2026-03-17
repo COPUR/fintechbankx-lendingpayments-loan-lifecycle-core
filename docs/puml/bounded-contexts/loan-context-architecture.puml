@@ -1,0 +1,12 @@
+@startuml
+skinparam componentStyle rectangle
+package "Lending Loan Lifecycle Service" {
+  [Loan API Adapter] as API
+  [Loan Application Service] as APP
+  [Loan Domain] as DOMAIN
+  [Persistence Adapter] as DB
+  API --> APP
+  APP --> DOMAIN
+  APP --> DB
+}
+@enduml
