@@ -84,6 +84,38 @@ public class Loan extends AggregateRoot<LoanId> {
         return new Loan(loanId, customerId, principalAmount, interestRate, loanTerm, true);
     }
     
+    /**
+     * Rebuilds a loan from persisted state. Used by persistence adapters only:
+     * it registers no domain events and skips creation-time validation so that
+     * historical loans migrated from the monolith load as they were stored.
+     */
+    public static Loan rehydrate(LoanId loanId, CustomerId customerId, Money principalAmount,
+                                 InterestRate interestRate, LoanTerm loanTerm, LoanStatus status,
+                                 LocalDate applicationDate, LocalDate approvalDate,
+                                 LocalDate disbursementDate, LocalDate maturityDate,
+                                 Money outstandingBalance, List<LoanInstallment> installments,
+                                 LocalDateTime createdAt, LocalDateTime updatedAt, Long version) {
+        Loan loan = new Loan();
+        loan.loanId = Objects.requireNonNull(loanId, "Loan ID cannot be null");
+        loan.customerId = Objects.requireNonNull(customerId, "Customer ID cannot be null");
+        loan.principalAmount = Objects.requireNonNull(principalAmount, "Principal amount cannot be null");
+        loan.interestRate = Objects.requireNonNull(interestRate, "Interest rate cannot be null");
+        loan.loanTerm = Objects.requireNonNull(loanTerm, "Loan term cannot be null");
+        loan.status = Objects.requireNonNull(status, "Status cannot be null");
+        loan.applicationDate = applicationDate;
+        loan.approvalDate = approvalDate;
+        loan.disbursementDate = disbursementDate;
+        loan.maturityDate = maturityDate;
+        loan.outstandingBalance = Objects.requireNonNull(outstandingBalance, "Outstanding balance cannot be null");
+        if (installments != null) {
+            loan.installments.addAll(installments);
+        }
+        loan.createdAt = createdAt;
+        loan.updatedAt = updatedAt;
+        loan.setVersion(version);
+        return loan;
+    }
+
     private void validateLoanData() {
         if (principalAmount.isNegative() || principalAmount.isZero()) {
             throw new IllegalArgumentException("Principal amount must be positive");

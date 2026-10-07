@@ -7,6 +7,10 @@ import com.bank.loan.domain.Loan;
 import com.bank.loan.domain.LoanId;
 import com.bank.loan.domain.LoanRepository;
 import com.bank.loan.domain.LoanTerm;
+import com.bank.loan.domain.LoanApprovedEvent;
+import com.bank.loan.domain.LoanCreatedEvent;
+import com.bank.loan.domain.port.out.LoanEventPublisher;
+import com.bank.shared.kernel.domain.DomainEvent;
 import com.bank.shared.kernel.domain.CustomerId;
 import com.bank.shared.kernel.domain.Money;
 import org.junit.jupiter.api.Test;
@@ -17,6 +21,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -35,6 +40,9 @@ class LoanManagementServiceTest {
 
     @Mock
     private CustomerCreditService customerCreditService;
+
+    @Mock
+    private LoanEventPublisher eventPublisher;
 
     @InjectMocks
     private LoanManagementService service;
@@ -201,5 +209,43 @@ class LoanManagementServiceTest {
             InterestRate.of(new BigDecimal("6.0")),
             LoanTerm.ofMonths(termMonths)
         );
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void createLoanApplicationShouldHandCreatedEventToOutboxAndClearIt() {
+        CreateLoanRequest request = new CreateLoanRequest(
+            "CUST-LOAN-EVT",
+            new BigDecimal("25000.00"),
+            "AED",
+            new BigDecimal("6.5"),
+            24
+        );
+        when(customerCreditService.hasAvailableCredit(any(CustomerId.class), any(Money.class))).thenReturn(true);
+        ArgumentCaptor<Loan> saved = ArgumentCaptor.forClass(Loan.class);
+        when(loanRepository.save(saved.capture())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.createLoanApplication(request);
+
+        ArgumentCaptor<List<DomainEvent>> events = ArgumentCaptor.forClass(List.class);
+        verify(eventPublisher).publish(eq(saved.getValue()), events.capture());
+        assertThat(events.getValue()).singleElement().isInstanceOf(LoanCreatedEvent.class);
+        assertThat(saved.getValue().getDomainEvents()).isEmpty();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void approveLoanShouldPublishOnlyTheApprovalEvent() {
+        Loan loan = Loan.create(LoanId.of("LOAN-EVT-2"), CustomerId.of("CUST-EVT-2"),
+            Money.aed(new BigDecimal("12000.00")), InterestRate.of(new BigDecimal("5.0")), LoanTerm.ofMonths(12));
+        loan.clearDomainEvents();
+        when(loanRepository.findById(LoanId.of("LOAN-EVT-2"))).thenReturn(Optional.of(loan));
+        when(loanRepository.save(any(Loan.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.approveLoan("LOAN-EVT-2");
+
+        ArgumentCaptor<List<DomainEvent>> events = ArgumentCaptor.forClass(List.class);
+        verify(eventPublisher).publish(eq(loan), events.capture());
+        assertThat(events.getValue()).singleElement().isInstanceOf(LoanApprovedEvent.class);
     }
 }

@@ -43,6 +43,21 @@ Bu repository, FinTechBankX DDD/EDA dönüşümünde **svc-ln-loan-lifecycle** s
 - Feature branch kuralı: `codex/<kisa-aciklama>`.
 - Release yaklaşımı: PR + required status checks + tag tabanlı sürümleme.
 
+## Run, test and deploy
+
+| What | Command / path |
+|---|---|
+| Unit and integration tests | `./gradlew test` (integration tests need `TEST_DB_URL` or Docker) |
+| Run locally | `SPRING_DATASOURCE_PASSWORD=... CUSTOMER_CREDIT_ADAPTER=in-memory ./gradlew :loan-bootstrap:bootRun` |
+| Database migrations | `loan-infrastructure/src/main/resources/db/migration` (schema `sc_ln_loan_lifecycle`) |
+| Container image | `docker build -t loan-lifecycle-service .` |
+| Kubernetes | `deploy/helm/loan-lifecycle-service` |
+| AWS infrastructure | `deploy/terraform` |
+| Data split from the monolith | [RUNBOOK-EXTRACT-ln-loan-lifecycle](docs/migration/RUNBOOK-EXTRACT-ln-loan-lifecycle.md) |
+| Deployment and Well-Architected mapping | [DEPLOYMENT_AND_WELL_ARCHITECTED](docs/architecture/DEPLOYMENT_AND_WELL_ARCHITECTED.md) |
+
+Module layout: `loan-domain` (aggregate, events, ports) ← `loan-application` (use cases) ← `loan-infrastructure` (JPA, outbox, web, customer-service client) ← `loan-bootstrap` (Spring Boot app).
+
 ## Dokümantasyon ve Referanslar
 - [Enterprise Architecture Hub](https://github.com/COPUR/fintechbankx-governance-architecture-enablement-enterprise-architecture)
 - [Secure Microservices Architecture](https://github.com/COPUR/fintechbankx-governance-architecture-enablement-enterprise-architecture/blob/main/docs/architecture/overview/SECURE_MICROSERVICES_ARCHITECTURE.md)

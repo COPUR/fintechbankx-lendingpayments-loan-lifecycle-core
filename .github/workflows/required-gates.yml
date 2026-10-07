@@ -32,7 +32,9 @@ jobs:
         shell: bash
         run: |
           if [ -f build.gradle ] || [ -f settings.gradle ] || [ -f gradlew ]; then
-            if ! gradle --no-daemon clean assemble -x test; then
+            GRADLE=gradle
+            if [ -x ./gradlew ]; then GRADLE=./gradlew; fi
+            if ! $GRADLE --no-daemon clean assemble -x test; then
               if [ -f .ci/allow-gradle-fail ]; then
                 echo "Gradle build failed but .ci/allow-gradle-fail is present; continuing."
               else
@@ -52,6 +54,25 @@ jobs:
   test:
     name: ci/test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: db_ln_loan_lifecycle_test
+          POSTGRES_USER: loan_test
+          POSTGRES_PASSWORD: loan_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U loan_test -d db_ln_loan_lifecycle_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Integration tests in loan-bootstrap run Flyway and the full service against this database.
+      TEST_DB_URL: jdbc:postgresql://localhost:5432/db_ln_loan_lifecycle_test
+      TEST_DB_USERNAME: loan_test
+      TEST_DB_PASSWORD: loan_test
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -73,7 +94,9 @@ jobs:
         shell: bash
         run: |
           if [ -f build.gradle ] || [ -f settings.gradle ] || [ -f gradlew ]; then
-            if ! gradle --no-daemon test; then
+            GRADLE=gradle
+            if [ -x ./gradlew ]; then GRADLE=./gradlew; fi
+            if ! $GRADLE --no-daemon test; then
               if [ -f .ci/allow-gradle-fail ]; then
                 echo "Gradle test failed but .ci/allow-gradle-fail is present; continuing."
               else

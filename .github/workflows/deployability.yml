@@ -1,0 +1,83 @@
+name: Deployability
+
+# Proves every change still produces a runnable image and valid deployment
+# manifests. Nothing is pushed or applied from here.
+
+on:
+  pull_request:
+    branches: [main, dev, staging]
+  push:
+    branches: [main, dev, staging]
+
+permissions:
+  contents: read
+
+jobs:
+  container:
+    name: deploy/container-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build --tag loan-lifecycle-service:${{ github.sha }} .
+      - name: Image runs as non-root
+        run: |
+          user="$(docker image inspect --format '{{.Config.User}}' loan-lifecycle-service:${{ github.sha }})"
+          echo "image user: $user"
+          test "$user" = "10001:10001"
+
+  helm:
+    name: deploy/helm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: Lint and render chart
+        run: |
+          chart=deploy/helm/loan-lifecycle-service
+          args="--set image.repository=ci/loan-lifecycle-service --set image.tag=${{ github.sha }} --set externalSecret.remoteSecretName=ci/db-app"
+          helm lint "$chart" $args
+          helm template ci "$chart" $args > /dev/null
+          helm template ci "$chart" -f "$chart/values-dev.yaml" $args > /dev/null
+
+  terraform:
+    name: deploy/terraform
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate
+
+  data-split:
+    name: deploy/data-split-rehearsal
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: backfill
+          POSTGRES_PASSWORD: backfill
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U backfill"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGUSER: backfill
+      PGPASSWORD: backfill
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rehearse monolith-to-service loan backfill and reconciliation
+        run: scripts/migration/verify-backfill.sh

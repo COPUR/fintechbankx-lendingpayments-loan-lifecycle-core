@@ -3,26 +3,33 @@ package com.bank.loan.infrastructure.external;
 import com.bank.loan.application.CustomerCreditService;
 import com.bank.shared.kernel.domain.CustomerId;
 import com.bank.shared.kernel.domain.Money;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.util.Currency;
-import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
 
 /**
- * Adapter for customer credit operations
- * 
- * Implements Hexagonal Architecture - Infrastructure adapter for cross-context calls
- * In production, this would integrate with the customer context via API or messaging
+ * In-memory customer credit adapter for local runs and tests.
+ *
+ * Enabled only with {@code loan.customer-credit.adapter=in-memory}. Every
+ * deployed environment uses {@link CustomerProfileHttpAdapter}, which calls
+ * the customer-profile-kyc service that owns credit limits.
  */
 @Component
-public class CustomerCreditServiceAdapter implements CustomerCreditService {
+@ConditionalOnProperty(name = "loan.customer-credit.adapter", havingValue = "in-memory")
+public class InMemoryCustomerCreditAdapter implements CustomerCreditService {
+
+    private static final Logger log = LoggerFactory.getLogger(InMemoryCustomerCreditAdapter.class);
     
     // Mock customer credit data for demonstration
-    private final Map<String, CustomerCreditInfo> mockCustomerCredit = new HashMap<>();
+    private final Map<String, CustomerCreditInfo> mockCustomerCredit = new ConcurrentHashMap<>();
     
-    public CustomerCreditServiceAdapter() {
+    public InMemoryCustomerCreditAdapter() {
         // Initialize mock customer credit data
         mockCustomerCredit.put("CUST-12345678", new CustomerCreditInfo("CUST-12345678", BigDecimal.valueOf(100000), BigDecimal.ZERO));
         mockCustomerCredit.put("CUST-87654321", new CustomerCreditInfo("CUST-87654321", BigDecimal.valueOf(50000), BigDecimal.valueOf(10000)));
@@ -55,9 +62,7 @@ public class CustomerCreditServiceAdapter implements CustomerCreditService {
         BigDecimal newUsedCredit = creditInfo.getUsedCredit().add(amount.getAmount());
         creditInfo.setUsedCredit(newUsedCredit);
         
-        System.out.println("Reserved credit for customer: " + customerId.getValue() + 
-                         ", amount: " + amount + 
-                         ", new used credit: " + newUsedCredit);
+        log.debug("Reserved credit for customer {}: amount {}, used credit {}", customerId.getValue(), amount, newUsedCredit);
         
         return true;
     }
@@ -77,9 +82,7 @@ public class CustomerCreditServiceAdapter implements CustomerCreditService {
         
         creditInfo.setUsedCredit(newUsedCredit);
         
-        System.out.println("Released credit for customer: " + customerId.getValue() + 
-                         ", amount: " + amount + 
-                         ", new used credit: " + newUsedCredit);
+        log.debug("Released credit for customer {}: amount {}, used credit {}", customerId.getValue(), amount, newUsedCredit);
         
         return true;
     }

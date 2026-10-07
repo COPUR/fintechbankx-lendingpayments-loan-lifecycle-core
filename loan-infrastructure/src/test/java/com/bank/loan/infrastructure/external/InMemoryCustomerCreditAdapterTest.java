@@ -8,9 +8,9 @@ import java.math.BigDecimal;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-class CustomerCreditServiceAdapterTest {
+class InMemoryCustomerCreditAdapterTest {
 
-    private final CustomerCreditServiceAdapter adapter = new CustomerCreditServiceAdapter();
+    private final InMemoryCustomerCreditAdapter adapter = new InMemoryCustomerCreditAdapter();
 
     @Test
     void hasAvailableCreditShouldReflectConfiguredCreditProfiles() {

@@ -46,6 +46,19 @@ public class LoanInstallment {
         return new LoanInstallment(loanId, customerId, installmentNumber, amount, dueDate);
     }
     
+    /**
+     * Rebuilds an installment from persisted state. Used by persistence adapters only.
+     */
+    public static LoanInstallment rehydrate(LoanId loanId, CustomerId customerId, int installmentNumber,
+                                           Money amount, LocalDate dueDate, Money paidAmount,
+                                           LocalDateTime paidDate, InstallmentStatus status) {
+        LoanInstallment installment = new LoanInstallment(loanId, customerId, installmentNumber, amount, dueDate);
+        installment.paidAmount = Objects.requireNonNull(paidAmount, "Paid amount cannot be null");
+        installment.paidDate = paidDate;
+        installment.status = Objects.requireNonNull(status, "Status cannot be null");
+        return installment;
+    }
+
     public LoanId getLoanId() {
         return loanId;
     }

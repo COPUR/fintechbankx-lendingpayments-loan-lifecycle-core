@@ -3,10 +3,14 @@ package com.bank.loan.application;
 import com.bank.loan.application.dto.CreateLoanRequest;
 import com.bank.loan.application.dto.LoanResponse;
 import com.bank.loan.domain.*;
+import com.bank.loan.domain.port.out.LoanEventPublisher;
+import com.bank.shared.kernel.domain.DomainEvent;
 import com.bank.shared.kernel.domain.CustomerId;
 import com.bank.shared.kernel.domain.Money;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
 
 /**
  * Application Service for Loan Management
@@ -23,11 +27,14 @@ public class LoanManagementService {
     
     private final LoanRepository loanRepository;
     private final CustomerCreditService customerCreditService;
+    private final LoanEventPublisher eventPublisher;
     
     public LoanManagementService(LoanRepository loanRepository, 
-                                CustomerCreditService customerCreditService) {
+                                CustomerCreditService customerCreditService,
+                                LoanEventPublisher eventPublisher) {
         this.loanRepository = loanRepository;
         this.customerCreditService = customerCreditService;
+        this.eventPublisher = eventPublisher;
     }
     
     /**
@@ -59,7 +66,7 @@ public class LoanManagementService {
         );
         
         // Save loan
-        Loan savedLoan = loanRepository.save(loan);
+        Loan savedLoan = saveAndPublish(loan);
         
         return LoanResponse.from(savedLoan);
     }
@@ -73,7 +80,7 @@ public class LoanManagementService {
             .orElseThrow(() -> LoanNotFoundException.withId(loanId));
         
         loan.approve();
-        Loan savedLoan = loanRepository.save(loan);
+        Loan savedLoan = saveAndPublish(loan);
         
         return LoanResponse.from(savedLoan);
     }
@@ -87,7 +94,7 @@ public class LoanManagementService {
             .orElseThrow(() -> LoanNotFoundException.withId(loanId));
         
         loan.reject(reason);
-        Loan savedLoan = loanRepository.save(loan);
+        Loan savedLoan = saveAndPublish(loan);
         
         return LoanResponse.from(savedLoan);
     }
@@ -104,7 +111,7 @@ public class LoanManagementService {
         customerCreditService.reserveCredit(loan.getCustomerId(), loan.getPrincipalAmount());
         
         loan.disburse();
-        Loan savedLoan = loanRepository.save(loan);
+        Loan savedLoan = saveAndPublish(loan);
         
         return LoanResponse.from(savedLoan);
     }
@@ -126,7 +133,7 @@ public class LoanManagementService {
             customerCreditService.releaseCredit(loan.getCustomerId(), loan.getPrincipalAmount());
         }
         
-        Loan savedLoan = loanRepository.save(loan);
+        Loan savedLoan = saveAndPublish(loan);
         
         return LoanResponse.from(savedLoan);
     }
@@ -164,8 +171,22 @@ public class LoanManagementService {
             .orElseThrow(() -> LoanNotFoundException.withId(loanId));
         
         loan.cancel(reason);
-        Loan savedLoan = loanRepository.save(loan);
+        Loan savedLoan = saveAndPublish(loan);
         
         return LoanResponse.from(savedLoan);
+    }
+
+    /**
+     * Saves the aggregate and hands its pending events to the outbox port
+     * inside the same transaction, then clears them from the aggregate.
+     */
+    private Loan saveAndPublish(Loan loan) {
+        List<DomainEvent> events = List.copyOf(loan.getDomainEvents());
+        Loan savedLoan = loanRepository.save(loan);
+        if (!events.isEmpty()) {
+            eventPublisher.publish(savedLoan, events);
+        }
+        loan.clearDomainEvents();
+        return savedLoan;
     }
 }
