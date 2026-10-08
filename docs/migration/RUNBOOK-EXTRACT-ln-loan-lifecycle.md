@@ -153,7 +153,7 @@ Rollback triggers (measured from the start of step 2 (d), any one):
 | 5xx rate on `/api/v1/loans/**` | > 1 % over 10 minutes |
 | `CUSTOMER_SERVICE_UNAVAILABLE` (503) on disburse | > 5 % over 10 minutes |
 | `consumer.dlq.messages{group=cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1}` | > 0 in the window |
-| `increase(outbox_parked_events_total[10m])` | > 0 |
+| Platform alert `OutboxEventsParked` (`outbox_parked_events_total`, 15 minutes) | fires for this service |
 | `outbox_oldest_pending_age_seconds` (once the relay is on) | > 300 s |
 | Reconcile re-run against the frozen monolith snapshot | any `|f` line |
 
@@ -177,8 +177,8 @@ ADR-021 decision 4 (adr-runbooks #10, e6dd76a), the rule for every service's out
 
 - **Payload errors** (`RecordTooLargeException`, `SerializationException`, `InvalidTopicException`): the row
   can never be sent as it is. The relay parks it at once (`parked_at`, `park_reason = 'payload error: ...'`,
-  `last_error`), counts it in `outbox_parked_events_total{exception="<simple class name>"}` (alert on any
-  increase) and the batch continues.
+  `last_error`), counts it in `outbox_parked_events_total{exception="<simple class name>"}` (platform alert
+  `OutboxEventsParked`) and the batch continues.
 - **Every other error** (Kafka retryable errors such as timeouts, not enough replicas, leader or network errors;
   the relay's own send timeout; SASL or topic authorization; a producer that cannot be built; anything
   unclassified) never parks a row, however long it lasts. The batch stops, **nothing is marked** (no attempt,
@@ -192,8 +192,7 @@ Consumers must tolerate that until the row is replayed (they de-duplicate on `ev
 
 Alerts: `outbox_oldest_pending_age_seconds{service="svc-ln-loan-lifecycle"}` for a stalled relay or an outage
 (pages the squad above 900 s for 5 minutes, Kafka guide 5f7d546); `rate(outbox_send_failures_total[5m])` by `exception` to see why
-(authorization classes point at the IRSA role's MSK policy, topic existence or ACLs); any increase of
-`outbox_parked_events_total{exception}` (a payload error, or `OperatorPark`); `outbox_parked_rows` for the rows parked now;
+(authorization classes point at the IRSA role's MSK policy, topic existence or ACLs); parked rows raise the platform alert `OutboxEventsParked` (any increase of `outbox_parked_events_total` over 15 minutes, warning, routed by the `squad` label; the chart ships no parked alert rule); its `exception` label is a payload error class or `OperatorPark`; `outbox_parked_rows` for the rows parked now;
 `outbox_pending_events` for the backlog.
 
 Find the head of the queue and the parked rows:
