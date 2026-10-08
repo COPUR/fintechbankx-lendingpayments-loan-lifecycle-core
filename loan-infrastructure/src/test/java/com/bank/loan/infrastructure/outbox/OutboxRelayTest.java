@@ -227,6 +227,7 @@ class OutboxRelayTest {
         assertThat(meters.find("outbox.parked.events").tag("exception", exceptionClass).counter()).isNotNull();
         assertThat(meters.get("outbox.parked.events").tag("exception", exceptionClass).counter().count()).isEqualTo(1.0);
         assertThat(failures(exceptionClass)).isZero();
+        assertThat(poison.isParkCounted()).isTrue();          // the relay counted it already
     }
 
     static Stream<Arguments> payloadErrors() {
@@ -237,6 +238,34 @@ class OutboxRelayTest {
                 "SerializationException: Can't convert value"),
             Arguments.of(new KafkaProducerException(null, "send failed", new InvalidTopicException("bad name")),
                 "InvalidTopicException: bad name"));
+    }
+
+    /** Mandates 9b9374c: an operator park (runbook SQL) is counted once, exception="OperatorPark". */
+    @Test
+    void anOperatorParkIsCountedOnceByTheRelay() {
+        OutboxEventJpaEntity operatorParked = row("LOAN-O");
+        // What the runbook's operator SQL leaves behind: parked with a reason, not yet counted.
+        org.springframework.test.util.ReflectionTestUtils.setField(operatorParked, "parkedAt", NOW);
+        org.springframework.test.util.ReflectionTestUtils.setField(operatorParked, "parkReason", "operator: INC-1 ACL");
+        when(outbox.tryRelayLock(anyLong())).thenReturn(true);
+        when(outbox.findUncountedParks()).thenReturn(List.of(operatorParked)).thenReturn(List.of());
+        when(outbox.findUnpublishedBatch(50)).thenReturn(List.of());
+
+        relay.relayOnce();
+        relay.relayOnce();
+
+        assertThat(operatorParked.isParkCounted()).isTrue();
+        assertThat(meters.get("outbox.parked.events").tag("exception", "OperatorPark").counter().count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void parksAreNotCountedByAReplicaWithoutTheRelayLock() {
+        when(outbox.tryRelayLock(anyLong())).thenReturn(false);
+
+        relay.relayOnce();
+
+        verify(outbox, never()).findUncountedParks();
+        assertThat(meters.find("outbox.parked.events").counters()).isEmpty();
     }
 
     @Test

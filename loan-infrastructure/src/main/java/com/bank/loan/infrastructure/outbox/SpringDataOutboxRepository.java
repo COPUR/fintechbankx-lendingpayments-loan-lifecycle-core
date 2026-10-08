@@ -36,6 +36,10 @@ public interface SpringDataOutboxRepository extends JpaRepository<OutboxEventJpa
 
     long countByParkedAtIsNotNull();
 
+    /** Parked rows not yet counted in outbox_parked_events_total: operator parks done in SQL. */
+    @Query("select e from OutboxEventJpaEntity e where e.parkedAt is not null and e.parkCounted = false")
+    List<OutboxEventJpaEntity> findUncountedParks();
+
     @Query("select min(e.occurredAt) from OutboxEventJpaEntity e where e.publishedAt is null and e.parkedAt is null")
     Optional<Instant> oldestPendingOccurredAt();
 }

@@ -45,6 +45,18 @@ public class OutboxConfiguration {
     }
 
     /**
+     * Rows parked right now (outbox_parked_rows). Not "outbox.parked.events":
+     * that is the relay's counter (outbox_parked_events_total) and Prometheus
+     * refuses a gauge and a counter sharing a base name.
+     */
+    @Bean
+    Gauge outboxParkedRowsGauge(MeterRegistry registry, SpringDataOutboxRepository outbox) {
+        return Gauge.builder("outbox.parked.rows", outbox, SpringDataOutboxRepository::countByParkedAtIsNotNull)
+            .description("Loan events parked right now (payload error, or by an operator with a reason)")
+            .register(registry);
+    }
+
+    /**
      * Age of the oldest event still waiting (outbox_oldest_pending_age_seconds,
      * the platform meter name); 0 when the backlog is empty. The outage alert:
      * under ADR-021 decision 4 only payload errors park a row, so any other

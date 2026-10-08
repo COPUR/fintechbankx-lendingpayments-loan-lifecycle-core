@@ -478,6 +478,30 @@ class LoanLifecycleServiceIT {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void anOperatorParkIsSkippedAndCountedOnceAsOperatorPark() throws Exception {
+        String loanId = createLoan("6000.00", 12, "6.0");
+        // The runbook's operator park, run as the runtime role (it has UPDATE on outbox_event).
+        jdbc.update("""
+            update sc_ln_loan_lifecycle.outbox_event
+            set parked_at = now(), park_reason = 'operator: INC-1 head row blocks the relay'
+            where aggregate_id = ? and published_at is null and parked_at is null
+            """, loanId);
+        when(kafka.send(any(ProducerRecord.class))).thenReturn(CompletableFuture.completedFuture(null));
+        var meters = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        OutboxRelay relay = new OutboxRelay(outbox, kafka, new TransactionTemplate(transactionManager),
+            Clock.systemUTC(), 100, Duration.ofSeconds(35), Duration.ofDays(7), meters);
+
+        assertThat(relay.relayOnce()).isZero();
+        relay.relayOnce();
+
+        assertThat(meters.get("outbox.parked.events").tag("exception", "OperatorPark").counter().count()).isEqualTo(1.0);
+        assertThat(jdbc.queryForObject("""
+            select bool_and(park_counted) from sc_ln_loan_lifecycle.outbox_event where aggregate_id = ?
+            """, Boolean.class, loanId)).isTrue();
+    }
+
+    @Test
     void unknownLoanIsA404WithTheInteractionId() throws Exception {
         mvc.perform(asCustomer(get("/api/v1/loans/{id}", "LOAN-MISSING")))
             .andExpect(status().isNotFound())

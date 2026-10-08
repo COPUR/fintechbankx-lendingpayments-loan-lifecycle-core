@@ -42,13 +42,15 @@ import java.util.concurrent.TimeoutException;
  *   tagged with the exception's simple class name (never an id).</li>
  * </ul>
  * Only an operator parks such a row, by hand and with a recorded park_reason
- * (runbook section 7). The outage alert is outbox_oldest_pending_age_seconds.
+ * (runbook section 7); the relay counts each such park once, under its lock,
+ * as outbox.parked.events{exception="OperatorPark"} (park_counted, V8). The outage alert is outbox_oldest_pending_age_seconds.
  */
 public class OutboxRelay {
 
     static final long RELAY_LOCK_KEY = 0x6C6E5F6F7574L; // "ln_out"
     static final String SEND_FAILURES = "outbox.send.failures";
     static final String PARKED_EVENTS = "outbox.parked.events";
+    static final String OPERATOR_PARK = "OperatorPark";
     static final Duration BACKOFF_START = Duration.ofSeconds(1);
     static final Duration BACKOFF_MAX = Duration.ofMinutes(5);
     private static final Logger log = LoggerFactory.getLogger(OutboxRelay.class);
@@ -89,6 +91,7 @@ public class OutboxRelay {
             if (!outbox.tryRelayLock(RELAY_LOCK_KEY)) {
                 return 0;
             }
+            countOperatorParks();
             List<OutboxEventJpaEntity> batch = outbox.findUnpublishedBatch(batchSize);
             int sent = 0;
             boolean failed = false;
@@ -104,7 +107,7 @@ public class OutboxRelay {
                 } catch (Exception e) {
                     if (isPayloadError(e)) {
                         String reason = describe(e);
-                        meters.counter(PARKED_EVENTS, "exception", unwrap(e).getClass().getSimpleName()).increment();
+                        recordParked(unwrap(e).getClass().getSimpleName());
                         row.markFailed(reason);
                         row.park(clock.instant(), "payload error: " + reason);
                         log.error("Outbox relay parked event {} for {}: payload error {}; later events continue (ADR-021 decision 4)",
@@ -136,10 +139,33 @@ public class OutboxRelay {
         return false;
     }
 
+    /** Counts a failed send, tagged with the unwrapped exception's simple class name only (never ids). */
+    public void recordSendFailure(Throwable failure) {
+        meters.counter(SEND_FAILURES, "exception", unwrap(failure).getClass().getSimpleName()).increment();
+    }
+
+    /** Counts a parked row (outbox_parked_events_total); alert on any increase. */
+    public void recordParked(String exceptionClass) {
+        meters.counter(PARKED_EVENTS, "exception", exceptionClass).increment();
+    }
+
+    /**
+     * Operator parks happen in SQL (runbook section 7); count each once with
+     * exception="OperatorPark". Runs only while this replica holds the relay
+     * lock, so one replica counts.
+     */
+    private void countOperatorParks() {
+        for (OutboxEventJpaEntity parked : outbox.findUncountedParks()) {
+            parked.markParkCounted();
+            recordParked(OPERATOR_PARK);
+            log.warn("Outbox event {} for {} was parked by an operator", parked.getEventId(), parked.getTopic());
+        }
+    }
+
     /** Not the row's fault: count it by class, mark nothing, back off (1 s doubling to 5 min). */
     private void backOff(Exception e) {
         Throwable cause = unwrap(e);
-        meters.counter(SEND_FAILURES, "exception", cause.getClass().getSimpleName()).increment();
+        recordSendFailure(e);
         failureStreak++;
         Duration backoff = BACKOFF_START.multipliedBy(1L << Math.min(failureStreak - 1, 20));
         if (backoff.compareTo(BACKOFF_MAX) > 0) {

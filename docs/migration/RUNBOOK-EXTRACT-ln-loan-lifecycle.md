@@ -189,7 +189,8 @@ Consumers must tolerate that until the row is replayed (they de-duplicate on `ev
 Alerts: `outbox_oldest_pending_age_seconds{service="svc-ln-loan-lifecycle"}` for a stalled relay or an outage
 (pages the squad above 900 s for 5 minutes, Kafka guide 5f7d546); `rate(outbox_send_failures_total[5m])` by `exception` to see why
 (authorization classes point at the IRSA role's MSK policy, topic existence or ACLs); any increase of
-`outbox_parked_events_total{exception}` (a payload error parked a row); `outbox_pending_events` for the backlog.
+`outbox_parked_events_total{exception}` (a payload error, or `OperatorPark`); `outbox_parked_rows` for the rows parked now;
+`outbox_pending_events` for the backlog.
 
 Find the head of the queue and the parked rows:
 
@@ -202,7 +203,9 @@ LIMIT 20;
 ```
 
 Operator park (only when the head row itself is the problem and the incident lead agrees; the relay never
-does this for a non-payload error). The reason is mandatory and goes into the incident record too:
+does this for a non-payload error). The reason is mandatory and goes into the incident record too. The
+relay counts the park once on its next run, `outbox_parked_events_total{exception="OperatorPark"}` (column
+`park_counted`, V8):
 
 ```sql
 UPDATE sc_ln_loan_lifecycle.outbox_event
@@ -214,6 +217,6 @@ Replay, after fixing the cause:
 
 ```sql
 UPDATE sc_ln_loan_lifecycle.outbox_event
-SET parked_at = NULL, park_reason = NULL, attempts = 0, last_error = NULL
+SET parked_at = NULL, park_reason = NULL, park_counted = false, attempts = 0, last_error = NULL
 WHERE event_id = '<event id>' AND published_at IS NULL AND parked_at IS NOT NULL;
 ```

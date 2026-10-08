@@ -27,17 +27,21 @@ class OutboxConfigurationTest {
     void gaugesUseThePlatformOutboxMetricNames() {
         SpringDataOutboxRepository outbox = mock(SpringDataOutboxRepository.class);
         when(outbox.countByPublishedAtIsNullAndParkedAtIsNull()).thenReturn(4L);
+        when(outbox.countByParkedAtIsNotNull()).thenReturn(1L);
         when(outbox.oldestPendingOccurredAt()).thenReturn(Optional.of(NOW.minusSeconds(90)));
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         OutboxConfiguration configuration = new OutboxConfiguration();
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
 
         configuration.outboxPendingGauge(registry, outbox);
+        configuration.outboxParkedRowsGauge(registry, outbox);
         configuration.outboxOldestPendingAgeGauge(registry, outbox, clock);
 
         assertThat(registry.get("outbox.pending.events").gauge().value()).isEqualTo(4.0);
-        // outbox.parked.events is the relay's counter (outbox_parked_events_total), never a gauge.
+        // outbox.parked.events is the relay's counter (outbox_parked_events_total), never a gauge;
+        // the rows parked right now are outbox.parked.rows.
         assertThat(registry.find("outbox.parked.events").gauge()).isNull();
+        assertThat(registry.get("outbox.parked.rows").gauge().value()).isEqualTo(1.0);
         assertThat(registry.get("outbox.oldest.pending.age.seconds").gauge().value()).isEqualTo(90.0);
         assertThat(registry.get("outbox.oldest.pending.age.seconds").gauge().getId().getBaseUnit()).isEqualTo("seconds");
     }
