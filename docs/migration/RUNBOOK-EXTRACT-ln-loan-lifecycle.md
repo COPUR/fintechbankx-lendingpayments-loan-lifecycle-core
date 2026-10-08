@@ -85,8 +85,41 @@ loan, second run, delta checks.
 | Payments slice ready to cut over in the same window, publishing `evt.pay.payment.loan-payment-completed.v1` | loan step 2 | loan and payments writes move together; repayments must land in exactly one place |
 | `evt.ln.loan.*`, `evt.ln.loan.dlq.v1`, `evt.pay.payment.loan-payment-completed.v1` in the asyncapi catalog and created on the cluster (catalog PR pending) | step 3 (consumer), step 4 (relay) | the service never creates topics |
 | ConfigMap `rds-ca-bundle` (key `global-bundle.pem`) published in namespace `lending` by trust-manager (mesh repo `k8s/platform/cert-manager/bundle-rds-ca.yaml`); `DB_URL` = Terraform output `jdbc_url` (`sslmode=verify-full&sslrootcert=/etc/ssl/rds/global-bundle.pem`) | step 1 | the pods mount the bundle to verify Aurora's certificate; without it they do not start |
-| Mesh ALLOW rules for the callers in README "Callers" | step 2 | namespace `lending` is default-deny |
+| Mesh team has applied the requests in "Requests to the mesh team" below (A: gateway route, B: Aurora and MSK egress, C: callee ALLOW rules, plus the README "Callers" ALLOW rules) | step 1 (B), step 2 (A, C) | namespace `lending` is default-deny and outbound traffic is `REGISTRY_ONLY`: without B the readiness check (`db`) fails and the pods never become ready |
 | No INITIATED / PROCESSING monolith payments | step 2 final delta | in-flight repayments finish in the monolith |
+
+### Requests to the mesh team
+
+Raise these in `fintechbankx-platform-mesh-security-service-mesh` (owner: platform mesh squad) before step 1.
+The chart ships no Istio objects; everything below is theirs to add.
+
+**A. Gateway route (public paths).** Host: the API host of the environment. Route
+`/api/v1/loans` and `/api/v1/loans/*` (methods `GET`, `POST`) to
+`loan-lifecycle-service.lending.svc.cluster.local:8080`, with the platform's forwarded-header rules and
+Keycloak `RequestAuthentication` (first-party web, mobile and staff tokens; `aud` must contain
+`svc-ln-loan-lifecycle`). No other path of this service is public; `8081` (actuator) never is.
+
+**B. Egress under `REGISTRY_ONLY` (ServiceEntry, `MESH_EXTERNAL`, `resolution: DNS`, exported to `lending`).**
+
+| Destination | Hosts | Port / protocol | Why |
+|---|---|---|---|
+| Aurora PostgreSQL | cluster writer endpoint and reader endpoint (Terraform outputs; `jdbc_url` host and `reader_endpoint`) | 5432 `TLS` (the service does its own TLS, `sslmode=verify-full`) | JDBC; readiness group includes `db`, so without it the pods never become ready |
+| Amazon MSK | the broker hostnames of the IAM listener (`KAFKA_BOOTSTRAP_SERVERS`) | 9098 `TLS` | outbox relay and repayment consumer (IAM auth via IRSA) |
+| AWS STS (regional endpoint) | `sts.<region>.amazonaws.com` | 443 `TLS` | IRSA web-identity exchange used by the MSK IAM client |
+
+The Flyway migration Job (Helm hook) runs without a sidecar by default (`migration.istioSidecar: false`),
+so it is not subject to the egress policy but only reaches Aurora; tell the mesh team if the cluster runs
+native sidecars, then turn the sidecar on.
+
+**C. Callee ALLOW rules (this service as the caller, principal `cluster.local/ns/lending/sa/loan-lifecycle-service`).**
+
+| Callee namespace / workload | Port | Paths | Why |
+|---|---|---|---|
+| `customer` / `customer-profile-kyc-service` | 8080 | `GET /api/v1/customers/*/credit`, `POST /api/v1/customers/*/credit/reserve`, `POST /api/v1/customers/*/credit/release` | credit position, reserve, release (`CUSTOMER_CREDIT_ADAPTER=http`) |
+| `identity` / `keycloak` | 8080 | `POST /realms/fintechbankx/protocol/openid-connect/token` and the realm's `certs` (JWKS) | client-credentials token and JWT validation |
+| `observability` / `otel-collector` | 4317, 4318 | OTLP | traces |
+
+Inbound ALLOW rules for this service's own callers are listed in README "Callers".
 
 ## 4. Cutover plan
 
@@ -130,5 +163,5 @@ Rollback triggers (measured from the start of step 2 (d), any one):
 - [ ] asyncapi catalog PR for `svc-ln-loan-lifecycle.yaml`; topics created (fintechbankx-platform-event-streaming-kafka)
 - [x] Runtime role separated from the schema owner: V4 grants, Flyway as the owner in a Helm hook Job only, pods without the owner credential (`DatabaseMigrationIT`, `LoanLifecycleServiceIT`)
 - [ ] DBA bootstrap of `loan_lifecycle_owner` and `loan_lifecycle_app` per environment, secrets filled
-- [ ] Mesh ALLOW rules for the callers in README
+- [ ] Mesh team requests A (gateway route), B (Aurora, MSK, STS egress), C (callee ALLOW rules) applied, plus the ALLOW rules for the callers in README
 - [ ] Production backfill and reconciliation report attached here
