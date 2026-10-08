@@ -34,6 +34,16 @@ spring:
         order_inserts: true
         order_updates: true
   flyway:
+    # Migrations run as the schema owner (DB_MIGRATION_USERNAME / _PASSWORD,
+    # secret <env>/loan-lifecycle-service/db-migration), deployed as the Helm
+    # pre-install/pre-upgrade Job "migrate"; the pods get only the runtime
+    # role (DB_USERNAME, secret db-app) and run with SPRING_FLYWAY_ENABLED=false.
+    # V4 grants the runtime role its DML. Without DB_MIGRATION_* (local runs,
+    # tests without the split) Flyway uses the app credentials.
+    user: ${DB_MIGRATION_USERNAME:${spring.datasource.username}}
+    password: ${DB_MIGRATION_PASSWORD:${spring.datasource.password:}}
+    placeholders:
+      runtime_role: ${spring.datasource.username}
     schemas: sc_ln_loan_lifecycle
     default-schema: sc_ln_loan_lifecycle
     create-schemas: true

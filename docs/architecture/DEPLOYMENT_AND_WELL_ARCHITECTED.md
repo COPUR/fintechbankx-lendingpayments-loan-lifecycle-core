@@ -36,6 +36,7 @@ API gateway / Istio ingress ──▶ loan-lifecycle-service pods (EKS, 3..12, H
 
 - Kafka topics for `evt.ln.loan.*.v1` are not yet created on the platform cluster; the IAM produce policy is applied once `msk_cluster_arn` is set.
 - The Keycloak client `svc-ln-loan-lifecycle` with the `service` realm role must exist in the platform realm (identity repo).
-- The application DB role (`loan_lifecycle_app`) is created by a DBA bootstrap step, not by Terraform, so Terraform never holds the password.
+- The DB roles (schema owner `loan_lifecycle_owner`, runtime `loan_lifecycle_app`) are created by a DBA bootstrap step, not by Terraform, so Terraform never holds the passwords; Terraform creates their secrets (`<env>/loan-lifecycle-service/db-migration`, `.../db-app`). Flyway runs as the owner only in the Helm pre-install/pre-upgrade Job; the pods hold the runtime role and run with `SPRING_FLYWAY_ENABLED=false`.
+- The migration Job runs without an Istio sidecar by default (a classic sidecar keeps a Job from completing); switch `migration.istioSidecar` on once the cluster runs native sidecars.
 - `microservice-base` is referenced at `ref=main`; pin a tag once the modules repo publishes releases.
 - No load test yet; HPA targets are starting values.

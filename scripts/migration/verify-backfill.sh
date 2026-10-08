@@ -34,8 +34,12 @@ done
 psql_q -d "$src_db" -f "$root/db/backfill/test/monolith_fixture.sql"
 
 psql_q -d "$dst_db" -c "CREATE SCHEMA sc_ln_loan_lifecycle"
+# Flyway placeholders, filled the way Flyway fills them: the runtime role is
+# the connecting role here, so V4 takes its single-user path.
+runtime_role="${PGUSER:-$(id -un)}"
 for migration in $(ls "$root"/loan-infrastructure/src/main/resources/db/migration/V*.sql | sort -V); do
-  PGOPTIONS="-c search_path=sc_ln_loan_lifecycle" psql_q -d "$dst_db" -f "$migration"
+  sed "s/\${runtime_role}/$runtime_role/g" "$migration" \
+    | PGOPTIONS="-c search_path=sc_ln_loan_lifecycle" psql_q -d "$dst_db" -f -
 done
 
 check() {

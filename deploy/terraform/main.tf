@@ -42,8 +42,9 @@ module "service_base" {
 # --- Encryption -------------------------------------------------------------
 
 # The tag lets the platform's External Secrets Operator role (terraform-modules
-# stacks/platform, module external-secrets-irsa) decrypt the db-app secret it
-# syncs into the cluster; the key policy keeps the account default, so that
+# stacks/platform, module external-secrets-irsa) decrypt the db-app and
+# db-migration secrets it syncs into the cluster; the key policy keeps the
+# account default, so that
 # IAM grant is enough. The service's own pods never read Secrets Manager.
 resource "aws_kms_key" "database" {
   description             = "Encrypts ${local.database} storage, snapshots, logs and credentials"
@@ -155,17 +156,30 @@ resource "aws_rds_cluster_instance" "database" {
   }
 }
 
-# Application credential (role loan_lifecycle_app, owner of schema
-# sc_ln_loan_lifecycle). The DBA bootstrap in docs/migration creates the role
-# and writes {"username", "password"} here; Terraform never sees the value.
-# External Secrets Operator (ClusterSecretStore aws-secrets-manager) syncs it
-# into the pod's Kubernetes Secret.
+# Runtime credential (role loan_lifecycle_app, DML only: V4 grants). The DBA
+# bootstrap in docs/migration creates the role and writes
+# {"username", "password"} here; Terraform never sees the value. External
+# Secrets Operator (ClusterSecretStore aws-secrets-manager) syncs it into the
+# pods' Kubernetes Secret. Same name as terraform-modules aurora-postgresql
+# app_secret_name.
 resource "aws_secretsmanager_secret" "app_database" {
   # <env>/<service-slug>/...: the platform ESO role may read only
   # secret:<env>/*, so "<env>-<slug>/db-app" would be refused (same shape as
   # <env>/<service-slug>/oidc-client).
   name                    = "${var.environment}/${local.service_slug}/db-app"
   description             = "Application database credential for ${local.service_id}"
+  kms_key_id              = aws_kms_key.database.arn
+  recovery_window_in_days = 7
+}
+
+# Schema owner credential (role loan_lifecycle_owner, owns sc_ln_loan_lifecycle;
+# Flyway only). Created and filled by the DBA bootstrap like the runtime one;
+# synced only by the chart's pre-install/pre-upgrade migration Job (Helm value
+# migration.remoteSecretName), never by the service pods. Same name as
+# terraform-modules aurora-postgresql migration_secret_name.
+resource "aws_secretsmanager_secret" "migration_database" {
+  name                    = "${var.environment}/${local.service_slug}/db-migration"
+  description             = "Schema owner (Flyway migration) credential for ${local.service_id}"
   kms_key_id              = aws_kms_key.database.arn
   recovery_window_in_days = 7
 }

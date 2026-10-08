@@ -58,8 +58,8 @@ class ErrorStatusOverHttpIT {
 
     @BeforeEach
     void customerToken() {
-        jdbc.update("delete from sc_ln_loan_lifecycle.outbox_event");
-        jdbc.update("delete from sc_ln_loan_lifecycle.loan");
+        PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.outbox_event");
+        PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.loan");
         when(jwtDecoder.decode(anyString())).thenReturn(Jwt.withTokenValue("t").header("alg", "RS256")
             .subject("5f0c2b7e-8d1a-4c3e-9b6f-2a7d4e1c9b30").claim("customer_id", "CUST-12345678")
             .claim("realm_access", Map.of("roles", List.of("customer")))

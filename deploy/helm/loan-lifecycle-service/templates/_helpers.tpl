@@ -33,3 +33,7 @@ Usage: include "loan.remoteKey" (list "externalSecret.remoteSecretName" .Values.
 {{- end -}}
 {{- $key -}}
 {{- end -}}
+
+{{- define "loan.migrationName" -}}
+{{ include "loan.name" . }}-db-migration
+{{- end -}}

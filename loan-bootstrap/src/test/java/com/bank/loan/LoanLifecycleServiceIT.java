@@ -92,12 +92,12 @@ class LoanLifecycleServiceIT {
 
     @BeforeEach
     void cleanTables() {
-        jdbc.update("delete from sc_ln_loan_lifecycle.inbox_message");
-        jdbc.update("delete from sc_ln_loan_lifecycle.repayment_allocation");
-        jdbc.update("delete from sc_ln_loan_lifecycle.repayment");
-        jdbc.update("delete from sc_ln_loan_lifecycle.credit_reservation_generation");
-        jdbc.update("delete from sc_ln_loan_lifecycle.outbox_event");
-        jdbc.update("delete from sc_ln_loan_lifecycle.loan");
+        PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.inbox_message");
+        PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.repayment_allocation");
+        PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.repayment");
+        PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.credit_reservation_generation");
+        PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.outbox_event");
+        PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.loan");
     }
 
     @Test
@@ -110,6 +110,37 @@ class LoanLifecycleServiceIT {
 
         assertThat(tables).containsExactly("credit_reservation_generation", "inbox_message", "loan", "loan_installment",
             "outbox_event", "repayment", "repayment_allocation");
+    }
+
+    /**
+     * The service connects as a runtime role with DML only: it cannot run DDL
+     * (it does not own the tables or the schema) and cannot rewrite the
+     * repayment ledger, which the code only inserts into.
+     */
+    @Test
+    void theRuntimeRoleCannotRunDdlOrRewriteTheRepaymentLedger() {
+        assertThat(jdbc.queryForObject("select current_user", String.class)).isEqualTo(PostgresTestDatabase.RUNTIME_ROLE);
+        JdbcTemplate runtime = PostgresTestDatabase.runtime();
+
+        assertThatThrownBy(() -> runtime.execute("create table sc_ln_loan_lifecycle.shadow (id int)"))
+            .rootCause().hasMessageContaining("permission denied for schema sc_ln_loan_lifecycle");
+        assertThatThrownBy(() -> runtime.execute("alter table sc_ln_loan_lifecycle.loan add column shadow int"))
+            .rootCause().hasMessageContaining("must be owner of").hasMessageContaining("loan");
+        assertThatThrownBy(() -> runtime.execute("drop table sc_ln_loan_lifecycle.outbox_event"))
+            .rootCause().hasMessageContaining("must be owner of").hasMessageContaining("outbox_event");
+        assertThatThrownBy(() -> runtime.execute("truncate sc_ln_loan_lifecycle.loan"))
+            .rootCause().hasMessageContaining("permission denied for table loan");
+        assertThatThrownBy(() -> runtime.update("update sc_ln_loan_lifecycle.repayment set amount = 0"))
+            .rootCause().hasMessageContaining("permission denied for table repayment");
+        assertThatThrownBy(() -> runtime.update("delete from sc_ln_loan_lifecycle.repayment_allocation"))
+            .rootCause().hasMessageContaining("permission denied for table repayment_allocation");
+        assertThatThrownBy(() -> runtime.update("delete from sc_ln_loan_lifecycle.loan"))
+            .rootCause().hasMessageContaining("permission denied for table loan");
+        assertThatThrownBy(() -> runtime.queryForObject(
+                "select count(*) from sc_ln_loan_lifecycle.flyway_schema_history", Integer.class))
+            .rootCause().hasMessageContaining("permission denied for table flyway_schema_history");
+
+        assertThat(runtime.queryForObject("select count(*) from sc_ln_loan_lifecycle.loan", Integer.class)).isZero();
     }
 
     @Test

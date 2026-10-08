@@ -101,11 +101,11 @@ class CustomerCreditHttpIT {
     @BeforeEach
     void reset() {
         probe = jdbc;
-        jdbc.update("delete from sc_ln_loan_lifecycle.repayment_allocation");
-        jdbc.update("delete from sc_ln_loan_lifecycle.repayment");
-        jdbc.update("delete from sc_ln_loan_lifecycle.credit_reservation_generation");
-        jdbc.update("delete from sc_ln_loan_lifecycle.outbox_event");
-        jdbc.update("delete from sc_ln_loan_lifecycle.loan");
+        PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.repayment_allocation");
+        PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.repayment");
+        PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.credit_reservation_generation");
+        PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.outbox_event");
+        PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.loan");
         responses.clear();
         calls.clear();
         responses.put("GET " + CREDIT, new Stubbed(200, POSITION));

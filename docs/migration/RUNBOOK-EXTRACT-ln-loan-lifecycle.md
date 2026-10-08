@@ -30,13 +30,36 @@ Extraction of the Loan aggregate from `enterprise-loan-management-system` into
 | `compliance_reports` (V13) | `svc-cmp-evidence` | separate slice |
 | `loan_service.*` (loan/V1) | not migrated | parallel schema from an earlier split attempt; confirm it has no rows before the cutover |
 
-Migrations: `loan-infrastructure/src/main/resources/db/migration/V1..V3`. The service never reads
+Migrations: `loan-infrastructure/src/main/resources/db/migration/V1..V4`. The service never reads
 monolith tables and the monolith must not read `sc_ln_loan_lifecycle`.
+
+### Database roles
+
+| Role | Secret (`{"username","password"}`) | Used by | Privileges |
+|---|---|---|---|
+| schema owner `loan_lifecycle_owner` | `<env>/loan-lifecycle-service/db-migration` (Terraform output `migration_db_secret_name`, Helm `migration.remoteSecretName`) | Flyway only, in the Helm pre-install/pre-upgrade Job (`migrate`) | owns `sc_ln_loan_lifecycle` and its tables; needs `CREATE` on the database |
+| runtime `loan_lifecycle_app` (`DB_USERNAME`) | `<env>/loan-lifecycle-service/db-app` (Terraform output `app_db_secret_name`, Helm `externalSecret.remoteSecretName`) | the service pods | granted by V4 (Flyway placeholder `runtime_role`): `USAGE` on the schema; `SELECT, INSERT, UPDATE` on `loan`, `credit_reservation_generation`; `SELECT, INSERT, UPDATE, DELETE` on `loan_installment`, `outbox_event`; `SELECT, INSERT` on `repayment`, `repayment_allocation`, `inbox_message`. No DDL, no `TRUNCATE` (`LoanLifecycleServiceIT.theRuntimeRoleCannotRunDdlOrRewriteTheRepaymentLedger`) |
+
+**DBA bootstrap, per environment, before the first deploy** (with the RDS master credential, Terraform
+output `master_user_secret_arn`):
+
+1. `CREATE ROLE loan_lifecycle_owner LOGIN PASSWORD '<generated>'; GRANT CREATE ON DATABASE db_ln_loan_lifecycle_<env> TO loan_lifecycle_owner;`
+2. `CREATE ROLE loan_lifecycle_app LOGIN PASSWORD '<generated>';` (no membership in the owner, no `CREATE`)
+3. Write both `{"username","password"}` documents to the two secrets Terraform created; set the Helm values
+   `migration.remoteSecretName` and `externalSecret.remoteSecretName` to their names.
+4. `helm upgrade --install` runs the migration Job first (it waits for External Secrets to sync the owner
+   credential), then the pods start with `SPRING_FLYWAY_ENABLED=false`. Both hook resources are deleted once
+   they succeed, which removes the owner credential's Kubernetes Secret.
+
+If an environment was ever migrated with a single role, V4 recorded a no-op; grant the runtime role by hand
+with the statements in `V4__grant_runtime_role_least_privilege.sql` before switching the pods to it.
 
 ## 2. Backfill and reconciliation
 
 `db/backfill/run-backfill.sh "<monolith conninfo>" "<loan service conninfo>" <currency>`
 
+- `<loan service conninfo>` connects as the schema owner (`db-migration` secret): the backfill stages
+  and upserts rows the runtime role may not write.
 - `<currency>` is **required** (ISO 4217): the monolith stores none and its code falls back to USD,
   so the book's currency is stated by whoever runs the migration. There is no default.
 - Refuses to run while any monolith payment is INITIATED or PROCESSING.
@@ -105,5 +128,7 @@ Rollback triggers (measured from the start of step 2 (d), any one):
 - [x] Delta backfill rehearsed with reconciliation in CI
 - [ ] Monolith anti-corruption client and write-freeze flag (enterprise-loan-management-system)
 - [ ] asyncapi catalog PR for `svc-ln-loan-lifecycle.yaml`; topics created (fintechbankx-platform-event-streaming-kafka)
+- [x] Runtime role separated from the schema owner: V4 grants, Flyway as the owner in a Helm hook Job only, pods without the owner credential (`DatabaseMigrationIT`, `LoanLifecycleServiceIT`)
+- [ ] DBA bootstrap of `loan_lifecycle_owner` and `loan_lifecycle_app` per environment, secrets filled
 - [ ] Mesh ALLOW rules for the callers in README
 - [ ] Production backfill and reconciliation report attached here
