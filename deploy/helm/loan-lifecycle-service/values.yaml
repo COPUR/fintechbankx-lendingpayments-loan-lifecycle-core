@@ -88,10 +88,14 @@ externalSecret:
   secretStoreRef:
     kind: ClusterSecretStore
     name: aws-secrets-manager
-  # Secrets Manager secret from deploy/terraform output app_db_secret_name.
+  # Keys must be <env>/loan-lifecycle-service/<name>: the platform ESO role may
+  # read only secret:<env>/* (the chart refuses anything else).
+  # Secrets Manager secret <env>/loan-lifecycle-service/db-app (deploy/terraform
+  # output app_db_secret_name).
   remoteSecretName: ""
-  # Secrets Manager secret holding this service's Keycloak client secret
-  # (property client_secret), used for client-credentials calls to customer.
+  # Secrets Manager secret <env>/loan-lifecycle-service/oidc-client holding this
+  # service's Keycloak client secret (property client_secret), used for
+  # client-credentials calls to customer.
   serviceClientSecretName: ""
   refreshInterval: 1h
 

@@ -2,6 +2,11 @@
 # cluster (db_ln_loan_lifecycle_<env>), encryption key, credentials and the
 # IRSA role its pods use. Shared platform pieces (log group, SSM parameters,
 # runtime secret) come from the platform microservice-base module.
+#
+# Known platform issue: microservice-base (ref=main) names its runtime secret
+# "<env>-<slug>/runtime", outside the secret:<env>/* path the platform ESO role
+# may read. Platform fixes it in terraform-modules #11; this service does not
+# read that secret and does not work around it here.
 
 locals {
   service_id   = "svc-ln-loan-lifecycle"
@@ -156,7 +161,10 @@ resource "aws_rds_cluster_instance" "database" {
 # External Secrets Operator (ClusterSecretStore aws-secrets-manager) syncs it
 # into the pod's Kubernetes Secret.
 resource "aws_secretsmanager_secret" "app_database" {
-  name                    = "${local.name}/db-app"
+  # <env>/<service-slug>/...: the platform ESO role may read only
+  # secret:<env>/*, so "<env>-<slug>/db-app" would be refused (same shape as
+  # <env>/<service-slug>/oidc-client).
+  name                    = "${var.environment}/${local.service_slug}/db-app"
   description             = "Application database credential for ${local.service_id}"
   kms_key_id              = aws_kms_key.database.arn
   recovery_window_in_days = 7
