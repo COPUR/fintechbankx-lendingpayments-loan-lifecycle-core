@@ -59,9 +59,9 @@ public class OutboxEventJpaEntity {
     @Column(name = "parked_at")
     private Instant parkedAt;
 
-    /** First failed send; the retryable-failure ceiling is measured from here. */
-    @Column(name = "first_failed_at")
-    private Instant firstFailedAt;
+    /** Why the row was parked: "payload error: ..." from the relay, or the operator's reason (V7). */
+    @Column(name = "park_reason", length = 512)
+    private String parkReason;
 
     @Column(name = "traceparent", length = 55, updatable = false)
     private String traceparent;
@@ -102,7 +102,7 @@ public class OutboxEventJpaEntity {
     public String getLastError() { return lastError; }
     public Instant getParkedAt() { return parkedAt; }
     public String getTraceparent() { return traceparent; }
-    public Instant getFirstFailedAt() { return firstFailedAt; }
+    public String getParkReason() { return parkReason; }
 
     void markPublished(Instant at) {
         this.publishedAt = at;
@@ -110,16 +110,18 @@ public class OutboxEventJpaEntity {
         this.lastError = null;
     }
 
-    void markFailed(String error, Instant at) {
-        if (firstFailedAt == null) {
-            this.firstFailedAt = at;
-        }
+    void markFailed(String error) {
         this.attempts++;
-        this.lastError = error == null ? null : error.substring(0, Math.min(error.length(), 512));
+        this.lastError = truncate(error);
     }
 
-    /** Takes the row out of the relay (non-retryable failure, or retryable for too long). */
-    void park(Instant at) {
+    /** Takes the row out of the relay; only payload errors do this automatically (ADR-021 decision 4). */
+    void park(Instant at, String reason) {
         this.parkedAt = at;
+        this.parkReason = truncate(reason);
+    }
+
+    private static String truncate(String text) {
+        return text == null ? null : text.substring(0, Math.min(text.length(), 512));
     }
 }

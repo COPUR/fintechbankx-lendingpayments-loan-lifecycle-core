@@ -1,14 +1,16 @@
 package com.bank.loan.infrastructure.outbox;
 
 import org.apache.kafka.clients.producer.ProducerRecord;
-import org.apache.kafka.common.errors.LeaderNotAvailableException;
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.errors.InvalidTopicException;
 import org.apache.kafka.common.errors.NetworkException;
 import org.apache.kafka.common.errors.NotEnoughReplicasException;
 import org.apache.kafka.common.errors.NotLeaderOrFollowerException;
 import org.apache.kafka.common.errors.RecordTooLargeException;
+import org.apache.kafka.common.errors.SaslAuthenticationException;
 import org.apache.kafka.common.errors.SerializationException;
 import org.apache.kafka.common.errors.TopicAuthorizationException;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -49,8 +51,9 @@ class OutboxRelayTest {
     private final SpringDataOutboxRepository outbox = mock(SpringDataOutboxRepository.class);
     private final KafkaTemplate<String, String> kafka = mock(KafkaTemplate.class);
     private final TransactionTemplate transactions = inlineTransactions();
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final OutboxRelay relay = new OutboxRelay(outbox, kafka, transactions,
-        Clock.fixed(NOW, ZoneOffset.UTC), 50, Duration.ofSeconds(1), Duration.ofDays(7));
+        Clock.fixed(NOW, ZoneOffset.UTC), 50, Duration.ofSeconds(1), Duration.ofDays(7), meters);
 
     @Test
     void anotherReplicaHoldingTheLockMeansNothingIsSent() {
@@ -78,10 +81,10 @@ class OutboxRelayTest {
         assertThat(first.getPublishedAt()).isEqualTo(NOW);
         assertThat(second.getPublishedAt()).isNull();
         assertThat(second.getParkedAt()).isNull();
-        assertThat(second.getAttempts()).isEqualTo(1);
-        assertThat(second.getFirstFailedAt()).isEqualTo(NOW);
-        assertThat(second.getLastError()).isEqualTo("TimeoutException: broker down");
+        assertThat(second.getAttempts()).isZero();   // ADR-021 decision 4: nothing is marked
+        assertThat(second.getLastError()).isNull();
         assertThat(third.getAttempts()).isZero();
+        assertThat(failures("TimeoutException")).isEqualTo(1.0);
         verify(kafka, times(2)).send(any(ProducerRecord.class));
     }
 
@@ -100,102 +103,105 @@ class OutboxRelayTest {
     }
 
     /**
-     * Retryable failures (Kafka RetriableException: timeouts, not enough
-     * replicas, broker unavailable; or the relay's own send timeout) never
-     * count toward parking: an outage only delays events, however many
-     * attempts it takes.
+     * ADR-021 decision 4 (adr-runbooks #10 e6dd76a): every error that is not
+     * a payload error (retryable, authorization, unclassified) never parks a
+     * row however long it lasts: the batch stops, nothing is marked, the
+     * relay backs off, and outbox.send.failures counts it by exception class.
      */
     @ParameterizedTest
-    @MethodSource("retryableFailures")
-    void retryableFailuresNeverCountTowardParking(Exception failure) {
+    @MethodSource("nonPayloadErrors")
+    void nonPayloadErrorsNeverParkOrMarkARowHoweverLongTheyLast(Exception failure, String exceptionClass) {
         MutableClock clock = new MutableClock(NOW);
         OutboxRelay relay = new OutboxRelay(outbox, kafka, transactions, clock, 50,
-            Duration.ofSeconds(1), Duration.ofDays(7));
+            Duration.ofSeconds(1), Duration.ofDays(7), meters);
         OutboxEventJpaEntity head = row("LOAN-R");
         OutboxEventJpaEntity later = row("LOAN-S");
         when(outbox.tryRelayLock(anyLong())).thenReturn(true);
         when(outbox.findUnpublishedBatch(50)).thenReturn(List.of(head, later));
         when(kafka.send(any(ProducerRecord.class))).thenAnswer(invocation -> CompletableFuture.failedFuture(failure));
 
-        for (int run = 0; run < 50; run++) {
+        for (int run = 0; run < 40; run++) {
             assertThat(relay.relayOnce()).isZero();
-            clock.advance(Duration.ofMinutes(20)); // 50 runs over 16 h 40 min
+            clock.advance(Duration.ofHours(3));               // 40 runs over five days, always past the backoff
         }
 
-        assertThat(head.getAttempts()).isEqualTo(50);
         assertThat(head.getParkedAt()).isNull();
-        assertThat(head.getFirstFailedAt()).isEqualTo(NOW);
-        assertThat(later.getAttempts()).isZero(); // order kept: nothing overtook the head
-        verify(kafka, times(50)).send(any(ProducerRecord.class));
+        assertThat(head.getAttempts()).isZero();
+        assertThat(head.getLastError()).isNull();
+        assertThat(later.getAttempts()).isZero();              // order kept: nothing overtook the head
+        assertThat(failures(exceptionClass)).isEqualTo(40.0);
+        verify(kafka, times(40)).send(any(ProducerRecord.class));
     }
 
-    static Stream<Exception> retryableFailures() {
+    static Stream<Arguments> nonPayloadErrors() {
         return Stream.of(
-            new org.apache.kafka.common.errors.TimeoutException("Expiring 1 record(s)"),
-            new NotEnoughReplicasException("Messages are rejected since there are fewer in-sync replicas than required"),
-            new NetworkException("The server disconnected before a response was received"),
-            new KafkaProducerException(null, "send failed", new NotLeaderOrFollowerException("leader moved")));
+            Arguments.of(new org.apache.kafka.common.errors.TimeoutException("Expiring 1 record(s)"), "TimeoutException"),
+            Arguments.of(new NotEnoughReplicasException("fewer in-sync replicas than required"), "NotEnoughReplicasException"),
+            Arguments.of(new NetworkException("disconnected"), "NetworkException"),
+            Arguments.of(new KafkaProducerException(null, "send failed", new NotLeaderOrFollowerException("leader moved")),
+                "NotLeaderOrFollowerException"),
+            Arguments.of(new TopicAuthorizationException(Set.of("evt.ln.loan.created.v1")), "TopicAuthorizationException"),
+            Arguments.of(new SaslAuthenticationException("Access denied"), "SaslAuthenticationException"),
+            Arguments.of(new KafkaException("Failed to construct kafka producer"), "KafkaException"),
+            Arguments.of(new IllegalStateException("something nobody classified"), "IllegalStateException"));
     }
 
     @Test
-    void theRelaysOwnSendTimeoutIsRetryable() {
-        MutableClock clock = new MutableClock(NOW);
-        OutboxRelay relay = new OutboxRelay(outbox, kafka, transactions, clock, 50,
-            Duration.ofMillis(1), Duration.ofDays(7));
+    void theRelaysOwnSendTimeoutStopsTheBatchWithoutMarkingTheRow() {
+        OutboxRelay relay = new OutboxRelay(outbox, kafka, transactions, new MutableClock(NOW), 50,
+            Duration.ofMillis(1), Duration.ofDays(7), meters);
         OutboxEventJpaEntity head = row("LOAN-W");
         when(outbox.tryRelayLock(anyLong())).thenReturn(true);
         when(outbox.findUnpublishedBatch(50)).thenReturn(List.of(head));
         when(kafka.send(any(ProducerRecord.class))).thenReturn(new CompletableFuture<>());
 
-        for (int run = 0; run < 12; run++) {
-            relay.relayOnce();
-        }
+        relay.relayOnce();
 
-        assertThat(head.getAttempts()).isEqualTo(12);
+        assertThat(head.getAttempts()).isZero();
         assertThat(head.getParkedAt()).isNull();
+        assertThat(failures("TimeoutException")).isEqualTo(1.0);
     }
 
-    /** A retryable failure parks the row only after 24 h of continuous failure from its first failure. */
+    /** After a non-payload failure the relay backs off (1 s doubling to 5 min) and resumes once a run gets through. */
     @Test
-    void aRowFailingRetryablyParksOnlyAfter24HoursFromItsFirstFailure() {
+    void theRelayBacksOffAfterAFailureAndResumesWhenTheCauseIsFixed() {
         MutableClock clock = new MutableClock(NOW);
         OutboxRelay relay = new OutboxRelay(outbox, kafka, transactions, clock, 50,
-            Duration.ofSeconds(1), Duration.ofDays(7));
-        OutboxEventJpaEntity head = row("LOAN-H");
-        OutboxEventJpaEntity later = row("LOAN-L");
+            Duration.ofSeconds(1), Duration.ofDays(7), meters);
+        OutboxEventJpaEntity head = row("LOAN-A");
+        OutboxEventJpaEntity later = row("LOAN-B");
         when(outbox.tryRelayLock(anyLong())).thenReturn(true);
         when(outbox.findUnpublishedBatch(50)).thenReturn(List.of(head, later));
-        when(kafka.send(any(ProducerRecord.class))).thenAnswer(invocation -> {
-            ProducerRecord<String, String> record = invocation.getArgument(0);
-            return "LOAN-H".equals(record.key())
-                ? CompletableFuture.failedFuture(new LeaderNotAvailableException("There is no leader for this topic-partition"))
-                : CompletableFuture.completedFuture((SendResult<String, String>) null);
-        });
+        when(kafka.send(any(ProducerRecord.class)))
+            .thenAnswer(invocation -> CompletableFuture.failedFuture(new TopicAuthorizationException(Set.of("t"))))
+            .thenAnswer(invocation -> CompletableFuture.failedFuture(new TopicAuthorizationException(Set.of("t"))))
+            .thenReturn(CompletableFuture.completedFuture((SendResult<String, String>) null));
 
-        assertThat(relay.relayOnce()).isZero();               // first failure at NOW
-        clock.advance(Duration.ofHours(24));
-        assertThat(relay.relayOnce()).isZero();               // exactly 24 h: still retried
-        assertThat(head.getParkedAt()).isNull();
-        assertThat(later.getPublishedAt()).isNull();
+        assertThat(relay.relayOnce()).isZero();
+        assertThat(relay.relayOnce()).isZero();                 // within the 1 s backoff: nothing is tried
+        verify(kafka, times(1)).send(any(ProducerRecord.class));
 
         clock.advance(Duration.ofSeconds(1));
-        assertThat(relay.relayOnce()).isEqualTo(1);           // past 24 h: parked, the batch moves on
+        assertThat(relay.relayOnce()).isZero();                 // second failure: backoff doubles to 2 s
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(relay.relayOnce()).isZero();
+        verify(kafka, times(2)).send(any(ProducerRecord.class));
 
-        assertThat(head.getAttempts()).isEqualTo(3);
-        assertThat(head.getFirstFailedAt()).isEqualTo(NOW);
-        assertThat(head.getParkedAt()).isEqualTo(NOW.plus(Duration.ofHours(24)).plusSeconds(1));
-        assertThat(head.getPublishedAt()).isNull();
-        assertThat(later.getPublishedAt()).isEqualTo(clock.instant());
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(relay.relayOnce()).isEqualTo(2);             // cause fixed: both rows go
+        clock.advance(Duration.ofMillis(1));
+        assertThat(relay.relayOnce()).isEqualTo(2);             // no backoff left after a run got through
+        assertThat(head.getParkedAt()).isNull();
     }
 
     /**
-     * Failures Kafka will never accept on a retry (record too large,
-     * serialization, authorization, invalid topic) park the row at once and
-     * the batch continues.
+     * ADR-021 decision 4: payload errors (record too large, serialization,
+     * invalid topic) can never be sent as they are: the row is parked at once
+     * with its reason and the batch continues.
      */
     @ParameterizedTest
-    @MethodSource("nonRetryableFailures")
-    void nonRetryableFailuresParkTheRowAtOnce(Exception failure, String lastError) {
+    @MethodSource("payloadErrors")
+    void payloadErrorsParkTheRowAtOnceAndTheBatchContinues(Exception failure, String reason) {
         OutboxEventJpaEntity poison = row("LOAN-P");
         OutboxEventJpaEntity later = row("LOAN-Q");
         when(outbox.tryRelayLock(anyLong())).thenReturn(true);
@@ -212,18 +218,17 @@ class OutboxRelayTest {
         assertThat(poison.getAttempts()).isEqualTo(1);
         assertThat(poison.getParkedAt()).isEqualTo(NOW);
         assertThat(poison.getPublishedAt()).isNull();
-        assertThat(poison.getLastError()).isEqualTo(lastError);
+        assertThat(poison.getLastError()).isEqualTo(reason);
+        assertThat(poison.getParkReason()).isEqualTo("payload error: " + reason);
         assertThat(later.getPublishedAt()).isEqualTo(NOW);
     }
 
-    static Stream<Arguments> nonRetryableFailures() {
+    static Stream<Arguments> payloadErrors() {
         return Stream.of(
             Arguments.of(new RecordTooLargeException("The message is 2000000 bytes"),
                 "RecordTooLargeException: The message is 2000000 bytes"),
             Arguments.of(new SerializationException("Can't convert value"),
                 "SerializationException: Can't convert value"),
-            Arguments.of(new TopicAuthorizationException(Set.of("evt.ln.loan.created.v1")),
-                "TopicAuthorizationException: Not authorized to access topics: [evt.ln.loan.created.v1]"),
             Arguments.of(new KafkaProducerException(null, "send failed", new InvalidTopicException("bad name")),
                 "InvalidTopicException: bad name"));
     }
@@ -239,7 +244,8 @@ class OutboxRelayTest {
 
         assertThat(relay.relayOnce()).isZero();
         assertThat(Thread.interrupted()).isTrue();
-        assertThat(first.getLastError()).isEqualTo("interrupted");
+        assertThat(first.getAttempts()).isZero();
+        assertThat(first.getParkedAt()).isNull();
     }
 
     @Test
@@ -256,6 +262,11 @@ class OutboxRelayTest {
         when(outbox.deletePublishedBefore(NOW.minus(Duration.ofDays(7)))).thenReturn(3);
 
         assertThat(relay.purgePublished()).isEqualTo(3);
+    }
+
+    private double failures(String exceptionClass) {
+        return meters.find("outbox.send.failures").tag("exception", exceptionClass).counters().stream()
+            .mapToDouble(io.micrometer.core.instrument.Counter::count).sum();
     }
 
     private static String header(ProducerRecord<String, String> record, String name) {

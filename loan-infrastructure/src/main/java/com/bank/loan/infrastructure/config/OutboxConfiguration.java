@@ -48,15 +48,15 @@ public class OutboxConfiguration {
     @Bean
     Gauge outboxParkedGauge(MeterRegistry registry, SpringDataOutboxRepository outbox) {
         return Gauge.builder("outbox.parked.events", outbox, SpringDataOutboxRepository::countByParkedAtIsNotNull)
-            .description("Loan events the outbox relay parked: a non-retryable failure, or retryable failures for longer than loan.outbox.relay.retryable-park-after")
+            .description("Loan events taken out of the relay: payload errors, or parked by an operator with a park_reason (ADR-021 decision 4)")
             .register(registry);
     }
 
     /**
      * Age of the oldest event still waiting (outbox_oldest_pending_age_seconds,
-     * same meter as risk and compliance); 0 when the backlog is empty. The
-     * outage alert: retryable failures stop the relay without parking for up
-     * to loan.outbox.relay.retryable-park-after.
+     * the platform meter name); 0 when the backlog is empty. The outage alert:
+     * under ADR-021 decision 4 only payload errors park a row, so any other
+     * send failure stops the relay and this age grows until it is fixed.
      */
     @Bean
     Gauge outboxOldestPendingAgeGauge(MeterRegistry registry, SpringDataOutboxRepository outbox, Clock clock) {
@@ -91,9 +91,10 @@ public class OutboxConfiguration {
                                 @Value("${loan.outbox.relay.batch-size:100}") int batchSize,
                                 @Value("${loan.outbox.relay.send-timeout:PT35S}") Duration sendTimeout,
                                 @Value("${loan.outbox.retention:P7D}") Duration retention,
-                                @Value("${loan.outbox.relay.retryable-park-after:PT24H}") Duration retryableParkAfter) {
+                                MeterRegistry meters) {
+            // Failed sends count in outbox.send.failures{exception=<simple class name>}.
             return new OutboxRelay(outbox, kafka, new TransactionTemplate(transactionManager), clock, batchSize,
-                sendTimeout, retention, retryableParkAfter);
+                sendTimeout, retention, meters);
         }
 
         @Bean

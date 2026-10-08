@@ -157,7 +157,7 @@ Rollback triggers (measured from the start of step 2 (d), any one):
 
 - [x] Service builds and checks standalone (`ci/test` runs `./gradlew check` with PostgreSQL; ArchUnit rules; coverage)
 - [x] Own schema and migrations; Hibernate validates entities against them at startup
-- [x] Events written through a transactional outbox, relayed in order; non-retryable rows parked at once, retryable failures parked only after 24 h of continuous failure (section 7)
+- [x] Events written through a transactional outbox, relayed in order; ADR-021 decision 4: payload errors park at once, authorization/unclassified errors stop the relay without marking rows, retryable failures park only after 24 h of continuous failure (section 7)
 - [x] Customer credit through the customer service API (no shared table); consumer contract test against customer-context.yaml
 - [x] Delta backfill rehearsed with reconciliation in CI
 - [ ] Monolith anti-corruption client and write-freeze flag (enterprise-loan-management-system)
@@ -169,36 +169,50 @@ Rollback triggers (measured from the start of step 2 (d), any one):
 
 ## 7. Parked outbox events
 
-Same policy as risk-decisioning and compliance-evidence. `OutboxRelay` parks a row (sets `parked_at`, keeps
-the reason in `last_error`) at once when Kafka refuses it permanently (`RecordTooLargeException`,
-`SerializationException`, `TopicAuthorizationException`, `InvalidTopicException`, any error that is not a
-Kafka `RetriableException` or a timeout).
+ADR-021 decision 4 (adr-runbooks #10, e6dd76a), the rule for every service's outbox relay:
 
-Retryable failures (Kafka `RetriableException`: timeouts, not enough replicas, leader or network errors,
-unknown topic or partition; and the relay's own send timeout) never count toward parking: they stop the batch
-and the row is retried on the next run. Such a row is parked only when it has been failing continuously for
-longer than `loan.outbox.relay.retryable-park-after` (`OUTBOX_RELAY_RETRYABLE_PARK_AFTER`, default `PT24H`),
-measured from its `first_failed_at` (V5, set with the injected clock). There is no attempt-count cap; an
-ordinary outage only delays events.
+- **Payload errors** (`RecordTooLargeException`, `SerializationException`, `InvalidTopicException`): the row
+  can never be sent as it is. The relay parks it at once (`parked_at`, `park_reason = 'payload error: ...'`,
+  `last_error`) and the batch continues.
+- **Every other error** (Kafka retryable errors such as timeouts, not enough replicas, leader or network errors;
+  the relay's own send timeout; SASL or topic authorization; a producer that cannot be built; anything
+  unclassified) never parks a row, however long it lasts. The batch stops, **nothing is marked** (no attempt,
+  no `last_error`), the relay backs off (1 s doubling to 5 min) and counts the failure in
+  `outbox_send_failures_total{exception="<simple class name>"}`. There is no time ceiling: the row stays at the
+  head until the cause is fixed or an operator parks it.
 
 Note: a loan raises several events, so parking a row lets later events of the same loan go out before it.
 Consumers must tolerate that until the row is replayed (they de-duplicate on `eventId` and carry
 `aggregateVersion`).
 
 Alerts: `outbox_oldest_pending_age_seconds{service="svc-ln-loan-lifecycle"}` for a stalled relay or an outage
-(warn above 300 s, page above 1800 s); `outbox_parked_events` above zero; `outbox_pending_events` for the
-backlog.
+(warn above 300 s, page above 1800 s); `rate(outbox_send_failures_total[5m])` by `exception` to see why
+(authorization classes point at the IRSA role's MSK policy, topic existence or ACLs); `outbox_parked_events`
+above zero; `outbox_pending_events` for the backlog.
+
+Find the head of the queue and the parked rows:
+
+```sql
+SELECT event_id, created_seq, topic, attempts, last_error, parked_at, park_reason
+FROM sc_ln_loan_lifecycle.outbox_event
+WHERE published_at IS NULL
+ORDER BY created_seq
+LIMIT 20;
+```
+
+Operator park (only when the head row itself is the problem and the incident lead agrees; the relay never
+does this for a non-payload error). The reason is mandatory and goes into the incident record too:
+
+```sql
+UPDATE sc_ln_loan_lifecycle.outbox_event
+SET parked_at = now(), park_reason = 'operator: <incident id> <why>'
+WHERE event_id = '<event id>' AND published_at IS NULL AND parked_at IS NULL;
+```
 
 Replay, after fixing the cause:
 
 ```sql
-SELECT event_id, created_seq, topic, attempts, first_failed_at, last_error, parked_at
-FROM sc_ln_loan_lifecycle.outbox_event
-WHERE published_at IS NULL AND parked_at IS NOT NULL
-ORDER BY created_seq;
-
--- first_failed_at must be reset too, otherwise the 24 h ceiling parks the row again on its first retryable failure.
 UPDATE sc_ln_loan_lifecycle.outbox_event
-SET parked_at = NULL, first_failed_at = NULL, attempts = 0, last_error = NULL
+SET parked_at = NULL, park_reason = NULL, attempts = 0, last_error = NULL
 WHERE event_id = '<event id>' AND published_at IS NULL AND parked_at IS NOT NULL;
 ```

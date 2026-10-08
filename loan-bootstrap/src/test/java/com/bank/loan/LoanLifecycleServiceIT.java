@@ -433,7 +433,8 @@ class LoanLifecycleServiceIT {
         decisions.approve(LoanId.of(loanId));
         when(kafka.send(any(ProducerRecord.class))).thenReturn(CompletableFuture.completedFuture((SendResult<String, String>) null));
         OutboxRelay relay = new OutboxRelay(outbox, kafka, new TransactionTemplate(transactionManager),
-            Clock.systemUTC(), 100, Duration.ofSeconds(35), Duration.ofDays(7));
+            Clock.systemUTC(), 100, Duration.ofSeconds(35), Duration.ofDays(7),
+            new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
 
         int published = relay.relayOnce();
 
@@ -458,17 +459,18 @@ class LoanLifecycleServiceIT {
                 : CompletableFuture.completedFuture(null);
         });
         OutboxRelay relay = new OutboxRelay(outbox, kafka, new TransactionTemplate(transactionManager),
-            Clock.systemUTC(), 100, Duration.ofSeconds(35), Duration.ofDays(7));
+            Clock.systemUTC(), 100, Duration.ofSeconds(35), Duration.ofDays(7),
+            new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
 
-        // RecordTooLarge is not retryable: parked on its first failure, the batch moves on.
+        // RecordTooLarge is a payload error (ADR-021 decision 4): parked at once with its reason, the batch moves on.
         relay.relayOnce();
 
         assertThat(outbox.countByParkedAtIsNotNull()).isEqualTo(1);
         assertThat(jdbc.queryForMap("""
-            select attempts, first_failed_at is not null as failed_at_set, last_error from sc_ln_loan_lifecycle.outbox_event
+            select attempts, park_reason, last_error from sc_ln_loan_lifecycle.outbox_event
             where aggregate_id = ? and parked_at is not null
             """, first))
-            .containsEntry("attempts", 1).containsEntry("failed_at_set", true)
+            .containsEntry("attempts", 1).containsEntry("park_reason", "payload error: RecordTooLargeException: too large")
             .containsEntry("last_error", "RecordTooLargeException: too large");
         assertThat(jdbc.queryForObject("""
             select count(*) from sc_ln_loan_lifecycle.outbox_event where aggregate_id = ? and published_at is not null
