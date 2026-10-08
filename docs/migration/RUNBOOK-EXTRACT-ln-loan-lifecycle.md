@@ -87,6 +87,7 @@ loan, second run, delta checks.
 | ConfigMap `rds-ca-bundle` (key `global-bundle.pem`) published in namespace `lending` by trust-manager (mesh repo `k8s/platform/cert-manager/bundle-rds-ca.yaml`); `DB_URL` = Terraform output `jdbc_url` (`sslmode=verify-full&sslrootcert=/etc/ssl/rds/global-bundle.pem`) | step 1 | the pods mount the bundle to verify Aurora's certificate; without it they do not start |
 | Mesh team has applied the requests in "Requests to the mesh team" below (A: gateway route, B: Aurora and MSK egress, C: callee ALLOW rules, plus the README "Callers" ALLOW rules) | step 1 (B), step 2 (A, C) | namespace `lending` is default-deny and outbound traffic is `REGISTRY_ONLY`: without B the readiness check (`db`) fails and the pods never become ready |
 | No INITIATED / PROCESSING monolith payments | step 2 final delta | in-flight repayments finish in the monolith |
+| Monolith anti-corruption client sends `currency` (ISO 4217) on loan creation and payment, and reads `rateBasis` from loan responses, in the same window as step 2 (d) | step 2 (d) | `currency` is required and `rateBasis` replaces the monolith's flat-rate assumption (`api/openapi/loan-context.accepted-breaking.txt`); a client without them is refused (400) or misreads the rate. The accepted-breaking file stays until that client change merges in enterprise-loan-management-system |
 
 ### Requests to the mesh team
 
