@@ -162,14 +162,14 @@ Rollback triggers (measured from the start of step 2 (d), any one):
 | `CUSTOMER_SERVICE_UNAVAILABLE` (503) on disburse | > 5 % over 10 minutes |
 | `consumer.dlq.messages{group=cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1}` | > 0 in the window |
 | Platform alert `OutboxEventsParked` (`outbox_parked_events_total`, 15 minutes) | fires for this service |
-| `outbox_oldest_pending_age_seconds` (once the relay is on) | > 300 s |
+| Platform alert `OutboxRelayStalled` (`outbox_oldest_pending_age_seconds` above 900 s for 5 minutes, once the relay is on) | fires for this service |
 | Reconcile re-run against the frozen monolith snapshot | any `|f` line |
 
 ## 6. Acceptance checklist
 
 - [x] Service builds and checks standalone (`ci/test` runs `./gradlew check` with PostgreSQL; ArchUnit rules; coverage)
 - [x] Own schema and migrations; Hibernate validates entities against them at startup
-- [x] Events written through a transactional outbox, relayed in order; ADR-021 decision 4: payload errors park at once, authorization/unclassified errors stop the relay without marking rows, retryable failures park only after 24 h of continuous failure (section 7)
+- [x] Events written through a transactional outbox, relayed in order; ADR-021 decision 4 (adr-runbooks #10 e6dd76a): payload errors park the row at once and the batch continues; every other error (retryable, authorization, unclassified) parks nothing however long it lasts: the batch stops, nothing is marked, the relay backs off, and only an operator parks a row, with a recorded reason (section 7)
 - [x] Customer credit through the customer service API (no shared table); consumer contract test against customer-context.yaml
 - [x] Delta backfill rehearsed with reconciliation in CI
 - [ ] Monolith anti-corruption client and write-freeze flag (enterprise-loan-management-system)
@@ -198,10 +198,16 @@ Note: a loan raises several events, so parking a row lets later events of the sa
 Consumers must tolerate that until the row is replayed (they de-duplicate on `eventId` and carry
 `aggregateVersion`).
 
-Alerts: `outbox_oldest_pending_age_seconds{service="svc-ln-loan-lifecycle"}` for a stalled relay or an outage
-(pages the squad above 900 s for 5 minutes, Kafka guide 5f7d546); `rate(outbox_send_failures_total[5m])` by `exception` to see why
-(authorization classes point at the IRSA role's MSK policy, topic existence or ACLs); parked rows raise the platform alert `OutboxEventsParked` (any increase of `outbox_parked_events_total` over 15 minutes, warning, routed by the `squad` label; the chart ships no parked alert rule); its `exception` label is a payload error class or `OperatorPark`; `outbox_parked_rows` for the rows parked now;
-`outbox_pending_events` for the backlog.
+Alerts. The squad acts on the platform alerts (observability `prometheus/rules/kafka-outbox.rules.yml`,
+PR #11 head eca7aa0, routed by the `squad` label); this chart ships no outbox alert rule:
+- `OutboxRelayStalled` (critical): `outbox_oldest_pending_age_seconds{service_id="svc-ln-loan-lifecycle"}` above 900 s for
+  5 minutes, a stalled relay or a Kafka/MSK outage. `rate(outbox_send_failures_total[5m])` by `exception` says why
+  (authorization classes point at the IRSA role's MSK policy, topic existence or ACLs); `OutboxSendFailures` (warning)
+  fires on those failures.
+- `OutboxEventsParked` (warning): any increase of `outbox_parked_events_total` over 15 minutes; its `exception` label
+  is a payload error class or `OperatorPark`.
+
+`outbox_parked_rows` shows the rows parked now and `outbox_pending_events` the backlog.
 
 Find the head of the queue and the parked rows:
 
