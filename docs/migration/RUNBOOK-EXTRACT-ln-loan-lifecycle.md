@@ -30,7 +30,7 @@ Extraction of the Loan aggregate from `enterprise-loan-management-system` into
 | `compliance_reports` (V13) | `svc-cmp-evidence` | separate slice |
 | `loan_service.*` (loan/V1) | not migrated | parallel schema from an earlier split attempt; confirm it has no rows before the cutover |
 
-Migrations: `loan-infrastructure/src/main/resources/db/migration/V1..V5`. The service never reads
+Migrations: `loan-infrastructure/src/main/resources/db/migration/V1..V6`. The service never reads
 monolith tables and the monolith must not read `sc_ln_loan_lifecycle`.
 
 ### Database roles

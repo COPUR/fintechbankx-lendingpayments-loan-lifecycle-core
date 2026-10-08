@@ -237,13 +237,89 @@ class CustomerProfileHttpAdapterTest {
         server.verify();
     }
 
+    /**
+     * The compensation intent (generation n+1, compensation of n pending) is
+     * stored before the release is sent. If it cannot be stored, nothing is
+     * released: the reservation still stands, so a retry may replay it.
+     */
     @Test
-    void failedCancellationKeepsTheGenerationSoARetryReusesTheReservation() {
-        server.expect(requestTo(BASE + "/credit/release")).andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+    void whenTheCompensationIntentCannotBeStoredNoReleaseIsSentAndTheReservationStands() {
+        Money ten = Money.aed(new BigDecimal("10.00"));
+        server.expect(requestTo(BASE + "/credit/reserve"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve"))
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        // no release: the next request is the retry's reservation, which replays the held one
+        server.expect(requestTo(BASE + "/credit/reserve"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve"))
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
 
-        assertThatThrownBy(() -> adapter.cancelReservation(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
+        assertThat(adapter.reserveCredit(LOAN, CUSTOMER, ten)).isEqualTo(CreditDecision.ACCEPTED);
+        generations.failGenerationWrites = true;
+        assertThatThrownBy(() -> adapter.cancelReservation(LOAN, CUSTOMER, ten))
             .isInstanceOf(CustomerCreditUnavailableException.class);
+        generations.failGenerationWrites = false;
+        assertThat(adapter.reserveCredit(LOAN, CUSTOMER, ten)).isEqualTo(CreditDecision.ACCEPTED);
+
         assertThat(generations.current(LOAN)).isZero();
+        server.verify();
+    }
+
+    /**
+     * Reverse order: the intent is stored, the release fails. The next
+     * reservation first re-sends the pending release under the same key and
+     * fails while it cannot; only then does it reserve under a new key. It
+     * never replays the compensated reservation's key.
+     */
+    @Test
+    void aFailedReleaseIsResentBeforeTheNextReservationWhichOtherwiseFails() {
+        Money ten = Money.aed(new BigDecimal("10.00"));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve:compensation"))
+            .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve:compensation"))
+            .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve:compensation"))
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/credit/reserve"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve:g1"))
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+
+        assertThatThrownBy(() -> adapter.cancelReservation(LOAN, CUSTOMER, ten))
+            .isInstanceOf(CustomerCreditUnavailableException.class);
+        assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, ten))
+            .isInstanceOf(CustomerCreditUnavailableException.class);
+        assertThat(adapter.reserveCredit(LOAN, CUSTOMER, ten)).isEqualTo(CreditDecision.ACCEPTED);
+
+        assertThat(generations.current(LOAN)).isEqualTo(1);
+        server.verify();
+    }
+
+    /**
+     * The release succeeded (200) but clearing the intent failed: the next
+     * reservation re-sends the release under the same key (the provider
+     * replays its stored answer, nothing is released twice) and then reserves
+     * under a new key, never the compensated one.
+     */
+    @Test
+    void aReleaseThatSucceededButWasNotRecordedIsReplayedBeforeANewReservation() {
+        Money ten = Money.aed(new BigDecimal("10.00"));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve:compensation"))
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve:compensation"))
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/credit/reserve"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve:g1"))
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+
+        generations.failCompensationDone = true;
+        assertThat(adapter.cancelReservation(LOAN, CUSTOMER, ten)).isEqualTo(CreditDecision.ACCEPTED);
+        generations.failCompensationDone = false;
+        assertThat(adapter.reserveCredit(LOAN, CUSTOMER, ten)).isEqualTo(CreditDecision.ACCEPTED);
+
         server.verify();
     }
 
@@ -293,17 +369,37 @@ class CustomerProfileHttpAdapterTest {
         assertThatThrownBy(() -> adapter.getAvailableCredit(CUSTOMER)).isInstanceOf(CustomerCreditUnavailableException.class);
     }
 
+    /** In-memory generations with switchable store failures. */
     static final class Generations implements ReservationGenerations {
         private final Map<LoanId, Integer> values = new HashMap<>();
+        private final Map<LoanId, Integer> pending = new HashMap<>();
+        boolean failGenerationWrites;
+        boolean failCompensationDone;
 
         @Override
         public int current(LoanId loanId) {
             return values.getOrDefault(loanId, 0);
         }
 
-        @Override
-        public void advance(LoanId loanId) {
-            values.merge(loanId, 1, Integer::sum);
+
+        public void beginCompensation(LoanId loanId, int generation) {
+            if (failGenerationWrites) {
+                throw new IllegalStateException("database unavailable");
+            }
+            values.put(loanId, generation + 1);
+            pending.put(loanId, generation);
+        }
+
+        public java.util.OptionalInt pendingCompensation(LoanId loanId) {
+            Integer generation = pending.get(loanId);
+            return generation == null ? java.util.OptionalInt.empty() : java.util.OptionalInt.of(generation);
+        }
+
+        public void compensationDone(LoanId loanId, int generation) {
+            if (failCompensationDone) {
+                throw new IllegalStateException("database unavailable");
+            }
+            pending.remove(loanId, generation);
         }
     }
 }

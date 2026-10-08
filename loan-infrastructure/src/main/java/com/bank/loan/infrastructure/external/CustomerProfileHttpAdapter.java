@@ -20,6 +20,7 @@ import org.springframework.web.client.RestClientException;
 
 import java.math.BigDecimal;
 import java.util.Currency;
+import java.util.OptionalInt;
 import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
@@ -37,7 +38,9 @@ import java.util.regex.Pattern;
  *   <li>Idempotency keys are derived from the loan: {@code {loanId}:reserve}
  *       ({@code :g{n}} after n cancelled reservations), {@code {loanId}:release},
  *       and {@code {reserveKey}:compensation} to cancel a reservation; the
- *       body's {@code reference} is the loan id.</li>
+ *       body's {@code reference} is the loan id. A cancellation stores its
+ *       intent before releasing, and an unconfirmed one is re-sent before
+ *       the next reservation ({@link ReservationGenerations}).</li>
  *   <li>409 CONCURRENT_UPDATE / DUPLICATE_REQUEST are retried with the same
  *       key, at most {@code maxAttempts} times, then unavailable.</li>
  *   <li>422 INSUFFICIENT_CREDIT is the only refusal
@@ -113,17 +116,50 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
         return position.availableCredit() == null ? Money.zero(currency) : Money.of(position.availableCredit(), currency);
     }
 
+    /**
+     * A compensation that was started but not confirmed is re-sent first,
+     * under its own key (the provider replays a release it already applied);
+     * while it cannot be confirmed the reservation fails instead of replaying
+     * the compensated reservation's key.
+     */
     @Override
     public CreditDecision reserveCredit(LoanId loanId, CustomerId customerId, Money amount) {
-        return moveCredit(loanId, customerId, amount, paths.reserve(), reserveKey(loanId));
+        OptionalInt pending = generations.pendingCompensation(loanId);
+        if (pending.isPresent()) {
+            int compensated = pending.getAsInt();
+            CreditDecision undone = moveCredit(loanId, customerId, amount, paths.release(), compensationKey(loanId, compensated));
+            if (undone != CreditDecision.ACCEPTED) {
+                throw new CustomerCreditUnavailableException("Customer service did not confirm the release of the "
+                    + "compensated reservation " + reserveKey(loanId, compensated) + "; not reserving again");
+            }
+            generations.compensationDone(loanId, compensated);
+        }
+        return moveCredit(loanId, customerId, amount, paths.reserve(), reserveKey(loanId, generations.current(loanId)));
     }
 
+    /**
+     * Stores the intent (generation n+1, compensation of n pending) in its own
+     * transaction before sending the release under generation n's
+     * compensation key. If the intent cannot be stored nothing is released,
+     * so the reservation and its key stay valid for a retry.
+     */
     @Override
     public CreditDecision cancelReservation(LoanId loanId, CustomerId customerId, Money amount) {
-        String key = reserveKey(loanId) + ":compensation";
-        CreditDecision undone = moveCredit(loanId, customerId, amount, paths.release(), key);
+        int generation = generations.current(loanId);
+        try {
+            generations.beginCompensation(loanId, generation);
+        } catch (RuntimeException notStored) {
+            throw new CustomerCreditUnavailableException("Could not record the compensation of "
+                + reserveKey(loanId, generation) + "; reservation kept, nothing released", notStored);
+        }
+        CreditDecision undone = moveCredit(loanId, customerId, amount, paths.release(), compensationKey(loanId, generation));
         if (undone == CreditDecision.ACCEPTED) {
-            generations.advance(loanId);
+            try {
+                generations.compensationDone(loanId, generation);
+            } catch (RuntimeException notRecorded) {
+                log.warn("Release {} was accepted but not recorded; the next reservation re-sends it under the same key",
+                    compensationKey(loanId, generation), notRecorded);
+            }
         }
         return undone;
     }
@@ -133,9 +169,12 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
         return moveCredit(loanId, customerId, amount, paths.release(), loanId.getValue() + ":release");
     }
 
-    private String reserveKey(LoanId loanId) {
-        int generation = generations.current(loanId);
+    private static String reserveKey(LoanId loanId, int generation) {
         return loanId.getValue() + ":reserve" + (generation == 0 ? "" : ":g" + generation);
+    }
+
+    private static String compensationKey(LoanId loanId, int generation) {
+        return reserveKey(loanId, generation) + ":compensation";
     }
 
     private CreditPosition creditPosition(CustomerId customerId) {

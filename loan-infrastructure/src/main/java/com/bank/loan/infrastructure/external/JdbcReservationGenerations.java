@@ -7,11 +7,12 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.List;
+import java.util.OptionalInt;
 
 /**
  * {@link ReservationGenerations} over sc_ln_loan_lifecycle.credit_reservation_generation.
- * {@link #advance} runs after the disbursement transaction rolled back, so it
- * uses a new transaction of its own.
+ * {@link #beginCompensation} and {@link #compensationDone} run after the
+ * disbursement transaction rolled back, so they use new transactions of their own.
  */
 public class JdbcReservationGenerations implements ReservationGenerations {
 
@@ -32,11 +33,29 @@ public class JdbcReservationGenerations implements ReservationGenerations {
     }
 
     @Override
-    public void advance(LoanId loanId) {
+    public void beginCompensation(LoanId loanId, int generation) {
         newTransaction.executeWithoutResult(status -> jdbc.update("""
-            insert into credit_reservation_generation (loan_id, generation, updated_at) values (?, 1, now())
+            insert into credit_reservation_generation (loan_id, generation, pending_compensation, updated_at)
+            values (?, ?, ?, now())
             on conflict (loan_id) do update
-               set generation = credit_reservation_generation.generation + 1, updated_at = now()
-            """, loanId.getValue()));
+               set generation = excluded.generation, pending_compensation = excluded.pending_compensation,
+                   updated_at = now()
+            """, loanId.getValue(), generation + 1, generation));
+    }
+
+    @Override
+    public OptionalInt pendingCompensation(LoanId loanId) {
+        List<Integer> rows = jdbc.queryForList(
+            "select pending_compensation from credit_reservation_generation where loan_id = ? and pending_compensation is not null",
+            Integer.class, loanId.getValue());
+        return rows.isEmpty() ? OptionalInt.empty() : OptionalInt.of(rows.getFirst());
+    }
+
+    @Override
+    public void compensationDone(LoanId loanId, int generation) {
+        newTransaction.executeWithoutResult(status -> jdbc.update("""
+            update credit_reservation_generation set pending_compensation = null, updated_at = now()
+            where loan_id = ? and pending_compensation = ?
+            """, loanId.getValue(), generation));
     }
 }
