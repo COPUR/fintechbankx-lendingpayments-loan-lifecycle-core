@@ -77,6 +77,9 @@ jobs:
             echo "chart rendered without the migration secret" >&2
             exit 1
           fi
+          # Admission policy fintechbankx-externalsecret-scope: label app.kubernetes.io/name=<SA>,
+          # keys only under <env>/<SA>/, no dataFrom or sourceRef (hook resources included).
+          helm template ci "$chart" $args | python3 scripts/ci/externalsecret-scope.py loan-lifecycle-service dev
           # A missing required setting must stop the render.
           if helm template ci "$chart" --set image.repository=ci/x --set image.tag=ci > /dev/null 2>&1; then
             echo "chart rendered without its required settings" >&2
