@@ -81,7 +81,7 @@ loan, second run, delta checks.
 
 | Precondition | Before | Why |
 |---|---|---|
-| Customer cutover (`RUNBOOK-EXTRACT-cus-profile-kyc`, customer-profile-kyc-core 58f7369) through its step 5; its step 5 routes the monolith's credit writes to the customer service and switches this service to `CUSTOMER_CREDIT_ADAPTER=http` | loan step 2 | one credit ledger: otherwise the monolith and the customer service both move `used_credit` |
+| Customer cutover (`RUNBOOK-EXTRACT-cus-profile-kyc`, customer-profile-kyc-core cf86385) through its step 5; its step 5 routes the monolith's credit writes to the customer service and switches this service to `CUSTOMER_CREDIT_ADAPTER=http` | loan step 2 | one credit ledger: otherwise the monolith and the customer service both move `used_credit` |
 | Payments slice ready to cut over in the same window, publishing `evt.pay.payment.loan-payment-completed.v1` | loan step 2 | loan and payments writes move together; repayments must land in exactly one place |
 | `evt.ln.loan.*`, `evt.ln.loan.dlq.v1`, `evt.pay.payment.loan-payment-completed.v1` in the asyncapi catalog and created on the cluster (catalog PR pending) | step 3 (consumer), step 4 (relay) | the service never creates topics |
 | ConfigMap `rds-ca-bundle` (key `global-bundle.pem`) published in namespace `lending` by trust-manager (mesh repo `k8s/platform/cert-manager/bundle-rds-ca.yaml`); `DB_URL` = Terraform output `jdbc_url` (`sslmode=verify-full&sslrootcert=/etc/ssl/rds/global-bundle.pem`) | step 1 | the pods mount the bundle to verify Aurora's certificate; without it they do not start |

@@ -1,8 +1,11 @@
 # Copied for loan's consumer contract test (CustomerProfileHttpAdapterContractTest).
 # Source: fintechbankx-customer-profile-kyc-core, branch claude/customer-risk-compliance-deployable-ygi0zo (PR #13),
-# commit 58f7369, file api/openapi/customer-context.yaml, unchanged. Since 435aa83 (422 CURRENCY_MISMATCH for a
-# valid but different ISO currency, 400 for a malformed one) it only adds the kyc-status endpoints, which loan
-# does not call. Replace with the catalogued version once merged.
+# commit cf86385, file api/openapi/customer-context.yaml, unchanged. Since 435aa83 (422 CURRENCY_MISMATCH for a
+# valid but different ISO currency, 400 for a malformed one) it adds the kyc-status endpoints, drops the DPoP
+# security alternative, and treats a credit movement as a repeat only when key, type, amount, currency and
+# reference all match (otherwise 409 IDEMPOTENCY_KEY_REUSED). Loan calls only /credit, /credit/reserve and
+# /credit/release, never identity-link (so never sees 422 IDENTITY_USER_NOT_FOUND). Replace with the
+# catalogued version once merged.
 openapi: 3.0.3
 info:
   title: Customer Context Service API
@@ -26,7 +29,6 @@ paths:
       operationId: createCustomer
       security:
         - bearerAuth: []
-        - dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -82,7 +84,6 @@ paths:
       operationId: getCustomer
       security:
         - bearerAuth: []
-        - dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -125,7 +126,6 @@ paths:
         the service's allowed list), staff, and the customer themself.
       security:
         - bearerAuth: []
-        - dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -171,7 +171,6 @@ paths:
         monolith counterpart.
       security:
         - bearerAuth: []
-        - dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -214,7 +213,6 @@ paths:
         again changes nothing and publishes nothing.
       security:
         - bearerAuth: []
-        - dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -271,7 +269,6 @@ paths:
       operationId: updateCreditLimit
       security:
         - bearerAuth: []
-        - dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -328,13 +325,14 @@ paths:
       operationId: reserveCredit
       description: |-
         Called by other services (SERVICE realm role, calling client on the
-        service's allowed list) and staff. x-idempotency-key is required: a
-        repeat with the same key and amount returns the current position
-        without moving credit again; the same key with a different movement is
-        a 409. The answer is the credit position only (no personal data).
+        service's allowed list) and staff. x-idempotency-key is required. A
+        repeat is recognised only when the whole movement matches: the same
+        key, movement type, amount, currency and reference return the current
+        position without moving credit again; the same key with any of these
+        different is 409 IDEMPOTENCY_KEY_REUSED. The answer is the credit
+        position only (no personal data).
       security:
         - bearerAuth: []
-        - dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -398,13 +396,14 @@ paths:
       operationId: releaseCredit
       description: |-
         Called by other services (SERVICE realm role, calling client on the
-        service's allowed list) and staff. x-idempotency-key is required: a
-        repeat with the same key and amount returns the current position
-        without moving credit again; the same key with a different movement is
-        a 409. The answer is the credit position only (no personal data).
+        service's allowed list) and staff. x-idempotency-key is required. A
+        repeat is recognised only when the whole movement matches: the same
+        key, movement type, amount, currency and reference return the current
+        position without moving credit again; the same key with any of these
+        different is 409 IDEMPOTENCY_KEY_REUSED. The answer is the credit
+        position only (no personal data).
       security:
         - bearerAuth: []
-        - dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -474,7 +473,6 @@ paths:
         cannot be updated, nothing is recorded (503).
       security:
         - bearerAuth: []
-        - dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -542,10 +540,6 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-    dpopAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: DPoP
   parameters:
     Authorization:
       name: Authorization
