@@ -44,14 +44,6 @@ public class OutboxConfiguration {
             .register(registry);
     }
 
-    /** Rows the relay gave up on (outbox_parked_events); any value above 0 needs an operator. */
-    @Bean
-    Gauge outboxParkedGauge(MeterRegistry registry, SpringDataOutboxRepository outbox) {
-        return Gauge.builder("outbox.parked.events", outbox, SpringDataOutboxRepository::countByParkedAtIsNotNull)
-            .description("Loan events taken out of the relay: payload errors, or parked by an operator with a park_reason (ADR-021 decision 4)")
-            .register(registry);
-    }
-
     /**
      * Age of the oldest event still waiting (outbox_oldest_pending_age_seconds,
      * the platform meter name); 0 when the backlog is empty. The outage alert:

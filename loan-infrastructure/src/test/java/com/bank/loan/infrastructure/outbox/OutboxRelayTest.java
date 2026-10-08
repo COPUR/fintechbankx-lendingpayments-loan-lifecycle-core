@@ -130,6 +130,7 @@ class OutboxRelayTest {
         assertThat(head.getLastError()).isNull();
         assertThat(later.getAttempts()).isZero();              // order kept: nothing overtook the head
         assertThat(failures(exceptionClass)).isEqualTo(40.0);
+        assertThat(meters.find("outbox.parked.events").counters()).isEmpty();
         verify(kafka, times(40)).send(any(ProducerRecord.class));
     }
 
@@ -221,6 +222,11 @@ class OutboxRelayTest {
         assertThat(poison.getLastError()).isEqualTo(reason);
         assertThat(poison.getParkReason()).isEqualTo("payload error: " + reason);
         assertThat(later.getPublishedAt()).isEqualTo(NOW);
+        // Kafka guide 5f7d546: outbox.parked.events{exception=<simple class name>} counts every park (alert on increase).
+        String exceptionClass = reason.substring(0, reason.indexOf(':'));
+        assertThat(meters.find("outbox.parked.events").tag("exception", exceptionClass).counter()).isNotNull();
+        assertThat(meters.get("outbox.parked.events").tag("exception", exceptionClass).counter().count()).isEqualTo(1.0);
+        assertThat(failures(exceptionClass)).isZero();
     }
 
     static Stream<Arguments> payloadErrors() {

@@ -33,7 +33,8 @@ import java.util.concurrent.TimeoutException;
  * <ul>
  *   <li>payload errors (RecordTooLarge, Serialization, InvalidTopic): the row
  *   can never be sent as it is; it is parked at once (parked_at, park_reason,
- *   last_error) and the batch continues;</li>
+ *   last_error), counted in outbox.parked.events tagged with the exception's
+ *   simple class name (alert on any increase), and the batch continues;</li>
  *   <li>every other error (retryable broker or network errors, the relay's own
  *   send timeout, authorization, anything unclassified) never parks a row,
  *   however long it lasts: the batch stops, nothing is marked, the relay backs
@@ -47,6 +48,7 @@ public class OutboxRelay {
 
     static final long RELAY_LOCK_KEY = 0x6C6E5F6F7574L; // "ln_out"
     static final String SEND_FAILURES = "outbox.send.failures";
+    static final String PARKED_EVENTS = "outbox.parked.events";
     static final Duration BACKOFF_START = Duration.ofSeconds(1);
     static final Duration BACKOFF_MAX = Duration.ofMinutes(5);
     private static final Logger log = LoggerFactory.getLogger(OutboxRelay.class);
@@ -102,6 +104,7 @@ public class OutboxRelay {
                 } catch (Exception e) {
                     if (isPayloadError(e)) {
                         String reason = describe(e);
+                        meters.counter(PARKED_EVENTS, "exception", unwrap(e).getClass().getSimpleName()).increment();
                         row.markFailed(reason);
                         row.park(clock.instant(), "payload error: " + reason);
                         log.error("Outbox relay parked event {} for {}: payload error {}; later events continue (ADR-021 decision 4)",

@@ -122,6 +122,7 @@ management:
   metrics:
     tags:
       service: svc-ln-loan-lifecycle
+      squad: lending
     distribution:
       percentiles-histogram:
         http.server.requests: true
