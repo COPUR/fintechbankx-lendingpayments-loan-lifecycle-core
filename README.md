@@ -77,8 +77,8 @@ OUTBOX_RELAY_ENABLED=false LOAN_REPAYMENT_CONSUMER_ENABLED=false \
 ```
 
 Local runs keep a plain local URL. Deployed pods use the Terraform output `jdbc_url`
-(`...?sslmode=verify-full&sslrootcert=/etc/ssl/rds/global-bundle.pem`): the chart mounts the platform
-ConfigMap `rds-ca-bundle` (key `global-bundle.pem`) read-only at `/etc/ssl/rds` and refuses a `DB_URL`
+(`...?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem`): the chart mounts the platform
+ConfigMap `rds-ca-bundle` (key `global-bundle.pem`) read-only at `/etc/fintechbankx/rds-ca` and refuses a `DB_URL`
 that does not verify the Aurora certificate against it.
 
 Kafka is only contacted by the outbox relay and the repayment consumer, both off by default; events

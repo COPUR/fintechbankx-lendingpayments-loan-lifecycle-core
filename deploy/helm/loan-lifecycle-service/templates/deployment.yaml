@@ -69,6 +69,9 @@ spec:
             - name: management
               containerPort: {{ .Values.service.managementPort }}
           env:
+            # Path of the mounted RDS CA bundle (cicd-templates 4f0f266).
+            - name: DB_SSL_ROOT_CERT
+              value: {{ printf "%s/%s" (trimSuffix "/" .Values.databaseCa.mountPath) .Values.databaseCa.key | quote }}
             # Migrations run only in the pre-install/pre-upgrade Job as the
             # schema owner; the pods hold the runtime role and never migrate.
             - name: SPRING_FLYWAY_ENABLED
@@ -112,15 +115,15 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            - name: rds-ca-bundle
-              mountPath: {{ .Values.rdsCaBundle.mountPath }}
+            - name: database-ca
+              mountPath: {{ .Values.databaseCa.mountPath }}
               readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
-        - name: rds-ca-bundle
+        - name: database-ca
           configMap:
-            name: {{ .Values.rdsCaBundle.configMapName }}
+            name: {{ .Values.databaseCa.configMapName }}
             items:
-              - key: {{ .Values.rdsCaBundle.key }}
-                path: {{ .Values.rdsCaBundle.key }}
+              - key: {{ .Values.databaseCa.key }}
+                path: {{ .Values.databaseCa.key }}

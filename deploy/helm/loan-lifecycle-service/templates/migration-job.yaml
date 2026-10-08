@@ -82,6 +82,9 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["migrate"]
           env:
+            # Path of the mounted RDS CA bundle (cicd-templates 4f0f266).
+            - name: DB_SSL_ROOT_CERT
+              value: {{ printf "%s/%s" (trimSuffix "/" .Values.databaseCa.mountPath) .Values.databaseCa.key | quote }}
             - name: DB_URL
               value: {{ .Values.config.DB_URL | quote }}
             # The runtime role V4 grants (Flyway placeholder runtime_role).
@@ -100,16 +103,16 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            - name: rds-ca-bundle
-              mountPath: {{ .Values.rdsCaBundle.mountPath }}
+            - name: database-ca
+              mountPath: {{ .Values.databaseCa.mountPath }}
               readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
-        - name: rds-ca-bundle
+        - name: database-ca
           configMap:
-            name: {{ .Values.rdsCaBundle.configMapName }}
+            name: {{ .Values.databaseCa.configMapName }}
             items:
-              - key: {{ .Values.rdsCaBundle.key }}
-                path: {{ .Values.rdsCaBundle.key }}
+              - key: {{ .Values.databaseCa.key }}
+                path: {{ .Values.databaseCa.key }}
 {{- end }}
