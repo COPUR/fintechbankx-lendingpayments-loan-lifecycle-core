@@ -21,8 +21,12 @@ spec:
     metadata:
       labels:
         {{- include "loan.selectorLabels" . | nindent 8 }}
+        app: {{ .Values.serviceAccount.name }}
+        version: {{ .Values.image.tag | quote }}
+        sidecar.istio.io/inject: "true"
         {{- toYaml .Values.podLabels | nindent 8 }}
       annotations:
+        sidecar.istio.io/inject: "true"
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ .Values.service.managementPort | quote }}

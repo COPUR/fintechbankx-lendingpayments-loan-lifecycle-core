@@ -13,47 +13,74 @@ serviceAccount:
   # IAM role from deploy/terraform output workload_role_arn (IRSA).
   roleArn: ""
 
+# Platform contract pod labels. The chart adds app.kubernetes.io/name and
+# app (= the service account name), version (= image.tag) and
+# sidecar.istio.io/inject (label and annotation) itself.
 podLabels:
   app.kubernetes.io/part-of: fintechbankx-lending
   fintechbankx.io/service-id: svc-ln-loan-lifecycle
-  sidecar.istio.io/inject: "true"
+  fintechbankx.io/app: app-ln-loan-lifecycle
 
 service:
   port: 8080
   managementPort: 8081
 
+# Memory request = limit: the JVM sizes its heap from the limit
+# (MaxRAMPercentage), so the pod always gets what the heap will use.
 resources:
   requests:
     cpu: 500m
-    memory: 768Mi
+    memory: 1Gi
   limits:
     memory: 1Gi
 
+# CPU only: a JVM does not give memory back, so a memory target would only
+# ever scale up.
 autoscaling:
   enabled: true
   minReplicas: 3
   maxReplicas: 12
   targetCPUUtilizationPercentage: 65
-  targetMemoryUtilizationPercentage: 80
+
+# Who may open connections to the pods (Kubernetes NetworkPolicy; mesh ALLOW
+# rules by caller principal live in the mesh repo, see README "Callers").
+networkPolicy:
+  enabled: true
+  # 8080: the ingress gateway and these caller namespaces
+  ingressNamespace: istio-ingress
+  callerNamespaces:
+    - payments
+  # 8081 (actuator, Prometheus scrape)
+  observabilityNamespace: observability
 
 podDisruptionBudget:
   minAvailable: 2
 
-# Non-secret runtime settings, rendered into a ConfigMap.
+# Non-secret runtime settings, rendered into a ConfigMap. Values marked
+# REQUIRED have no default; the chart fails to render without them.
 config:
-  DB_URL: ""                      # jdbc:postgresql://<aurora-writer-endpoint>:5432/db_ln_loan_lifecycle_<env>?sslmode=require
+  DB_URL: ""                      # REQUIRED jdbc:postgresql://<aurora-writer-endpoint>:5432/db_ln_loan_lifecycle_<env>?sslmode=require
   DB_USERNAME: loan_lifecycle_app
   DB_POOL_MAX: "10"
-  KAFKA_BOOTSTRAP_SERVERS: ""
-  KAFKA_SECURITY_PROTOCOL: SASL_SSL  # MSK IAM auth, see application-aws.yml
-  SPRING_PROFILES_ACTIVE: aws
-  OIDC_ISSUER_URI: ""
-  OIDC_JWK_SET_URI: ""
-  OIDC_TOKEN_URI: ""              # client-credentials token endpoint for service-to-service calls
+  KAFKA_BOOTSTRAP_SERVERS: ""     # REQUIRED MSK bootstrap brokers (IAM, port 9098)
+  KAFKA_SECURITY_PROTOCOL: SASL_SSL  # MSK IAM auth, see application-kafka-msk.yml
+  SPRING_PROFILES_ACTIVE: kafka-msk
+  OIDC_ISSUER_URI: ""             # REQUIRED Keycloak realm issuer
+  OIDC_JWK_SET_URI: ""            # REQUIRED Keycloak realm JWKS
+  OIDC_TOKEN_URI: ""              # REQUIRED client-credentials token endpoint for service-to-service calls
+  OIDC_AUDIENCE: svc-ln-loan-lifecycle   # tokens must carry this in aud
   SERVICE_CLIENT_ID: svc-ln-loan-lifecycle
-  CUSTOMER_SERVICE_BASE_URL: http://customer-profile-kyc-service.customer.svc.cluster.local:8080
-  CUSTOMER_CREDIT_LEDGER_CURRENCY: AED
-  OUTBOX_RELAY_ENABLED: "true"
+  CUSTOMER_SERVICE_BASE_URL: ""   # REQUIRED e.g. http://customer-profile-kyc-service.customer.svc.cluster.local:8080
+  # REQUIRED http or in-memory. Switch to http only after the customer
+  # cutover has passed its step 4 (runbook precondition table).
+  CUSTOMER_CREDIT_ADAPTER: ""
+  # REQUIRED ISO 4217 currency the customer service holds credit in. No
+  # default: the book's currency is a business decision, never assumed.
+  CUSTOMER_CREDIT_LEDGER_CURRENCY: ""
+  # Off until evt.ln.loan.* are in the platform catalog (runbook step 1).
+  OUTBOX_RELAY_ENABLED: "false"
+  # Off until the loan and payments writes cut over together (runbook step 3).
+  LOAN_REPAYMENT_CONSUMER_ENABLED: "false"
 
 # Database credential, synced from AWS Secrets Manager by External Secrets Operator.
 externalSecret:

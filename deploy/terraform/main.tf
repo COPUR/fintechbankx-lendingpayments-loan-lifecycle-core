@@ -36,10 +36,18 @@ module "service_base" {
 
 # --- Encryption -------------------------------------------------------------
 
+# The tag lets the platform's External Secrets Operator role (terraform-modules
+# stacks/platform, module external-secrets-irsa) decrypt the db-app secret it
+# syncs into the cluster; the key policy keeps the account default, so that
+# IAM grant is enough. The service's own pods never read Secrets Manager.
 resource "aws_kms_key" "database" {
   description             = "Encrypts ${local.database} storage, snapshots, logs and credentials"
   enable_key_rotation     = true
   deletion_window_in_days = 30
+
+  tags = {
+    "fintechbankx.io/secrets" = "true"
+  }
 }
 
 resource "aws_kms_alias" "database" {
@@ -114,6 +122,12 @@ resource "aws_rds_cluster" "database" {
     min_capacity = var.aurora_min_capacity
     max_capacity = var.aurora_max_capacity
   }
+
+  # AWS applies minor versions in the maintenance window
+  # (auto_minor_version_upgrade); a plan must not try to roll them back.
+  lifecycle {
+    ignore_changes = [engine_version]
+  }
 }
 
 resource "aws_rds_cluster_instance" "database" {
@@ -130,11 +144,17 @@ resource "aws_rds_cluster_instance" "database" {
   performance_insights_kms_key_id       = aws_kms_key.database.arn
   performance_insights_retention_period = 7
   promotion_tier                        = count.index
+
+  lifecycle {
+    ignore_changes = [engine_version]
+  }
 }
 
 # Application credential (role loan_lifecycle_app, owner of schema
 # sc_ln_loan_lifecycle). The DBA bootstrap in docs/migration creates the role
 # and writes {"username", "password"} here; Terraform never sees the value.
+# External Secrets Operator (ClusterSecretStore aws-secrets-manager) syncs it
+# into the pod's Kubernetes Secret.
 resource "aws_secretsmanager_secret" "app_database" {
   name                    = "${local.name}/db-app"
   description             = "Application database credential for ${local.service_id}"
@@ -172,25 +192,10 @@ resource "aws_iam_role" "workload" {
   assume_role_policy = data.aws_iam_policy_document.irsa_trust.json
 }
 
-data "aws_iam_policy_document" "workload" {
-  statement {
-    sid       = "ReadOwnDatabaseCredential"
-    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-    resources = [aws_secretsmanager_secret.app_database.arn, module.service_base.secret_arn]
-  }
-
-  statement {
-    sid       = "DecryptOwnDatabaseCredential"
-    actions   = ["kms:Decrypt"]
-    resources = [aws_kms_key.database.arn]
-  }
-
-  statement {
-    sid       = "ReadOwnParameters"
-    actions   = ["ssm:GetParameter", "ssm:GetParametersByPath"]
-    resources = ["arn:aws:ssm:${var.aws_region}:*:parameter/fintechbankx/${var.environment}/${local.service_slug}/*"]
-  }
-}
+# The pods' role holds no Secrets Manager or KMS grants: credentials reach the
+# pod as a Kubernetes Secret synced by External Secrets Operator, and the
+# service reads no SSM parameters. Its only AWS permissions are the MSK ones
+# below.
 
 # --- MSK: IAM client auth, scoped to this service's own topics --------------
 # Platform contract: Kafka on AWS is MSK with IAM auth via the IRSA role.
@@ -221,6 +226,24 @@ data "aws_iam_policy_document" "msk" {
     resources = ["${local.msk_topic_arn_prefix}/evt.ln.loan.*"]
   }
 
+  # evt.ln.loan.* includes this service's DLQ evt.ln.loan.dlq.v1, where the
+  # repayment consumer writes records it gives up on.
+
+  statement {
+    sid = "ConsumeLoanPaymentCompleted"
+    actions = [
+      "kafka-cluster:DescribeTopic",
+      "kafka-cluster:ReadData",
+    ]
+    resources = ["${local.msk_topic_arn_prefix}/evt.pay.payment.loan-payment-completed.v1"]
+  }
+
+  statement {
+    sid       = "OwnConsumerGroups"
+    actions   = ["kafka-cluster:DescribeGroup", "kafka-cluster:AlterGroup"]
+    resources = ["${local.msk_group_arn_prefix}/cg.svc-ln-loan-lifecycle.*"]
+  }
+
   statement {
     sid       = "IdempotentProducerTransactionalIds"
     actions   = ["kafka-cluster:DescribeTransactionalId", "kafka-cluster:AlterTransactionalId"]
@@ -230,15 +253,9 @@ data "aws_iam_policy_document" "msk" {
 
 resource "aws_iam_role_policy" "msk" {
   count  = var.msk_cluster_arn == "" ? 0 : 1
-  name   = "${local.name}-msk-produce"
+  name   = "${local.name}-msk"
   role   = aws_iam_role.workload.id
   policy = data.aws_iam_policy_document.msk[0].json
-}
-
-resource "aws_iam_role_policy" "workload" {
-  name   = "${local.name}-least-privilege"
-  role   = aws_iam_role.workload.id
-  policy = data.aws_iam_policy_document.workload.json
 }
 
 # --- Alarms -----------------------------------------------------------------

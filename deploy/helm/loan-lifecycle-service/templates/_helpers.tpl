@@ -2,8 +2,9 @@
 {{- .Chart.Name -}}
 {{- end -}}
 
+{{- /* app.kubernetes.io/name is the service account name (platform contract). */ -}}
 {{- define "loan.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "loan.name" . }}
+app.kubernetes.io/name: {{ .Values.serviceAccount.name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 

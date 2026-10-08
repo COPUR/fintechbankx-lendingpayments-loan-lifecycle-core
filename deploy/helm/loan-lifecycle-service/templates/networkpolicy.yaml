@@ -1,0 +1,37 @@
+{{- if .Values.networkPolicy.enabled }}
+# Layer-4 allow list. The mesh (default-deny AuthorizationPolicy, STRICT
+# mTLS) authorises callers by principal on top of this; this chart ships no
+# PeerAuthentication or AuthorizationPolicy (platform contract).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "loan.name" . }}
+  labels:
+    {{- include "loan.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "loan.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+        {{- range .Values.networkPolicy.callerNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- end }}
+      ports:
+        - port: {{ .Values.service.port }}
+          protocol: TCP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.observabilityNamespace }}
+      ports:
+        - port: {{ .Values.service.managementPort }}
+          protocol: TCP
+{{- end }}

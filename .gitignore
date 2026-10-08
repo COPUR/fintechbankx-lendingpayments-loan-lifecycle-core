@@ -9,6 +9,6 @@ build/
 
 # Terraform working files
 **/.terraform/
-**/.terraform.lock.hcl
+# The provider lock file is committed (reproducible provider versions).
 *.tfstate
 *.tfstate.*
