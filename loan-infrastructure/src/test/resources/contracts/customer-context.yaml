@@ -1,6 +1,6 @@
 # Copied for loan's consumer contract test (CustomerProfileHttpAdapterContractTest).
 # Source: fintechbankx-customer-profile-kyc-core, branch claude/customer-risk-compliance-deployable-ygi0zo (PR #13),
-# commit cf86385, file api/openapi/customer-context.yaml, unchanged. Since 435aa83 (422 CURRENCY_MISMATCH for a
+# commit 36a01e2 (OpenAPI identical to cf86385), file api/openapi/customer-context.yaml, unchanged. Since 435aa83 (422 CURRENCY_MISMATCH for a
 # valid but different ISO currency, 400 for a malformed one) it adds the kyc-status endpoints, drops the DPoP
 # security alternative, and treats a credit movement as a repeat only when key, type, amount, currency and
 # reference all match (otherwise 409 IDEMPOTENCY_KEY_REUSED). Loan calls only /credit, /credit/reserve and
