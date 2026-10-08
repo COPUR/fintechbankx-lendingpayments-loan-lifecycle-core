@@ -3,10 +3,11 @@
 # IRSA role its pods use. Shared platform pieces (log group, SSM parameters,
 # runtime secret) come from the platform microservice-base module.
 #
-# Known platform issue: microservice-base (ref=main) names its runtime secret
+# microservice-base (ref=main) names its runtime secret
+# "<env>/<slug>/runtime" since terraform-modules #11 (457b504..d5d2548; it was
 # "<env>-<slug>/runtime", outside the secret:<env>/* path the platform ESO role
-# may read. Platform fixes it in terraform-modules #11; this service does not
-# read that secret and does not work around it here.
+# may read). This stack passes no runtime_secret_name and reads no runtime
+# secret, so it takes the module default.
 
 locals {
   service_id   = "svc-ln-loan-lifecycle"
