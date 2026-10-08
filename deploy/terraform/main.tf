@@ -218,9 +218,16 @@ locals {
 data "aws_iam_policy_document" "msk" {
   count = var.msk_cluster_arn == "" ? 0 : 1
 
+  # WriteDataIdempotently is a cluster action (the producer runs with
+  # enable.idempotence=true): it is evaluated against the cluster ARN, so on a
+  # topic ARN it would never match.
   statement {
-    sid       = "ConnectToCluster"
-    actions   = ["kafka-cluster:Connect", "kafka-cluster:DescribeCluster"]
+    sid = "ConnectToCluster"
+    actions = [
+      "kafka-cluster:Connect",
+      "kafka-cluster:DescribeCluster",
+      "kafka-cluster:WriteDataIdempotently",
+    ]
     resources = [var.msk_cluster_arn]
   }
 
@@ -229,7 +236,6 @@ data "aws_iam_policy_document" "msk" {
     actions = [
       "kafka-cluster:DescribeTopic",
       "kafka-cluster:WriteData",
-      "kafka-cluster:WriteDataIdempotently",
     ]
     resources = ["${local.msk_topic_arn_prefix}/evt.ln.loan.*"]
   }
@@ -246,17 +252,17 @@ data "aws_iam_policy_document" "msk" {
     resources = ["${local.msk_topic_arn_prefix}/evt.pay.payment.loan-payment-completed.v1"]
   }
 
+  # Consumer groups of the repayment consumer only.
   statement {
     sid       = "OwnConsumerGroups"
     actions   = ["kafka-cluster:DescribeGroup", "kafka-cluster:AlterGroup"]
     resources = ["${local.msk_group_arn_prefix}/cg.svc-ln-loan-lifecycle.*"]
   }
 
-  statement {
-    sid       = "IdempotentProducerTransactionalIds"
-    actions   = ["kafka-cluster:DescribeTransactionalId", "kafka-cluster:AlterTransactionalId"]
-    resources = ["${local.msk_group_arn_prefix}/${local.service_id}*"]
-  }
+  # No transactional-id statement: the service uses no Kafka transactions
+  # (no transactional.id / transaction-id-prefix). If it ever does, grant
+  # Describe/AlterTransactionalId on replace(cluster ARN, ":cluster/",
+  # ":transactional-id/"), never on the :group/ prefix.
 }
 
 resource "aws_iam_role_policy" "msk" {
