@@ -90,15 +90,45 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Run tests
+      # ADR-029: a behaviour change comes with its test. A PR that changes
+      # src/main without touching src/test fails unless it carries the label
+      # no-behaviour-change.
+      - name: Test-first guard (src/main changes need src/test changes)
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          NO_BEHAVIOUR_CHANGE: ${{ contains(github.event.pull_request.labels.*.name, 'no-behaviour-change') }}
         shell: bash
+        run: |
+          git fetch --no-tags origin "$BASE_REF"
+          changed="$(git diff --name-only "origin/${BASE_REF}...HEAD")"
+          main_changes="$(echo "$changed" | grep -E '(^|/)src/main/' || true)"
+          test_changes="$(echo "$changed" | grep -E '(^|/)src/test/' || true)"
+          if [ -n "$main_changes" ] && [ -z "$test_changes" ]; then
+            if [ "$NO_BEHAVIOUR_CHANGE" = "true" ]; then
+              echo "src/main changed without src/test changes; allowed by label no-behaviour-change."
+            else
+              echo "src/main changed but no src/test file did (ADR-029). Add the test that fails without this change,"
+              echo "or label the PR no-behaviour-change if nothing observable changes:"
+              echo "$main_changes"
+              exit 1
+            fi
+          fi
+
+      # check = unit tests, PostgreSQL integration tests (they fail, not skip,
+      # without TEST_DB_URL because CI=true), ArchUnit rules and the jacoco
+      # coverage gates (ADR-027).
+      - name: Run checks
+        shell: bash
+        env:
+          CI: "true"
         run: |
           if [ -f build.gradle ] || [ -f settings.gradle ] || [ -f gradlew ]; then
             GRADLE=gradle
             if [ -x ./gradlew ]; then GRADLE=./gradlew; fi
-            if ! $GRADLE --no-daemon test; then
+            if ! $GRADLE --no-daemon check; then
               if [ -f .ci/allow-gradle-fail ]; then
-                echo "Gradle test failed but .ci/allow-gradle-fail is present; continuing."
+                echo "Gradle check failed but .ci/allow-gradle-fail is present; continuing."
               else
                 exit 1
               fi
@@ -126,6 +156,16 @@ jobs:
           elif ls src/main/resources/openapi/*.yaml >/dev/null 2>&1; then
             npx -y @redocly/cli@1.27.1 lint src/main/resources/openapi/*.yaml
           fi
+
+      - name: AsyncAPI contract validation
+        if: ${{ hashFiles('api/asyncapi/*.yaml') != '' }}
+        env:
+          NPM_CONFIG_CACHE: ${{ runner.temp }}/.npm
+        shell: bash
+        run: |
+          for spec in api/asyncapi/*.yaml; do
+            npx -y @asyncapi/cli@2.13.0 validate "$spec"
+          done
 
       - name: Install oasdiff
         if: ${{ hashFiles('openapi/*.yaml') != '' || hashFiles('api/openapi/*.yaml') != '' || hashFiles('src/main/resources/openapi/*.yaml') != '' }}

@@ -37,10 +37,25 @@ jobs:
       - name: Lint and render chart
         run: |
           chart=deploy/helm/loan-lifecycle-service
-          args="--set image.repository=ci/loan-lifecycle-service --set image.tag=${{ github.sha }} --set externalSecret.remoteSecretName=ci/db-app --set externalSecret.serviceClientSecretName=ci/service-client"
+          # Dummy values for the settings the chart requires (no defaults);
+          # real ones come from the environment's values file.
+          args="--set image.repository=ci/loan-lifecycle-service --set image.tag=${{ github.sha }}"
+          args="$args --set externalSecret.remoteSecretName=ci/db-app --set externalSecret.serviceClientSecretName=ci/service-client"
+          args="$args --set config.DB_URL=jdbc:postgresql://ci-db:5432/db_ln_loan_lifecycle_ci"
+          args="$args --set config.KAFKA_BOOTSTRAP_SERVERS=ci-kafka:9098"
+          args="$args --set config.OIDC_ISSUER_URI=https://ci-idp/realms/fintechbankx"
+          args="$args --set config.OIDC_JWK_SET_URI=https://ci-idp/realms/fintechbankx/protocol/openid-connect/certs"
+          args="$args --set config.OIDC_TOKEN_URI=https://ci-idp/realms/fintechbankx/protocol/openid-connect/token"
+          args="$args --set config.CUSTOMER_SERVICE_BASE_URL=http://ci-customer:8080"
+          args="$args --set config.CUSTOMER_CREDIT_ADAPTER=http --set config.CUSTOMER_CREDIT_LEDGER_CURRENCY=XTS"
           helm lint "$chart" $args
           helm template ci "$chart" $args > /dev/null
           helm template ci "$chart" -f "$chart/values-dev.yaml" $args > /dev/null
+          # A missing required setting must stop the render.
+          if helm template ci "$chart" --set image.repository=ci/x --set image.tag=ci > /dev/null 2>&1; then
+            echo "chart rendered without its required settings" >&2
+            exit 1
+          fi
 
   terraform:
     name: deploy/terraform
@@ -79,5 +94,7 @@ jobs:
       PGPASSWORD: backfill
     steps:
       - uses: actions/checkout@v4
+      # The backfill currency is a required run parameter; XTS is the ISO 4217
+      # code reserved for testing, so the rehearsal assumes no real currency.
       - name: Rehearse monolith-to-service loan backfill and reconciliation
-        run: scripts/migration/verify-backfill.sh
+        run: scripts/migration/verify-backfill.sh XTS
