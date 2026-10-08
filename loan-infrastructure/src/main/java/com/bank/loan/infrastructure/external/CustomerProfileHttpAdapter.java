@@ -244,7 +244,7 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
                         customerId.getValue(), code);
                     return CreditDecision.REFUSED;
                 }
-                // Customer #13 (435aa83, copied in src/test/resources/contracts/customer-context.yaml):
+                // Customer #13 (435aa83, still so at 58f7369, copied in src/test/resources/contracts/customer-context.yaml):
                 // 422 CURRENCY_MISMATCH when the ISO currency is valid but not the customer's credit
                 // currency, 400 when it is malformed. Refresh the copied contract when customer's
                 // push lands in the catalog.

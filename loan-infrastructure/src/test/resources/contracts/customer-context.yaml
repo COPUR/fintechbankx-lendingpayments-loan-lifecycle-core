@@ -1,7 +1,8 @@
 # Copied for loan's consumer contract test (CustomerProfileHttpAdapterContractTest).
 # Source: fintechbankx-customer-profile-kyc-core, branch claude/customer-risk-compliance-deployable-ygi0zo (PR #13),
-# commit 435aa83, file api/openapi/customer-context.yaml (422 CURRENCY_MISMATCH for a valid but different ISO
-# currency, 400 for a malformed one). Replace with the catalogued version once merged.
+# commit 58f7369, file api/openapi/customer-context.yaml, unchanged. Since 435aa83 (422 CURRENCY_MISMATCH for a
+# valid but different ISO currency, 400 for a malformed one) it only adds the kyc-status endpoints, which loan
+# does not call. Replace with the catalogued version once merged.
 openapi: 3.0.3
 info:
   title: Customer Context Service API
@@ -151,6 +152,113 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: Customer not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/customers/{customerId}/kyc-status:
+    get:
+      tags: [CustomerManagement]
+      summary: Read the customer's KYC status (no personal data)
+      operationId: getKycStatus
+      description: |-
+        KYC fields only, for the payment service and other callers that must
+        not see personal data. Callers: SERVICE tokens whose client (azp) is
+        on SERVICE_CALLERS_KYC (default svc-pay-initiation-settlement; the
+        credit allow-list does not apply here), BANKER, ADMIN, and the
+        customer themselves (customer_id claim). New capability with no
+        monolith counterpart.
+      security:
+        - bearerAuth: []
+        - dpopAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - $ref: '#/components/parameters/CustomerId'
+      responses:
+        '200':
+          description: KYC status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KycStatusResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Customer not found (CUSTOMER_NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      tags: [CustomerManagement]
+      summary: Staff verify or reject the customer's KYC
+      operationId: changeKycStatus
+      description: |-
+        BANKER or ADMIN only. Records the token subject as the staff member who
+        changed it and publishes Customer.Customer.KycStatusChanged.v1 on
+        evt.cus.customer.kyc-status-changed.v1. Setting the current status
+        again changes nothing and publishes nothing.
+      security:
+        - bearerAuth: []
+        - dpopAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - $ref: '#/components/parameters/CustomerId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangeKycStatusRequest'
+      responses:
+        '200':
+          description: KYC status after the change
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KycStatusResponse'
+        '400':
+          description: Status missing or not VERIFIED/REJECTED (INVALID_REQUEST)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Customer not found (CUSTOMER_NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: CONCURRENT_UPDATE, the customer changed concurrently; retry
           content:
             application/json:
               schema:
@@ -539,6 +647,37 @@ components:
           type: string
           maxLength: 128
           description: What the credit is moved for, for example the loan id. Stored with the movement for reconciliation.
+
+    KycStatusResponse:
+      type: object
+      description: KYC fields only; no name, e-mail, phone or address.
+      required: [customerId, kycVerified, kycStatus, kycSource]
+      properties:
+        customerId:
+          type: string
+        kycVerified:
+          type: boolean
+          description: true exactly when kycStatus is VERIFIED.
+        kycStatus:
+          type: string
+          enum: [PENDING, VERIFIED, REJECTED]
+        kycSource:
+          type: string
+          enum: [MIGRATED, STAFF]
+          description: MIGRATED, carried over from the monolith (verified as of the migration; decision pending), or STAFF, set in this service.
+        verifiedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the customer was verified; null unless kycStatus is VERIFIED.
+
+    ChangeKycStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [VERIFIED, REJECTED]
 
     CustomerCreditResponse:
       type: object
