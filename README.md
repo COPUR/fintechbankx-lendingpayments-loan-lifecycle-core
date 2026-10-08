@@ -47,16 +47,74 @@ Bu repository, FinTechBankX DDD/EDA dönüşümünde **svc-ln-loan-lifecycle** s
 
 | What | Command / path |
 |---|---|
-| Unit and integration tests | `./gradlew test` (integration tests need `TEST_DB_URL` or Docker) |
-| Run locally | `SPRING_DATASOURCE_PASSWORD=... CUSTOMER_CREDIT_ADAPTER=in-memory ./gradlew :loan-bootstrap:bootRun` |
+| Full gate (unit, integration, ArchUnit, coverage) | `./gradlew check`. Integration tests use `TEST_DB_URL` (or Docker); without either they are skipped locally and **fail** when `CI=true`. |
+| Run locally without Kafka or the customer service | see "Local boot" below |
 | Database migrations | `loan-infrastructure/src/main/resources/db/migration` (schema `sc_ln_loan_lifecycle`) |
+| HTTP contract | `api/openapi/loan-context.yaml` (breaking changes need `loan-context.accepted-breaking.txt`, see `scripts/ci/oasdiff-breaking.sh`) |
+| Event contract | `api/asyncapi/svc-ln-loan-lifecycle.yaml` (AsyncAPI 3.0) |
 | Container image | `docker build -t loan-lifecycle-service .` |
-| Kubernetes | `deploy/helm/loan-lifecycle-service` |
+| Kubernetes | `deploy/helm/loan-lifecycle-service` (required values listed in `values.yaml`) |
 | AWS infrastructure | `deploy/terraform` |
-| Data split from the monolith | [RUNBOOK-EXTRACT-ln-loan-lifecycle](docs/migration/RUNBOOK-EXTRACT-ln-loan-lifecycle.md) |
+| Data split from the monolith | [RUNBOOK-EXTRACT-ln-loan-lifecycle](docs/migration/RUNBOOK-EXTRACT-ln-loan-lifecycle.md), rehearsal `scripts/migration/verify-backfill.sh <currency>` |
+| Monolith-to-service regression mapping | [REGRESSION_MAPPING](docs/migration/REGRESSION_MAPPING.md) |
 | Deployment and Well-Architected mapping | [DEPLOYMENT_AND_WELL_ARCHITECTED](docs/architecture/DEPLOYMENT_AND_WELL_ARCHITECTED.md) |
 
-Module layout: `loan-domain` (aggregate, events, ports) ← `loan-application` (use cases) ← `loan-infrastructure` (JPA, outbox, web, customer-service client) ← `loan-bootstrap` (Spring Boot app).
+Module layout (FinTechBankX service guardrails, ADR-028): `loan-domain` (aggregate, events,
+`domain.port.in` use cases, `domain.port.out` ports) <- `loan-application` (use-case implementations,
+DTOs) <- `loan-infrastructure` (`web`, `persistence`, `outbox`, `messaging`, `external`, `config`)
+<- `loan-bootstrap` (Spring Boot app). `HexagonalArchitectureTest` enforces the four ArchUnit rules on
+`check`.
+
+### Local boot
+
+No Kafka, no customer service, no Keycloak token needed to start:
+
+```
+DB_URL=jdbc:postgresql://localhost:5432/<db> DB_USERNAME=<user> SPRING_DATASOURCE_PASSWORD=<password> \
+CUSTOMER_CREDIT_ADAPTER=in-memory CUSTOMER_CREDIT_LEDGER_CURRENCY=AED \
+OUTBOX_RELAY_ENABLED=false LOAN_REPAYMENT_CONSUMER_ENABLED=false \
+./gradlew :loan-bootstrap:bootRun
+```
+
+Kafka is only contacted by the outbox relay and the repayment consumer, both off by default; events
+still land in `outbox_event`. The in-memory credit adapter knows the monolith's stub customers
+`CUST-12345678`, `CUST-87654321`, `CUST-11111111`. Calls need a JWT from the configured issuer
+(`OIDC_ISSUER_URI`, `OIDC_JWK_SET_URI`) whose `aud` contains `svc-ln-loan-lifecycle`; customers are
+identified by the token's `customer_id` claim.
+
+## Events
+
+```yaml
+published_events:   # api/asyncapi/svc-ln-loan-lifecycle.yaml, key = loanId, via the transactional outbox
+  - evt.ln.loan.created.v1        # Lending.Loan.Created.v1
+  - evt.ln.loan.approved.v1       # Lending.Loan.Approved.v1
+  - evt.ln.loan.rejected.v1       # Lending.Loan.Rejected.v1
+  - evt.ln.loan.disbursed.v1      # Lending.Loan.Disbursed.v1
+  - evt.ln.loan.cancelled.v1      # Lending.Loan.Cancelled.v1
+  - evt.ln.loan.payment-made.v1   # Lending.Loan.PaymentMade.v1
+  - evt.ln.loan.fully-paid.v1     # Lending.Loan.FullyPaid.v1
+  - evt.ln.loan.dlq.v1            # this service's DLQ (records the repayment consumer gave up on)
+consumed_events:
+  - topic: evt.pay.payment.loan-payment-completed.v1   # Payments.Payment.LoanPaymentCompleted.v1
+    group: cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1
+    enabled_by: LOAN_REPAYMENT_CONSUMER_ENABLED (default false)
+```
+
+The topics are not yet in the platform asyncapi catalog (catalog PR pending); the relay stays off
+(`OUTBOX_RELAY_ENABLED=false`) until they are.
+
+## Callers (mesh ALLOW rules)
+
+The chart ships no PeerAuthentication or AuthorizationPolicy (platform contract). The mesh repo needs
+ALLOW rules on namespace `lending` for these principals:
+
+| Principal | Port | Why |
+|---|---|---|
+| `cluster.local/ns/istio-ingress/sa/<ingress gateway SA>` | 8080 | web, mobile and staff clients through the gateway |
+| `cluster.local/ns/payments/sa/payment-initiation-settlement-service` | 8080 | reads a loan before taking a repayment (if the payments service calls this API) |
+| `cluster.local/ns/observability/sa/<prometheus SA>` | 8081 | Prometheus scrape of `/actuator/prometheus` |
+
+The chart's NetworkPolicy admits 8080 from `istio-ingress` and `payments`, 8081 from `observability`.
 
 ## Dokümantasyon ve Referanslar
 - [Enterprise Architecture Hub](https://github.com/COPUR/fintechbankx-governance-architecture-enablement-enterprise-architecture)
