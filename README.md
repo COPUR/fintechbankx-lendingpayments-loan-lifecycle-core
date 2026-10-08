@@ -76,6 +76,11 @@ OUTBOX_RELAY_ENABLED=false LOAN_REPAYMENT_CONSUMER_ENABLED=false \
 ./gradlew :loan-bootstrap:bootRun
 ```
 
+Local runs keep a plain local URL. Deployed pods use the Terraform output `jdbc_url`
+(`...?sslmode=verify-full&sslrootcert=/etc/ssl/rds/global-bundle.pem`): the chart mounts the platform
+ConfigMap `rds-ca-bundle` (key `global-bundle.pem`) read-only at `/etc/ssl/rds` and refuses a `DB_URL`
+that does not verify the Aurora certificate against it.
+
 Kafka is only contacted by the outbox relay and the repayment consumer, both off by default; events
 still land in `outbox_event`. The in-memory credit adapter knows the monolith's stub customers
 `CUST-12345678`, `CUST-87654321`, `CUST-11111111`. Calls need a JWT from the configured issuer
