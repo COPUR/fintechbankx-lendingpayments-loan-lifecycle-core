@@ -112,9 +112,17 @@ The Flyway migration Job (Helm pre-install/pre-upgrade hook) needs egress to Aur
 without a sidecar by default (`migration.istioSidecar: false`), so the Istio egress policy does not apply to it,
 but the mesh repo's NetworkPolicies do: they grant Aurora egress by `app.kubernetes.io/name` only, so the Job
 pod carries `app.kubernetes.io/name=loan-lifecycle-service` like the service pods, and
-`app.kubernetes.io/component=db-migration` (service pods: `api`) keeps it out of the Service, PDB and
+`app.kubernetes.io/component=db-migration` (service pods: `service`, platform convention cicd-templates 335a345) keeps it out of the Service, PDB and
 Deployment selectors. Ask the mesh team to keep the 5432 egress rule keyed on that label (not on the
 component) and tell them if the cluster runs native sidecars, then turn the sidecar on.
+
+**Selector labels must land before any deploy.** A Deployment's `spec.selector` is immutable, so the
+`app.kubernetes.io/component=service` selector (and the Job pod's `db-migration`) must be in the chart before the
+first install of this release in any environment. No release exists yet; if one did, changing the selector would
+need the Deployment deleted and recreated (a full outage of this service), not a `helm upgrade`. The Job pod gets
+no exemption from the mesh or admission policies: it is selected by the 5432 egress rule through its name label,
+and CI (`scripts/ci/helm-selector-check.py`) fails if any Service, PDB, NetworkPolicy, topology spread or
+Deployment selector would select it, or if it carries `fintechbankx.io/service-id`.
 
 **C. Callee ALLOW rules (this service as the caller, principal `cluster.local/ns/lending/sa/loan-lifecycle-service`).**
 

@@ -5,9 +5,9 @@
 {{- /*
 app.kubernetes.io/name is the service account name (platform contract) on every
 pod, the migration Job's included: mesh NetworkPolicies grant Aurora egress by
-that label only. app.kubernetes.io/component tells the pods apart (api for the
-Deployment, db-migration for the Job), so the Service, PDB, HPA and Deployment
-never select the Job pod.
+that label only. app.kubernetes.io/component tells the pods apart (service for the
+Deployment, db-migration for the Job; cicd-templates 335a345), so the Service,
+PDB, NetworkPolicy, topology spread and Deployment never select the Job pod.
 */ -}}
 {{- define "loan.baseLabels" -}}
 app.kubernetes.io/name: {{ .Values.serviceAccount.name }}
@@ -16,7 +16,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{- define "loan.selectorLabels" -}}
 {{ include "loan.baseLabels" . }}
-app.kubernetes.io/component: api
+app.kubernetes.io/component: service
 {{- end -}}
 
 {{- define "loan.labels" -}}

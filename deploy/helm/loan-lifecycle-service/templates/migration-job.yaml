@@ -54,12 +54,13 @@ spec:
     metadata:
       # app.kubernetes.io/name = the service account, as on the service
       # pods: mesh NetworkPolicies grant Aurora egress (5432) by that label
-      # only. component db-migration (not api) keeps the Service, PDB, HPA
-      # and Deployment from selecting this pod.
+      # only. component db-migration (not service) keeps the Service, PDB,
+      # NetworkPolicy, topology spread and Deployment from selecting this pod.
+      # No fintechbankx.io/service-id: observability would scrape it and count
+      # a completed Job pod as a down service instance.
       labels:
         {{- include "loan.baseLabels" . | nindent 8 }}
         app.kubernetes.io/component: db-migration
-        fintechbankx.io/service-id: {{ index .Values.podLabels "fintechbankx.io/service-id" }}
         fintechbankx.io/squad: {{ .Values.squad }}
         sidecar.istio.io/inject: {{ .Values.migration.istioSidecar | quote }}
       annotations:
