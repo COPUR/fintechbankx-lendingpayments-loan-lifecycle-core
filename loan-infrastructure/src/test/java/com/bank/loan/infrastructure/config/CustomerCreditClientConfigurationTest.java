@@ -71,4 +71,45 @@ class CustomerCreditClientConfigurationTest {
         assertThat(OutboxConfiguration.oldestPendingAgeSeconds(outbox, clock)).isZero();
         assertThat(OutboxConfiguration.oldestPendingAgeSeconds(outbox, clock)).isEqualTo(90d);
     }
+
+    @Test
+    void theRecoverySweepIsOnByDefaultAndCanBeSwitchedOff() {
+        org.springframework.boot.test.context.runner.ApplicationContextRunner runner =
+            new org.springframework.boot.test.context.runner.ApplicationContextRunner()
+                .withBean(com.bank.loan.infrastructure.external.ReservationGenerations.class,
+                    () -> org.mockito.Mockito.mock(com.bank.loan.infrastructure.external.ReservationGenerations.class))
+                .withBean(com.bank.loan.domain.port.out.CustomerCreditService.class,
+                    () -> org.mockito.Mockito.mock(com.bank.loan.domain.port.out.CustomerCreditService.class))
+                .withBean(org.springframework.jdbc.core.JdbcTemplate.class,
+                    () -> org.mockito.Mockito.mock(org.springframework.jdbc.core.JdbcTemplate.class))
+                .withBean(java.time.Clock.class, java.time.Clock::systemUTC)
+                .withInitializer(context -> context.getBeanFactory().setConversionService(
+                    new org.springframework.boot.convert.ApplicationConversionService()))
+                .withPropertyValues("loan.credit-reservation.sweep.initial-delay=PT1H")
+                .withUserConfiguration(CustomerCreditClientConfiguration.SweepConfiguration.class);
+
+        runner.run(context -> assertThat(context)
+            .hasSingleBean(com.bank.loan.infrastructure.external.CreditReservationSweep.class));
+        runner.withPropertyValues("loan.credit-reservation.sweep.enabled=false").run(context -> assertThat(context)
+            .doesNotHaveBean(com.bank.loan.infrastructure.external.CreditReservationSweep.class));
+    }
+
+    @Test
+    void reservationGaugesCarryNoIdentifiers() {
+        io.micrometer.core.instrument.simple.SimpleMeterRegistry registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        com.bank.loan.infrastructure.external.ReservationGenerations generations =
+            org.mockito.Mockito.mock(com.bank.loan.infrastructure.external.ReservationGenerations.class);
+        org.mockito.Mockito.when(generations.countPending()).thenReturn(2L);
+        org.mockito.Mockito.when(generations.countUnconfirmed()).thenReturn(1L);
+        CustomerCreditClientConfiguration configuration = new CustomerCreditClientConfiguration();
+
+        configuration.creditReservationsPendingGauge(registry, generations);
+        configuration.creditReservationsUnconfirmedGauge(registry, generations);
+
+        assertThat(registry.get("loan.credit.reservations.pending").gauge().value()).isEqualTo(2.0);
+        assertThat(registry.get("loan.credit.reservations.pending").gauge().getId().getTags()).isEmpty();
+        assertThat(registry.get("loan.credit.reservations.operator").gauge().getId().getTags())
+            .containsExactly(io.micrometer.core.instrument.Tag.of("reason", "unconfirmed"));
+        assertThat(registry.get("loan.credit.reservations.operator").gauge().value()).isEqualTo(1.0);
+    }
 }

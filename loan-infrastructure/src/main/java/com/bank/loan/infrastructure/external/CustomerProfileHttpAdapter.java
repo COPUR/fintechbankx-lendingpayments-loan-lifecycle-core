@@ -44,7 +44,8 @@ import java.util.regex.Pattern;
  *       (RESERVING) before it is sent and marked RESERVED once accepted; a
  *       cancellation stores its intent before releasing, and an unconfirmed
  *       one is re-sent before the next reservation, by the cancellation of
- *       the loan, or by the recovery sweep ({@link ReservationGenerations}).</li>
+ *       the loan, or by the recovery sweep ({@link ReservationGenerations},
+ *       {@link CreditReservationSweep}).</li>
  *   <li>A release is sent only for a reservation known to be accepted: the
  *       customer service subtracts a release without checking that a
  *       reservation for the reference exists (customer #13

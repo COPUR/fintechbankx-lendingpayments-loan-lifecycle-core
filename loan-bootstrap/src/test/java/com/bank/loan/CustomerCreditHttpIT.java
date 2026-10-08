@@ -196,6 +196,45 @@ class CustomerCreditHttpIT {
         assertThat(loanStatus(loanId)).isEqualTo("FULLY_PAID");
     }
 
+    /**
+     * Review 5460235552: a failed disbursement left 12,000.00 reserved and
+     * recorded as RESERVED; cancelling the loan releases it under the
+     * compensation key after the cancellation committed, and a second cancel
+     * sends nothing.
+     */
+    @Test
+    void cancellingAnApprovedLoanReleasesTheReservationAFailedDisbursementLeftOnce() throws Exception {
+        String loanId = approvedLoan();
+        PostgresTestDatabase.owner().update("insert into sc_ln_loan_lifecycle.credit_reservation_generation"
+            + " (loan_id, generation, reservation_state, updated_at) values (?, 0, 'RESERVED', now())", loanId);
+
+        mvc.perform(asCustomer(post("/api/v1/loans/{id}/cancel", loanId))
+                .contentType(MediaType.APPLICATION_JSON).content("{\"reason\": \"Changed my mind\"}"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.status").value("CANCELLED"));
+        mvc.perform(asCustomer(post("/api/v1/loans/{id}/cancel", loanId))
+                .contentType(MediaType.APPLICATION_JSON).content("{\"reason\": \"Again\"}"))
+            .andExpect(status().isConflict());
+
+        Call release = only("POST", CREDIT + "/release");
+        assertThat(release.idempotencyKey()).isEqualTo(loanId + ":reserve:compensation");
+        assertThat(json.readTree(release.body()).get("amount").decimalValue()).isEqualByComparingTo("12000.00");
+        assertThat(json.readTree(release.body()).get("reference").asText()).isEqualTo(loanId);
+        assertThat(release.idleInTransaction()).isZero();
+        assertThat(jdbc.queryForObject("select pending_compensation from sc_ln_loan_lifecycle.credit_reservation_generation"
+            + " where loan_id = ?", Integer.class, loanId)).isNull();
+    }
+
+    @Test
+    void aDisbursementRecordsItsReservationAsUsed() throws Exception {
+        String loanId = approvedLoan();
+
+        mvc.perform(asBanker(post("/api/v1/loans/{id}/disburse", loanId))).andExpect(status().isOk());
+
+        assertThat(jdbc.queryForObject("select reservation_state from sc_ln_loan_lifecycle.credit_reservation_generation"
+            + " where loan_id = ?", String.class, loanId)).isEqualTo("USED");
+    }
+
     @Test
     void creditHeldInAnotherCurrencyIsACurrencyMismatch() throws Exception {
         responses.put("GET " + CREDIT, new Stubbed(200, POSITION.replace("\"AED\"", "\"USD\"")));
