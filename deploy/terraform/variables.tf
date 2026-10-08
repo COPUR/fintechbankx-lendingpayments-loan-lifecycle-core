@@ -117,3 +117,9 @@ variable "tags" {
   description = "Additional tags (cost centre, data classification)."
   default     = {}
 }
+
+variable "msk_cluster_arn" {
+  type        = string
+  description = "ARN of the platform MSK cluster; grants IAM produce rights on this service's topics. Empty skips the policy."
+  default     = ""
+}

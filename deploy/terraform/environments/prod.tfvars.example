@@ -12,3 +12,4 @@ aurora_max_capacity        = 16
 backup_retention_days      = 35
 deletion_protection        = true
 alarm_topic_arn            = "arn:aws:sns:me-central-1:111122223333:lending-oncall"
+msk_cluster_arn            = "arn:aws:kafka:me-central-1:111122223333:cluster/fintechbankx-msk/00000000-0000-0000-0000-000000000000-1"

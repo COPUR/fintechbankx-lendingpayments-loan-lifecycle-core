@@ -37,7 +37,7 @@ class CustomerProfileHttpAdapterTest {
     private final RestClient.Builder builder = RestClient.builder().baseUrl("http://customer");
     private final MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
     private final CustomerProfileHttpAdapter adapter =
-        new CustomerProfileHttpAdapter(builder.build(), () -> "caller-token", Currency.getInstance("AED"));
+        new CustomerProfileHttpAdapter(builder.build(), () -> "service-token", Currency.getInstance("AED"));
 
     @AfterEach
     void clearMdc() {
@@ -45,11 +45,11 @@ class CustomerProfileHttpAdapterTest {
     }
 
     @Test
-    void availableCreditIsReadFromTheCustomerServiceWithCallerTokenAndInteractionId() {
+    void availableCreditIsReadFromTheCustomerServiceWithServiceTokenAndInteractionId() {
         MDC.put(CorrelationIdFilter.MDC_KEY, "corr-http");
         server.expect(requestTo("http://customer/api/v1/customers/CUST-HTTP-1"))
             .andExpect(method(HttpMethod.GET))
-            .andExpect(header("Authorization", "Bearer caller-token"))
+            .andExpect(header("Authorization", "Bearer service-token"))
             .andExpect(header("x-fapi-interaction-id", "corr-http"))
             .andRespond(withSuccess(CUSTOMER_JSON, MediaType.APPLICATION_JSON));
 

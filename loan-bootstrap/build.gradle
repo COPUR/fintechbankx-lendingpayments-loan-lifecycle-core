@@ -17,9 +17,12 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-security'
     implementation 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'
+    implementation 'org.springframework.boot:spring-boot-starter-oauth2-client'
     implementation 'org.springframework.kafka:spring-kafka'
     runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
     runtimeOnly 'org.postgresql:postgresql'
+    // MSK IAM client auth, used by the aws profile (platform contract)
+    runtimeOnly 'software.amazon.msk:aws-msk-iam-auth:2.2.0'
     runtimeOnly 'org.flywaydb:flyway-database-postgresql'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'

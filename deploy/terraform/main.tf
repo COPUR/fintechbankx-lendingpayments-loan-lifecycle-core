@@ -192,6 +192,49 @@ data "aws_iam_policy_document" "workload" {
   }
 }
 
+# --- MSK: IAM client auth, scoped to this service's own topics --------------
+# Platform contract: Kafka on AWS is MSK with IAM auth via the IRSA role.
+# TODO: switch to the terraform-modules `msk-client-access` module once it is
+# published on main.
+
+locals {
+  msk_topic_arn_prefix = var.msk_cluster_arn == "" ? "" : replace(var.msk_cluster_arn, ":cluster/", ":topic/")
+  msk_group_arn_prefix = var.msk_cluster_arn == "" ? "" : replace(var.msk_cluster_arn, ":cluster/", ":group/")
+}
+
+data "aws_iam_policy_document" "msk" {
+  count = var.msk_cluster_arn == "" ? 0 : 1
+
+  statement {
+    sid       = "ConnectToCluster"
+    actions   = ["kafka-cluster:Connect", "kafka-cluster:DescribeCluster"]
+    resources = [var.msk_cluster_arn]
+  }
+
+  statement {
+    sid = "ProduceOwnTopics"
+    actions = [
+      "kafka-cluster:DescribeTopic",
+      "kafka-cluster:WriteData",
+      "kafka-cluster:WriteDataIdempotently",
+    ]
+    resources = ["${local.msk_topic_arn_prefix}/evt.ln.loan.*"]
+  }
+
+  statement {
+    sid       = "IdempotentProducerTransactionalIds"
+    actions   = ["kafka-cluster:DescribeTransactionalId", "kafka-cluster:AlterTransactionalId"]
+    resources = ["${local.msk_group_arn_prefix}/${local.service_id}*"]
+  }
+}
+
+resource "aws_iam_role_policy" "msk" {
+  count  = var.msk_cluster_arn == "" ? 0 : 1
+  name   = "${local.name}-msk-produce"
+  role   = aws_iam_role.workload.id
+  policy = data.aws_iam_policy_document.msk[0].json
+}
+
 resource "aws_iam_role_policy" "workload" {
   name   = "${local.name}-least-privilege"
   role   = aws_iam_role.workload.id

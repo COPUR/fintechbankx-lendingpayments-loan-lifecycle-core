@@ -55,6 +55,19 @@ spring:
         jwt:
           issuer-uri: ${OIDC_ISSUER_URI:http://localhost:8180/realms/fintechbankx}
           jwk-set-uri: ${OIDC_JWK_SET_URI:http://localhost:8180/realms/fintechbankx/protocol/openid-connect/certs}
+      # Outbound service-to-service calls use this service's own
+      # client-credentials token, never the caller's token.
+      client:
+        registration:
+          customer-service:
+            provider: fintechbankx
+            client-id: ${SERVICE_CLIENT_ID:svc-ln-loan-lifecycle}
+            client-secret: ${SERVICE_CLIENT_SECRET:}
+            authorization-grant-type: client_credentials
+            client-authentication-method: client_secret_basic
+        provider:
+          fintechbankx:
+            token-uri: ${OIDC_TOKEN_URI:http://localhost:8180/realms/fintechbankx/protocol/openid-connect/token}
 
 server:
   port: 8080
@@ -91,6 +104,7 @@ loan:
   customer-credit:
     adapter: ${CUSTOMER_CREDIT_ADAPTER:http}
     base-url: ${CUSTOMER_SERVICE_BASE_URL:http://customer-profile-kyc-service:8080}
+    client-registration-id: customer-service
     ledger-currency: ${CUSTOMER_CREDIT_LEDGER_CURRENCY:AED}
     connect-timeout: PT1S
     read-timeout: PT2S

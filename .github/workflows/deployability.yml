@@ -37,7 +37,7 @@ jobs:
       - name: Lint and render chart
         run: |
           chart=deploy/helm/loan-lifecycle-service
-          args="--set image.repository=ci/loan-lifecycle-service --set image.tag=${{ github.sha }} --set externalSecret.remoteSecretName=ci/db-app"
+          args="--set image.repository=ci/loan-lifecycle-service --set image.tag=${{ github.sha }} --set externalSecret.remoteSecretName=ci/db-app --set externalSecret.serviceClientSecretName=ci/service-client"
           helm lint "$chart" $args
           helm template ci "$chart" $args > /dev/null
           helm template ci "$chart" -f "$chart/values-dev.yaml" $args > /dev/null

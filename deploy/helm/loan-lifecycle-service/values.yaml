@@ -45,9 +45,12 @@ config:
   DB_USERNAME: loan_lifecycle_app
   DB_POOL_MAX: "10"
   KAFKA_BOOTSTRAP_SERVERS: ""
-  KAFKA_SECURITY_PROTOCOL: SSL
+  KAFKA_SECURITY_PROTOCOL: SASL_SSL  # MSK IAM auth, see application-aws.yml
+  SPRING_PROFILES_ACTIVE: aws
   OIDC_ISSUER_URI: ""
   OIDC_JWK_SET_URI: ""
+  OIDC_TOKEN_URI: ""              # client-credentials token endpoint for service-to-service calls
+  SERVICE_CLIENT_ID: svc-ln-loan-lifecycle
   CUSTOMER_SERVICE_BASE_URL: http://customer-profile-kyc-service.customer.svc.cluster.local:8080
   CUSTOMER_CREDIT_LEDGER_CURRENCY: AED
   OUTBOX_RELAY_ENABLED: "true"
@@ -60,6 +63,9 @@ externalSecret:
     name: aws-secrets-manager
   # Secrets Manager secret from deploy/terraform output app_db_secret_name.
   remoteSecretName: ""
+  # Secrets Manager secret holding this service's Keycloak client secret
+  # (property client_secret), used for client-credentials calls to customer.
+  serviceClientSecretName: ""
   refreshInterval: 1h
 
 topologySpread:
