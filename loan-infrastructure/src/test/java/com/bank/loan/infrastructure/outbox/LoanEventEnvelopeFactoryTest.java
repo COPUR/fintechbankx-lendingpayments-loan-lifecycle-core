@@ -36,6 +36,16 @@ class LoanEventEnvelopeFactoryTest {
     }
 
     @Test
+    void paymentMadeCarriesThePaymentIdAndTheScheduleBalances() {
+        List<DomainEvent> events = fullLifecycleEvents();
+        DomainEvent paymentMade = events.get(3);
+
+        assertThat(LoanEventEnvelopeFactory.map(paymentMade).data())
+            .containsKeys("paymentId", "paymentAmount", "previousBalance", "newBalance");
+        assertThat(LoanEventEnvelopeFactory.map(paymentMade).data().get("paymentId")).isNotNull();
+    }
+
+    @Test
     void rejectedAndCancelledCarryTheReason() {
         Loan rejected = newLoan("LOAN-ENV-R");
         rejected.reject("affordability");

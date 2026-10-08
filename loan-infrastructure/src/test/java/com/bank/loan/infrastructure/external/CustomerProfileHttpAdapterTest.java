@@ -1,5 +1,10 @@
 package com.bank.loan.infrastructure.external;
 
+import com.bank.loan.domain.port.out.CreditCurrencyMismatchException;
+import com.bank.loan.domain.port.out.CreditCustomerNotFoundException;
+import com.bank.loan.domain.port.out.CustomerCreditService.CreditDecision;
+import com.bank.loan.domain.port.out.CustomerCreditUnavailableException;
+import com.bank.loan.domain.LoanId;
 import com.bank.loan.infrastructure.web.CorrelationIdFilter;
 import com.bank.shared.kernel.domain.CustomerId;
 import com.bank.shared.kernel.domain.Money;
@@ -9,114 +14,296 @@ import org.slf4j.MDC;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.test.web.client.ExpectedCount;
 import org.springframework.test.web.client.MockRestServiceServer;
-import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.RestClient;
 
 import java.math.BigDecimal;
+import java.net.SocketTimeoutException;
 import java.util.Currency;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.content;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.header;
-import static org.springframework.test.web.client.match.MockRestRequestMatchers.headerDoesNotExist;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withException;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 class CustomerProfileHttpAdapterTest {
 
     private static final CustomerId CUSTOMER = CustomerId.of("CUST-HTTP-1");
-    private static final String CUSTOMER_JSON = """
-        {"customerId":"CUST-HTTP-1","firstName":"Never","lastName":"Stored","email":"x@example.com",
-         "creditLimit":50000,"usedCredit":20000,"availableCredit":30000.00,"status":"ACTIVE"}
+    private static final LoanId LOAN = LoanId.of("LOAN-HTTP-1");
+    private static final String BASE = "http://customer/api/v1/customers/CUST-HTTP-1";
+    private static final String POSITION_AED = """
+        {"customerId":"CUST-HTTP-1","currency":"AED","creditLimit":50000,"usedCredit":20000,"availableCredit":30000.00}
+        """;
+    private static final String POSITION_WITHOUT_CURRENCY = """
+        {"customerId":"CUST-HTTP-1","creditLimit":50000,"usedCredit":20000,"availableCredit":30000.00}
         """;
 
     private final RestClient.Builder builder = RestClient.builder().baseUrl("http://customer");
     private final MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+    private final Generations generations = new Generations();
     private final CustomerProfileHttpAdapter adapter =
-        new CustomerProfileHttpAdapter(builder.build(), () -> "service-token", Currency.getInstance("AED"));
+        new CustomerProfileHttpAdapter(builder.build(), () -> "service-token", Currency.getInstance("AED"), generations, 3);
 
     @AfterEach
-    void clearMdc() {
+    void clean() {
         MDC.clear();
     }
 
     @Test
-    void availableCreditIsReadFromTheCustomerServiceWithServiceTokenAndInteractionId() {
+    void creditPositionIsReadWithTheServiceTokenAndInteractionId() {
         MDC.put(CorrelationIdFilter.MDC_KEY, "corr-http");
-        server.expect(requestTo("http://customer/api/v1/customers/CUST-HTTP-1"))
+        server.expect(requestTo(BASE + "/credit"))
             .andExpect(method(HttpMethod.GET))
             .andExpect(header("Authorization", "Bearer service-token"))
             .andExpect(header("x-fapi-interaction-id", "corr-http"))
-            .andRespond(withSuccess(CUSTOMER_JSON, MediaType.APPLICATION_JSON));
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
 
-        Money available = adapter.getAvailableCredit(CUSTOMER);
-
-        assertThat(available).isEqualTo(Money.aed(new BigDecimal("30000.00")));
+        assertThat(adapter.getAvailableCredit(CUSTOMER)).isEqualTo(Money.aed(new BigDecimal("30000.00")));
         server.verify();
     }
 
     @Test
-    void creditCheckComparesInTheLedgerCurrencyOnly() {
-        server.expect(requestTo("http://customer/api/v1/customers/CUST-HTTP-1"))
-            .andRespond(withSuccess(CUSTOMER_JSON, MediaType.APPLICATION_JSON));
-        server.expect(requestTo("http://customer/api/v1/customers/CUST-HTTP-1"))
-            .andRespond(withSuccess(CUSTOMER_JSON, MediaType.APPLICATION_JSON));
+    void creditCheckUsesTheCurrencyTheCustomerServiceReports() {
+        server.expect(ExpectedCount.times(3), requestTo(BASE + "/credit"))
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
 
         assertThat(adapter.hasAvailableCredit(CUSTOMER, Money.aed(new BigDecimal("30000.00")))).isTrue();
         assertThat(adapter.hasAvailableCredit(CUSTOMER, Money.aed(new BigDecimal("30000.01")))).isFalse();
-        assertThat(adapter.hasAvailableCredit(CUSTOMER, Money.usd(new BigDecimal("1.00")))).isFalse();
+        // credit held in AED, loan in USD: an explicit mismatch, never "insufficient credit"
+        assertThatThrownBy(() -> adapter.hasAvailableCredit(CUSTOMER, Money.usd(new BigDecimal("1.00"))))
+            .isInstanceOf(CreditCurrencyMismatchException.class)
+            .hasMessage("The loan is in USD but the customer's credit is held in AED");
         server.verify();
     }
 
     @Test
-    void unknownCustomerHasNoCredit() {
-        server.expect(requestTo("http://customer/api/v1/customers/CUST-HTTP-1"))
-            .andRespond(withStatus(HttpStatus.NOT_FOUND));
+    void positionInAnotherCurrencyIsReportedInThatCurrencyAndMismatchesLedgerCurrencyLoans() {
+        server.expect(ExpectedCount.times(2), requestTo(BASE + "/credit"))
+            .andRespond(withSuccess(POSITION_AED.replace("\"AED\"", "\"USD\""), MediaType.APPLICATION_JSON));
 
-        assertThat(adapter.getAvailableCredit(CUSTOMER)).isEqualTo(Money.zero(Currency.getInstance("AED")));
+        assertThat(adapter.getAvailableCredit(CUSTOMER)).isEqualTo(Money.usd(new BigDecimal("30000.00")));
+        assertThatThrownBy(() -> adapter.hasAvailableCredit(CUSTOMER, Money.aed(new BigDecimal("10.00"))))
+            .isInstanceOf(CreditCurrencyMismatchException.class);
     }
 
     @Test
-    void reserveAndReleasePostTheMovementWithAnIdempotencyKey() {
-        server.expect(requestTo("http://customer/api/v1/customers/CUST-HTTP-1/credit/reserve"))
+    void withoutACurrencyInTheResponseTheLedgerCurrencyIsAssumed() {
+        server.expect(ExpectedCount.times(2), requestTo(BASE + "/credit"))
+            .andRespond(withSuccess(POSITION_WITHOUT_CURRENCY, MediaType.APPLICATION_JSON));
+
+        assertThat(adapter.hasAvailableCredit(CUSTOMER, Money.aed(new BigDecimal("100.00")))).isTrue();
+        assertThatThrownBy(() -> adapter.hasAvailableCredit(CUSTOMER, Money.usd(new BigDecimal("100.00"))))
+            .isInstanceOf(CreditCurrencyMismatchException.class);
+    }
+
+    @Test
+    void unknownCustomerIsNotFoundNotNoCredit() {
+        server.expect(ExpectedCount.times(2), requestTo(BASE + "/credit")).andRespond(withStatus(HttpStatus.NOT_FOUND)
+            .contentType(MediaType.APPLICATION_JSON).body("{\"code\":\"CUSTOMER_NOT_FOUND\"}"));
+
+        assertThatThrownBy(() -> adapter.getAvailableCredit(CUSTOMER)).isInstanceOf(CreditCustomerNotFoundException.class);
+        assertThatThrownBy(() -> adapter.hasAvailableCredit(CUSTOMER, Money.aed(BigDecimal.ONE)))
+            .isInstanceOf(CreditCustomerNotFoundException.class)
+            .hasMessageContaining("CUST-HTTP-1");
+    }
+
+    @Test
+    void emptyCreditPositionIsUnavailable() {
+        server.expect(requestTo(BASE + "/credit")).andRespond(withSuccess());
+
+        assertThatThrownBy(() -> adapter.getAvailableCredit(CUSTOMER)).isInstanceOf(CustomerCreditUnavailableException.class);
+    }
+
+    @Test
+    void creditPositionOutageIsUnavailableNotAServerError() {
+        server.expect(requestTo(BASE + "/credit")).andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+
+        assertThatThrownBy(() -> adapter.hasAvailableCredit(CUSTOMER, Money.aed(BigDecimal.ONE)))
+            .isInstanceOf(CustomerCreditUnavailableException.class);
+    }
+
+    @Test
+    void reserveAndReleaseUseKeysDerivedFromTheLoanAndCarryTheLoanAsReference() {
+        server.expect(requestTo(BASE + "/credit/reserve"))
             .andExpect(method(HttpMethod.POST))
-            .andExpect(header("x-idempotency-key", org.hamcrest.Matchers.matchesPattern("[0-9a-f-]{36}")))
-            .andExpect(content().json("{\"amount\":2500.00,\"currency\":\"AED\"}"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve"))
+            .andExpect(content().json("{\"amount\":2500.00,\"currency\":\"AED\",\"reference\":\"LOAN-HTTP-1\"}"))
             .andRespond(withSuccess());
-        server.expect(requestTo("http://customer/api/v1/customers/CUST-HTTP-1/credit/release"))
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:release"))
             .andRespond(withSuccess());
 
-        assertThat(adapter.reserveCredit(CUSTOMER, Money.aed(new BigDecimal("2500.00")))).isTrue();
-        assertThat(adapter.releaseCredit(CUSTOMER, Money.aed(new BigDecimal("2500.00")))).isTrue();
+        assertThat(adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(new BigDecimal("2500.00")))).isEqualTo(CreditDecision.ACCEPTED);
+        assertThat(adapter.releaseCredit(LOAN, CUSTOMER, Money.aed(new BigDecimal("2500.00")))).isEqualTo(CreditDecision.ACCEPTED);
         server.verify();
     }
 
     @Test
-    void businessRefusalsReturnFalseButOutagesPropagate() {
-        server.expect(requestTo("http://customer/api/v1/customers/CUST-HTTP-1/credit/reserve"))
-            .andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY));
-        server.expect(requestTo("http://customer/api/v1/customers/CUST-HTTP-1/credit/reserve"))
-            .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+    void concurrentUpdateIsRetriedWithTheSameKey() {
+        server.expect(ExpectedCount.times(2), requestTo(BASE + "/credit/reserve"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve"))
+            .andRespond(withStatus(HttpStatus.CONFLICT).contentType(MediaType.APPLICATION_JSON)
+                .body("{\"code\":\"CONCURRENT_UPDATE\",\"message\":\"retry\"}"));
+        server.expect(requestTo(BASE + "/credit/reserve"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve"))
+            .andRespond(withSuccess());
 
-        assertThat(adapter.reserveCredit(CUSTOMER, Money.aed(BigDecimal.TEN))).isFalse();
-        assertThatThrownBy(() -> adapter.reserveCredit(CUSTOMER, Money.aed(BigDecimal.TEN)))
-            .isInstanceOf(HttpServerErrorException.class);
+        assertThat(adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN))).isEqualTo(CreditDecision.ACCEPTED);
+        server.verify();
     }
 
     @Test
-    void callsWithoutAnAuthenticatedCallerSendNoAuthorizationHeader() {
-        CustomerProfileHttpAdapter anonymous =
-            new CustomerProfileHttpAdapter(builder.build(), () -> null, Currency.getInstance("AED"));
-        server.expect(requestTo("http://customer/api/v1/customers/CUST-HTTP-1"))
-            .andExpect(headerDoesNotExist("Authorization"))
+    void retriesAreBounded() {
+        server.expect(ExpectedCount.times(3), requestTo(BASE + "/credit/reserve"))
+            .andRespond(withStatus(HttpStatus.CONFLICT).contentType(MediaType.APPLICATION_JSON)
+                .body("{\"code\":\"DUPLICATE_REQUEST\"}"));
+
+        assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
+            .isInstanceOf(CustomerCreditUnavailableException.class)
+            .hasMessageContaining("kept reporting DUPLICATE_REQUEST");
+        server.verify();
+    }
+
+    @Test
+    void onlyInsufficientCreditIsARefusal() {
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY)
+            .contentType(MediaType.APPLICATION_JSON).body("{\"code\":\"INSUFFICIENT_CREDIT\"}"));
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withStatus(HttpStatus.NOT_FOUND)
+            .contentType(MediaType.APPLICATION_JSON).body("{\"code\":\"CUSTOMER_NOT_FOUND\"}"));
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY)
+            .contentType(MediaType.APPLICATION_JSON).body("{\"code\":\"CURRENCY_MISMATCH\"}"));
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withStatus(HttpStatus.BAD_REQUEST)
+            .contentType(MediaType.APPLICATION_JSON).body("{\"code\":\"INVALID_REQUEST\"}"));
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY)
+            .contentType(MediaType.APPLICATION_JSON).body("{\"code\":\"SOMETHING_NEW\"}"));
+
+        assertThat(adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN))).isEqualTo(CreditDecision.REFUSED);
+        assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
+            .isInstanceOf(CreditCustomerNotFoundException.class);
+        assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
+            .isInstanceOf(CreditCurrencyMismatchException.class).hasMessageContaining("AED");
+        assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
+            .isInstanceOf(CustomerCreditUnavailableException.class).hasMessageContaining("400 INVALID_REQUEST");
+        assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
+            .isInstanceOf(CustomerCreditUnavailableException.class).hasMessageContaining("422 SOMETHING_NEW");
+        server.verify();
+    }
+
+    @Test
+    void outagesRejectedTokensAndKeyConflictsAreUnavailable() {
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withStatus(HttpStatus.FORBIDDEN));
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withStatus(HttpStatus.CONFLICT)
+            .contentType(MediaType.APPLICATION_JSON).body("{\"code\":\"IDEMPOTENCY_KEY_REUSED\"}"));
+        server.expect(requestTo(BASE + "/credit/release")).andRespond(withException(new SocketTimeoutException("read timed out")));
+
+        assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
+            .isInstanceOf(CustomerCreditUnavailableException.class);
+        assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
+            .isInstanceOf(CustomerCreditUnavailableException.class).hasMessageContaining("403");
+        assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
+            .isInstanceOf(CustomerCreditUnavailableException.class).hasMessageContaining("IDEMPOTENCY_KEY_REUSED");
+        assertThatThrownBy(() -> adapter.releaseCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
+            .isInstanceOf(CustomerCreditUnavailableException.class);
+    }
+
+    @Test
+    void cancelledReservationIsReleasedUnderItsOwnKeyAndTheNextReservationUsesANewGeneration() {
+        server.expect(requestTo(BASE + "/credit/reserve"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve"))
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve:compensation"))
+            .andExpect(content().json("{\"amount\":10.00,\"currency\":\"AED\",\"reference\":\"LOAN-HTTP-1\"}"))
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/credit/reserve"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve:g1"))
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+
+        Money ten = Money.aed(new BigDecimal("10.00"));
+        assertThat(adapter.reserveCredit(LOAN, CUSTOMER, ten)).isEqualTo(CreditDecision.ACCEPTED);
+        assertThat(adapter.cancelReservation(LOAN, CUSTOMER, ten)).isEqualTo(CreditDecision.ACCEPTED);
+        assertThat(adapter.reserveCredit(LOAN, CUSTOMER, ten)).isEqualTo(CreditDecision.ACCEPTED);
+
+        assertThat(generations.current(LOAN)).isEqualTo(1);
+        server.verify();
+    }
+
+    @Test
+    void failedCancellationKeepsTheGenerationSoARetryReusesTheReservation() {
+        server.expect(requestTo(BASE + "/credit/release")).andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+
+        assertThatThrownBy(() -> adapter.cancelReservation(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
+            .isInstanceOf(CustomerCreditUnavailableException.class);
+        assertThat(generations.current(LOAN)).isZero();
+        server.verify();
+    }
+
+    @Test
+    void missingOrFailingServiceTokenIsUnavailableAndNothingIsSent() {
+        CustomerProfileHttpAdapter noToken =
+            new CustomerProfileHttpAdapter(builder.build(), () -> null, Currency.getInstance("AED"), generations, 1);
+        CustomerProfileHttpAdapter failingToken = new CustomerProfileHttpAdapter(builder.build(),
+            () -> { throw new IllegalStateException("No service token for client registration customer-service"); },
+            Currency.getInstance("AED"), generations, 1);
+
+        assertThatThrownBy(() -> noToken.getAvailableCredit(CUSTOMER))
+            .isInstanceOf(CustomerCreditUnavailableException.class).hasMessageContaining("No service token");
+        assertThatThrownBy(() -> failingToken.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
+            .isInstanceOf(CustomerCreditUnavailableException.class)
+            .hasCauseInstanceOf(IllegalStateException.class);
+        server.verify();
+    }
+
+    @Test
+    void interactionIdIsGeneratedWhenTheRequestHasNone() {
+        server.expect(requestTo(BASE + "/credit"))
             .andExpect(header("x-fapi-interaction-id", org.hamcrest.Matchers.notNullValue()))
-            .andRespond(withSuccess(CUSTOMER_JSON, MediaType.APPLICATION_JSON));
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
 
-        anonymous.getAvailableCredit(CUSTOMER);
+        adapter.getAvailableCredit(CUSTOMER);
         server.verify();
+    }
+
+    @Test
+    void pathsAreConfigurable() {
+        CustomerProfileHttpAdapter renamed = new CustomerProfileHttpAdapter(builder.build(), () -> "t",
+            Currency.getInstance("AED"), generations, 1, new CustomerProfileHttpAdapter.Paths(
+                "/v2/customers/{customerId}/credit", "/v2/customers/{customerId}/reservations",
+                "/v2/customers/{customerId}/releases"));
+        server.expect(requestTo("http://customer/v2/customers/CUST-HTTP-1/reservations")).andRespond(withSuccess());
+
+        assertThat(renamed.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.ONE))).isEqualTo(CreditDecision.ACCEPTED);
+        server.verify();
+    }
+
+    @Test
+    void unknownCurrencyInTheResponseIsUnavailable() {
+        server.expect(requestTo(BASE + "/credit"))
+            .andRespond(withSuccess(POSITION_AED.replace("\"AED\"", "\"XYZ1\""), MediaType.APPLICATION_JSON));
+
+        assertThatThrownBy(() -> adapter.getAvailableCredit(CUSTOMER)).isInstanceOf(CustomerCreditUnavailableException.class);
+    }
+
+    static final class Generations implements ReservationGenerations {
+        private final Map<LoanId, Integer> values = new HashMap<>();
+
+        @Override
+        public int current(LoanId loanId) {
+            return values.getOrDefault(loanId, 0);
+        }
+
+        @Override
+        public void advance(LoanId loanId) {
+            values.merge(loanId, 1, Integer::sum);
+        }
     }
 }

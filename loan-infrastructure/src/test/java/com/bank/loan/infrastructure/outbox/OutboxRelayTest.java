@@ -83,6 +83,56 @@ class OutboxRelayTest {
     }
 
     @Test
+    void aPoisonRowIsParkedAfterMaxAttemptsAndLaterRowsAreStillPublished() {
+        OutboxRelay strict = new OutboxRelay(outbox, kafka, transactions, Clock.fixed(NOW, ZoneOffset.UTC), 50,
+            Duration.ofSeconds(1), Duration.ofDays(7), 3);
+        OutboxEventJpaEntity poison = row("LOAN-P");
+        OutboxEventJpaEntity later = row("LOAN-Q");
+        when(outbox.tryRelayLock(anyLong())).thenReturn(true);
+        when(outbox.findUnpublishedBatch(50)).thenReturn(List.of(poison, later));
+        when(kafka.send(any(ProducerRecord.class))).thenAnswer(invocation -> {
+            ProducerRecord<String, String> record = invocation.getArgument(0);
+            return "LOAN-P".equals(record.key())
+                ? CompletableFuture.failedFuture(new IllegalStateException("record too large"))
+                : CompletableFuture.completedFuture((SendResult<String, String>) null);
+        });
+
+        // runs 1 and 2: the poison row blocks (order kept), run 3 parks it and moves on
+        assertThat(strict.relayOnce()).isZero();
+        assertThat(strict.relayOnce()).isZero();
+        assertThat(later.getPublishedAt()).isNull();
+        assertThat(strict.relayOnce()).isEqualTo(1);
+
+        assertThat(poison.getAttempts()).isEqualTo(3);
+        assertThat(poison.getParkedAt()).isEqualTo(NOW);
+        assertThat(poison.getPublishedAt()).isNull();
+        assertThat(later.getPublishedAt()).isEqualTo(NOW);
+    }
+
+    @Test
+    void interruptedSendStopsTheBatch() {
+        OutboxEventJpaEntity first = row("LOAN-I");
+        when(outbox.tryRelayLock(anyLong())).thenReturn(true);
+        when(outbox.findUnpublishedBatch(50)).thenReturn(List.of(first));
+        CompletableFuture<SendResult<String, String>> never = new CompletableFuture<>();
+        when(kafka.send(any(ProducerRecord.class))).thenReturn(never);
+        Thread.currentThread().interrupt();
+
+        assertThat(relay.relayOnce()).isZero();
+        assertThat(Thread.interrupted()).isTrue();
+        assertThat(first.getLastError()).isEqualTo("interrupted");
+    }
+
+    @Test
+    void traceparentIsForwardedWhenTheEventWasRaisedInATracedRequest() {
+        String traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+        OutboxEventJpaEntity traced = row("LOAN-T").withTraceparent(traceparent);
+
+        assertThat(header(OutboxRelay.toRecord(traced), "traceparent")).isEqualTo(traceparent);
+        assertThat(OutboxRelay.toRecord(row("LOAN-U")).headers().lastHeader("traceparent")).isNull();
+    }
+
+    @Test
     void purgeDeletesRowsPublishedBeforeTheRetentionWindow() {
         when(outbox.deletePublishedBefore(NOW.minus(Duration.ofDays(7)))).thenReturn(3);
 

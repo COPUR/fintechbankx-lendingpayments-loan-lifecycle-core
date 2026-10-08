@@ -7,6 +7,7 @@ import com.bank.loan.domain.LoanId;
 import com.bank.loan.domain.LoanInstallment;
 import com.bank.loan.domain.LoanStatus;
 import com.bank.loan.domain.LoanTerm;
+import com.bank.loan.domain.RateBasis;
 import com.bank.shared.kernel.domain.CustomerId;
 import com.bank.shared.kernel.domain.Money;
 
@@ -36,6 +37,8 @@ final class LoanPersistenceMapper {
                 customerId,
                 row.getInstallmentNumber(),
                 Money.of(row.getAmount(), Currency.getInstance(row.getCurrency())),
+                Money.of(row.getPrincipalAmount(), Currency.getInstance(row.getCurrency())),
+                Money.of(row.getInterestAmount(), Currency.getInstance(row.getCurrency())),
                 row.getDueDate(),
                 Money.of(row.getPaidAmount(), Currency.getInstance(row.getCurrency())),
                 row.getPaidAt(),
@@ -46,6 +49,7 @@ final class LoanPersistenceMapper {
             customerId,
             Money.of(entity.getPrincipalAmount(), currency),
             InterestRate.of(entity.getAnnualInterestRate()),
+            RateBasis.valueOf(entity.getRateBasis()),
             LoanTerm.ofMonths(entity.getTermMonths()),
             LoanStatus.valueOf(entity.getStatus()),
             entity.getApplicationDate(),
@@ -70,6 +74,7 @@ final class LoanPersistenceMapper {
         entity.setPrincipalAmount(loan.getPrincipalAmount().getAmount());
         entity.setCurrency(loan.getPrincipalAmount().getCurrency().getCurrencyCode());
         entity.setAnnualInterestRate(loan.getInterestRate().getAnnualRate());
+        entity.setRateBasis(loan.getRateBasis().name());
         entity.setTermMonths(loan.getLoanTerm().getMonths());
         entity.setStatus(loan.getStatus().name());
         entity.setApplicationDate(loan.getApplicationDate());
@@ -96,6 +101,8 @@ final class LoanPersistenceMapper {
                 entity.getInstallments().add(row);
             }
             row.setAmount(installment.getAmount().getAmount());
+            row.setPrincipalAmount(installment.getPrincipalComponent().getAmount());
+            row.setInterestAmount(installment.getInterestComponent().getAmount());
             row.setPaidAmount(installment.getPaidAmount().getAmount());
             row.setCurrency(installment.getAmount().getCurrency().getCurrencyCode());
             row.setDueDate(installment.getDueDate());

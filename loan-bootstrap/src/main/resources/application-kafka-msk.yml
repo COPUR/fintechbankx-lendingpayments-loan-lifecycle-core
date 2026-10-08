@@ -1,5 +1,6 @@
-# Runtime on AWS (activated by the Helm chart): Amazon MSK with IAM client
-# auth through the pod's IRSA role, per the platform contract.
+# Amazon MSK (SPRING_PROFILES_ACTIVE=kafka-msk, set by the Helm chart): IAM
+# client auth through the pod's IRSA role. Platform Kafka client conventions,
+# fintechbankx-platform-event-streaming-kafka docs/guides/SERVICE_CLIENT_CONFIGURATION.md.
 spring:
   kafka:
     security:

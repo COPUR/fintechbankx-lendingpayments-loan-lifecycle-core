@@ -49,4 +49,26 @@ class CustomerCreditClientConfigurationTest {
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("customer-service");
     }
+
+    @Test
+    void ledgerCurrencyMustBeConfiguredNeverAssumed() {
+        assertThatThrownBy(() -> CustomerCreditClientConfiguration.ledgerCurrency(""))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("CUSTOMER_CREDIT_LEDGER_CURRENCY");
+        assertThatThrownBy(() -> CustomerCreditClientConfiguration.ledgerCurrency(null))
+            .isInstanceOf(IllegalStateException.class);
+        assertThat(CustomerCreditClientConfiguration.ledgerCurrency(" USD ").getCurrencyCode()).isEqualTo("USD");
+    }
+
+    @Test
+    void oldestPendingAgeIsZeroWithoutBacklog() {
+        var outbox = org.mockito.Mockito.mock(com.bank.loan.infrastructure.outbox.SpringDataOutboxRepository.class);
+        java.time.Clock clock = java.time.Clock.fixed(Instant.parse("2026-10-08T06:00:00Z"), java.time.ZoneOffset.UTC);
+        org.mockito.Mockito.when(outbox.oldestPendingOccurredAt())
+            .thenReturn(java.util.Optional.empty())
+            .thenReturn(java.util.Optional.of(Instant.parse("2026-10-08T05:58:30Z")));
+
+        assertThat(OutboxConfiguration.oldestPendingAgeSeconds(outbox, clock)).isZero();
+        assertThat(OutboxConfiguration.oldestPendingAgeSeconds(outbox, clock)).isEqualTo(90d);
+    }
 }

@@ -1,121 +1,113 @@
 package com.bank.loan.infrastructure.external;
 
-import com.bank.loan.application.CustomerCreditService;
+import com.bank.loan.domain.LoanId;
+import com.bank.loan.domain.port.out.CreditCurrencyMismatchException;
+import com.bank.loan.domain.port.out.CreditCustomerNotFoundException;
+import com.bank.loan.domain.port.out.CustomerCreditService;
+import com.bank.loan.infrastructure.config.CustomerCreditClientConfiguration;
 import com.bank.shared.kernel.domain.CustomerId;
 import com.bank.shared.kernel.domain.Money;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.util.Currency;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * In-memory customer credit adapter for local runs and tests.
+ * In-memory customer credit adapter for local runs and tests, behaving like
+ * the customer service: unknown customer is {@link CreditCustomerNotFoundException},
+ * another currency is {@link CreditCurrencyMismatchException}, not enough credit
+ * is a refusal. The three customers are the ones the monolith's credit stub
+ * knows (CUST-12345678, CUST-87654321, CUST-11111111), so the regression
+ * suite can seed both sides alike.
  *
- * Enabled only with {@code loan.customer-credit.adapter=in-memory}. Every
- * deployed environment uses {@link CustomerProfileHttpAdapter}, which calls
- * the customer-profile-kyc service that owns credit limits.
+ * Enabled only with {@code loan.customer-credit.adapter=in-memory}. Credit is
+ * held in the configured ledger currency (CUSTOMER_CREDIT_LEDGER_CURRENCY);
+ * there is no default currency. Every deployed environment uses
+ * {@link CustomerProfileHttpAdapter}.
  */
 @Component
 @ConditionalOnProperty(name = "loan.customer-credit.adapter", havingValue = "in-memory")
 public class InMemoryCustomerCreditAdapter implements CustomerCreditService {
 
     private static final Logger log = LoggerFactory.getLogger(InMemoryCustomerCreditAdapter.class);
-    
-    // Mock customer credit data for demonstration
-    private final Map<String, CustomerCreditInfo> mockCustomerCredit = new ConcurrentHashMap<>();
-    
-    public InMemoryCustomerCreditAdapter() {
-        // Initialize mock customer credit data
-        mockCustomerCredit.put("CUST-12345678", new CustomerCreditInfo("CUST-12345678", BigDecimal.valueOf(100000), BigDecimal.ZERO));
-        mockCustomerCredit.put("CUST-87654321", new CustomerCreditInfo("CUST-87654321", BigDecimal.valueOf(50000), BigDecimal.valueOf(10000)));
-        mockCustomerCredit.put("CUST-11111111", new CustomerCreditInfo("CUST-11111111", BigDecimal.valueOf(25000), BigDecimal.valueOf(20000)));
+
+    private final Currency currency;
+    private final Map<String, Credit> credit = new ConcurrentHashMap<>();
+
+    @Autowired
+    public InMemoryCustomerCreditAdapter(@Value("${loan.customer-credit.ledger-currency:}") String ledgerCurrency) {
+        this(CustomerCreditClientConfiguration.ledgerCurrency(ledgerCurrency));
     }
-    
+
+    public InMemoryCustomerCreditAdapter(Currency currency) {
+        this.currency = currency;
+        credit.put("CUST-12345678", new Credit(new BigDecimal("100000"), BigDecimal.ZERO));
+        credit.put("CUST-87654321", new Credit(new BigDecimal("50000"), new BigDecimal("10000")));
+        credit.put("CUST-11111111", new Credit(new BigDecimal("25000"), new BigDecimal("20000")));
+    }
+
     @Override
     public boolean hasAvailableCredit(CustomerId customerId, Money amount) {
-        CustomerCreditInfo creditInfo = mockCustomerCredit.get(customerId.getValue());
-        if (creditInfo == null) {
-            return false;
-        }
-        
-        BigDecimal availableCredit = creditInfo.getCreditLimit().subtract(creditInfo.getUsedCredit());
-        return availableCredit.compareTo(amount.getAmount()) >= 0;
+        Credit found = require(customerId);
+        requireCurrency(amount);
+        return found.available().compareTo(amount.getAmount()) >= 0;
     }
-    
-    @Override
-    public boolean reserveCredit(CustomerId customerId, Money amount) {
-        CustomerCreditInfo creditInfo = mockCustomerCredit.get(customerId.getValue());
-        if (creditInfo == null) {
-            return false;
+
+    private void requireCurrency(Money amount) {
+        if (!amount.getCurrency().equals(currency)) {
+            throw new CreditCurrencyMismatchException(amount.getCurrency(), currency);
         }
-        
+    }
+
+    @Override
+    public synchronized CreditDecision reserveCredit(LoanId loanId, CustomerId customerId, Money amount) {
+        Credit current = require(customerId);
         if (!hasAvailableCredit(customerId, amount)) {
-            return false;
+            return CreditDecision.REFUSED;
         }
-        
-        // Reserve credit by increasing used credit
-        BigDecimal newUsedCredit = creditInfo.getUsedCredit().add(amount.getAmount());
-        creditInfo.setUsedCredit(newUsedCredit);
-        
-        log.debug("Reserved credit for customer {}: amount {}, used credit {}", customerId.getValue(), amount, newUsedCredit);
-        
-        return true;
+        credit.put(customerId.getValue(), new Credit(current.limit(), current.used().add(amount.getAmount())));
+        log.debug("Reserved {} for loan {}", amount, loanId.getValue());
+        return CreditDecision.ACCEPTED;
     }
-    
+
     @Override
-    public boolean releaseCredit(CustomerId customerId, Money amount) {
-        CustomerCreditInfo creditInfo = mockCustomerCredit.get(customerId.getValue());
-        if (creditInfo == null) {
-            return false;
-        }
-        
-        // Release credit by decreasing used credit
-        BigDecimal newUsedCredit = creditInfo.getUsedCredit().subtract(amount.getAmount());
-        if (newUsedCredit.compareTo(BigDecimal.ZERO) < 0) {
-            newUsedCredit = BigDecimal.ZERO;
-        }
-        
-        creditInfo.setUsedCredit(newUsedCredit);
-        
-        log.debug("Released credit for customer {}: amount {}, used credit {}", customerId.getValue(), amount, newUsedCredit);
-        
-        return true;
+    public CreditDecision cancelReservation(LoanId loanId, CustomerId customerId, Money amount) {
+        return releaseCredit(loanId, customerId, amount);
     }
-    
+
+    @Override
+    public synchronized CreditDecision releaseCredit(LoanId loanId, CustomerId customerId, Money amount) {
+        Credit current = require(customerId);
+        requireCurrency(amount);
+        BigDecimal used = current.used().subtract(amount.getAmount()).max(BigDecimal.ZERO);
+        credit.put(customerId.getValue(), new Credit(current.limit(), used));
+        log.debug("Released {} for loan {}", amount, loanId.getValue());
+        return CreditDecision.ACCEPTED;
+    }
+
     @Override
     public Money getAvailableCredit(CustomerId customerId) {
-        CustomerCreditInfo creditInfo = mockCustomerCredit.get(customerId.getValue());
-        if (creditInfo == null) {
-            return Money.zero(Currency.getInstance("USD"));
-        }
-        
-        BigDecimal availableCredit = creditInfo.getCreditLimit().subtract(creditInfo.getUsedCredit());
-        return Money.usd(availableCredit);
+        return Money.of(require(customerId).available(), currency);
     }
-    
-    /**
-     * Mock customer credit information
-     * In production, this would be replaced by actual customer service calls
-     */
-    private static class CustomerCreditInfo {
-        private final String customerId;
-        private final BigDecimal creditLimit;
-        private BigDecimal usedCredit;
-        
-        public CustomerCreditInfo(String customerId, BigDecimal creditLimit, BigDecimal usedCredit) {
-            this.customerId = customerId;
-            this.creditLimit = creditLimit;
-            this.usedCredit = usedCredit;
+
+    private Credit require(CustomerId customerId) {
+        Credit found = credit.get(customerId.getValue());
+        if (found == null) {
+            throw new CreditCustomerNotFoundException(customerId.getValue());
         }
-        
-        public String getCustomerId() { return customerId; }
-        public BigDecimal getCreditLimit() { return creditLimit; }
-        public BigDecimal getUsedCredit() { return usedCredit; }
-        public void setUsedCredit(BigDecimal usedCredit) { this.usedCredit = usedCredit; }
+        return found;
+    }
+
+    private record Credit(BigDecimal limit, BigDecimal used) {
+        BigDecimal available() {
+            return limit.subtract(used);
+        }
     }
 }

@@ -20,8 +20,11 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-oauth2-client'
     implementation 'org.springframework.kafka:spring-kafka'
     runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
+    // W3C trace context (traceparent) in and out, traceId/spanId in the MDC;
+    // the outbox stores the traceparent and the relay forwards it to Kafka.
+    implementation 'io.micrometer:micrometer-tracing-bridge-otel'
     runtimeOnly 'org.postgresql:postgresql'
-    // MSK IAM client auth, used by the aws profile (platform contract)
+    // MSK IAM client auth, used by the kafka-msk profile (platform contract)
     runtimeOnly 'software.amazon.msk:aws-msk-iam-auth:2.2.0'
     runtimeOnly 'org.flywaydb:flyway-database-postgresql'
 

@@ -1,4 +1,8 @@
-package com.bank.loan.domain;
+package com.bank.loan.domain.port.out;
+
+import com.bank.loan.domain.Loan;
+import com.bank.loan.domain.LoanId;
+import com.bank.loan.domain.LoanStatus;
 
 import com.bank.shared.kernel.domain.CustomerId;
 

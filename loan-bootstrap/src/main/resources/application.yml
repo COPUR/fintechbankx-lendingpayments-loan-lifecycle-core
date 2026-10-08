@@ -3,7 +3,8 @@
 # Kubernetes Secret synced from AWS Secrets Manager); nothing secret is here.
 spring:
   application:
-    name: loan-lifecycle-service
+    # Naming standard: app.<ctx>.<capability> (service id svc-ln-loan-lifecycle)
+    name: app.ln.loan-lifecycle
   threads:
     virtual:
       enabled: true
@@ -37,18 +38,33 @@ spring:
     default-schema: sc_ln_loan_lifecycle
     create-schemas: true
     locations: classpath:db/migration
+  # Runtime-neutral Kafka settings; authentication comes from the kafka-msk or
+  # kafka-strimzi profile. Topics are created only through the platform
+  # catalog, never by this service.
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    client-id: svc-ln-loan-lifecycle
     security:
       protocol: ${KAFKA_SECURITY_PROTOCOL:PLAINTEXT}
+    admin:
+      auto-create: false
     producer:
       acks: all
+      compression-type: lz4
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
       properties:
         enable.idempotence: true
         max.in.flight.requests.per.connection: 5
+        # Kafka refuses to build the producer unless
+        # delivery.timeout.ms >= linger.ms + request.timeout.ms.
         delivery.timeout.ms: 30000
+        request.timeout.ms: 20000
+        linger.ms: 5
+    consumer:
+      isolation-level: read_committed
+      enable-auto-commit: false
+      auto-offset-reset: earliest
   security:
     oauth2:
       resourceserver:
@@ -90,6 +106,9 @@ management:
           include: readinessState,db
         liveness:
           include: livenessState
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:0.1}
   metrics:
     tags:
       service: svc-ln-loan-lifecycle
@@ -101,20 +120,42 @@ management:
       service: svc-ln-loan-lifecycle
 
 loan:
+  security:
+    # Tokens must name this service in aud (Keycloak audience mapper).
+    audience: ${OIDC_AUDIENCE:svc-ln-loan-lifecycle}
   customer-credit:
-    adapter: ${CUSTOMER_CREDIT_ADAPTER:http}
-    base-url: ${CUSTOMER_SERVICE_BASE_URL:http://customer-profile-kyc-service:8080}
+    # http (customer-profile-kyc) or in-memory (local runs and tests only).
+    # No default: deployments must choose (switch to http only after the
+    # customer cutover, runbook precondition table).
+    adapter: ${CUSTOMER_CREDIT_ADAPTER:}
+    base-url: ${CUSTOMER_SERVICE_BASE_URL:http://customer-profile-kyc-service.customer.svc.cluster.local:8080}
     client-registration-id: customer-service
-    ledger-currency: ${CUSTOMER_CREDIT_LEDGER_CURRENCY:AED}
+    # ISO 4217 currency the customer service holds credit in when its
+    # response omits currency. No default: never assumed.
+    ledger-currency: ${CUSTOMER_CREDIT_LEDGER_CURRENCY:}
     connect-timeout: PT1S
     read-timeout: PT2S
+    max-attempts: 3
+    paths:
+      credit-position: /api/v1/customers/{customerId}/credit
+      reserve: /api/v1/customers/{customerId}/credit/reserve
+      release: /api/v1/customers/{customerId}/credit/release
   outbox:
     retention: P7D
     relay:
-      enabled: ${OUTBOX_RELAY_ENABLED:true}
+      # Off until the evt.ln.loan.* topics are in the platform catalog.
+      enabled: ${OUTBOX_RELAY_ENABLED:false}
       interval: PT1S
       batch-size: 100
-      send-timeout: PT10S
+      # Longer than delivery.timeout.ms, so the relay never gives up on a send
+      # Kafka is still retrying (which would publish the event twice).
+      send-timeout: PT35S
+      max-attempts: ${OUTBOX_RELAY_MAX_ATTEMPTS:10}
+  repayment-consumer:
+    # evt.pay.payment.loan-payment-completed.v1; off until the topic and this
+    # service's DLQ evt.ln.loan.dlq.v1 exist and the payments cutover window opens.
+    enabled: ${LOAN_REPAYMENT_CONSUMER_ENABLED:false}
+    concurrency: 1
 
 logging:
   pattern:

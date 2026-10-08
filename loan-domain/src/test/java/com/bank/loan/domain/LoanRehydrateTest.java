@@ -21,16 +21,21 @@ class LoanRehydrateTest {
         LoanInstallment paid = LoanInstallment.rehydrate(ID, CUSTOMER, 1, Money.aed(new BigDecimal("500.00")),
             LocalDate.of(2026, 2, 1), Money.aed(new BigDecimal("500.00")), LocalDateTime.of(2026, 1, 30, 9, 0),
             InstallmentStatus.PAID);
+        List<LoanInstallment> schedule = new java.util.ArrayList<>(List.of(paid));
+        for (int n = 2; n <= 6; n++) {
+            schedule.add(LoanInstallment.rehydrate(ID, CUSTOMER, n, Money.aed(new BigDecimal("500.00")),
+                LocalDate.of(2026, 1, 1).plusMonths(n), Money.aed(BigDecimal.ZERO), null, InstallmentStatus.PENDING));
+        }
 
         Loan loan = Loan.rehydrate(ID, CUSTOMER, Money.aed(new BigDecimal("3000.00")), InterestRate.of(new BigDecimal("4.0")),
             LoanTerm.ofMonths(6), LoanStatus.DISBURSED, LocalDate.of(2026, 1, 1), LocalDate.of(2026, 1, 2),
-            LocalDate.of(2026, 1, 3), LocalDate.of(2026, 7, 3), Money.aed(new BigDecimal("2500.00")), List.of(paid),
+            LocalDate.of(2026, 1, 3), LocalDate.of(2026, 7, 3), Money.aed(new BigDecimal("2500.00")), schedule,
             LocalDateTime.of(2026, 1, 1, 8, 0), LocalDateTime.of(2026, 1, 30, 9, 0), 7L);
 
         assertThat(loan.getStatus()).isEqualTo(LoanStatus.DISBURSED);
         assertThat(loan.getOutstandingBalance()).isEqualTo(Money.aed(new BigDecimal("2500.00")));
         assertThat(loan.getVersion()).isEqualTo(7L);
-        assertThat(loan.getInstallments()).containsExactly(paid);
+        assertThat(loan.getInstallments()).hasSize(6).first().isEqualTo(paid);
         assertThat(loan.getInstallments().getFirst().isPaid()).isTrue();
         assertThat(loan.getDomainEvents()).isEmpty();
     }

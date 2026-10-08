@@ -22,7 +22,9 @@ class LoanAggregateTest {
         );
 
         assertThat(loan.getStatus()).isEqualTo(LoanStatus.CREATED);
-        assertThat(loan.getOutstandingBalance()).isEqualTo(Money.aed(new BigDecimal("10000.00")));
+        // 10,000.00 at 5% over 12 months: total due on the schedule is 10,272.89
+        assertThat(loan.getOutstandingBalance()).isEqualTo(Money.aed(new BigDecimal("10272.89")));
+        assertThat(loan.getInstallments()).hasSize(12);
         assertThat(loan.getApplicationDate()).isNotNull();
         assertThat(loan.getDomainEvents())
             .anySatisfy(event -> assertThat(event).isInstanceOf(LoanCreatedEvent.class));
@@ -86,7 +88,7 @@ class LoanAggregateTest {
         assertThatThrownBy(() -> disbursed.makePayment(Money.aed(BigDecimal.ZERO)))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("must be positive");
-        assertThatThrownBy(() -> disbursed.makePayment(Money.aed(new BigDecimal("20000.00"))))
+        assertThatThrownBy(() -> disbursed.makePayment(Money.aed(new BigDecimal("10272.90"))))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("cannot exceed outstanding balance");
     }
@@ -99,8 +101,10 @@ class LoanAggregateTest {
         PaymentResult result = disbursed.makePayment(Money.aed(new BigDecimal("1000.00")));
 
         assertThat(result.isSuccess()).isTrue();
-        assertThat(result.getPaymentDistribution().getPrincipalPayment().getAmount()).isEqualByComparingTo("1000.00");
-        assertThat(result.getPaymentDistribution().getInterestPayment().getAmount()).isEqualByComparingTo("0.00");
+        // installment 1 (856.07 = 814.40 principal + 41.67 interest), then 143.93 of installment 2,
+        // whose interest is 9,185.60 x 5/1200 = 38.27
+        assertThat(result.getPaymentDistribution().getPrincipalPayment().getAmount()).isEqualByComparingTo("920.06");
+        assertThat(result.getPaymentDistribution().getInterestPayment().getAmount()).isEqualByComparingTo("79.94");
         assertThat(disbursed.getOutstandingBalance().getAmount())
             .isEqualByComparingTo(previous.subtract(Money.aed(new BigDecimal("1000.00"))).getAmount());
         assertThat(disbursed.getDomainEvents())
@@ -138,7 +142,8 @@ class LoanAggregateTest {
         );
 
         assertThat(zeroInterest.calculateMonthlyPayment().getAmount()).isEqualByComparingTo("1000.00");
-        assertThat(oneMonth.calculateMonthlyPayment().getAmount()).isEqualByComparingTo("5000.00");
+        // one month at 6%: 5,000.00 principal + 25.00 interest
+        assertThat(oneMonth.calculateMonthlyPayment().getAmount()).isEqualByComparingTo("5025.00");
     }
 
     @Test

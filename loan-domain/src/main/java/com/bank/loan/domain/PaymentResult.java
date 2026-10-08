@@ -37,6 +37,13 @@ public class PaymentResult {
      * Detailed breakdown of how the payment was distributed
      */
     PaymentDistribution paymentDistribution;
+
+    /**
+     * Per-installment split of the payment, in installment order (empty for a
+     * loan without a schedule)
+     */
+    @Builder.Default
+    java.util.List<InstallmentAllocation> allocations = java.util.List.of();
     
     /**
      * Outstanding loan balance after this payment

@@ -2,7 +2,17 @@ openapi: 3.0.3
 info:
   title: Loan Context Service API
   version: 1.0.0
-  description: Loan origination and servicing APIs.
+  description: |-
+    Loan origination and servicing APIs of svc-ln-loan-lifecycle (first-party and internal callers).
+
+    Access tokens are Keycloak JWTs sent as `Authorization: Bearer`; `aud` must contain
+    `svc-ln-loan-lifecycle`. Sender-constrained (DPoP) tokens are not required on these
+    `/api/v1` paths: the platform contract requires DPoP only on TPP-facing endpoints, and no TPP
+    calls this API. A customer (realm role customer) acts only on loans whose customerId equals the
+    `customer_id` claim of the token; staff (banker, loan_officer, admin) and services (service) act
+    on any loan.
+
+    Money: every amount carries an ISO 4217 currency; there is no default currency.
   license:
     name: Proprietary
     url: https://openfinance.example.com/license
@@ -21,7 +31,6 @@ paths:
       operationId: createLoanApplication
       security:
         - bearerAuth: []
-          dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -58,7 +67,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
-          description: Business validation failed
+          description: INSUFFICIENT_CREDIT, CURRENCY_MISMATCH (the customer's credit is held in another currency) or CUSTOMER_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: CUSTOMER_SERVICE_UNAVAILABLE - the customer service could not be asked; nothing was changed, retry
           content:
             application/json:
               schema:
@@ -71,7 +86,6 @@ paths:
       operationId: getLoan
       security:
         - bearerAuth: []
-          dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -110,7 +124,6 @@ paths:
       operationId: approveLoan
       security:
         - bearerAuth: []
-          dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -141,6 +154,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: INVALID_LOAN_STATE (the loan is not in a state that allows this) or CONCURRENT_UPDATE (retry)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /api/v1/loans/{loanId}/reject:
     post:
@@ -149,7 +168,6 @@ paths:
       operationId: rejectLoan
       security:
         - bearerAuth: []
-          dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -186,6 +204,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: INVALID_LOAN_STATE (the loan is not in a state that allows this) or CONCURRENT_UPDATE (retry)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '400':
+          description: INVALID_REQUEST
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /api/v1/loans/{loanId}/disburse:
     post:
@@ -194,7 +224,6 @@ paths:
       operationId: disburseLoan
       security:
         - bearerAuth: []
-          dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -225,20 +254,42 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: INVALID_LOAN_STATE (the loan is not in a state that allows this) or CONCURRENT_UPDATE (retry)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: INSUFFICIENT_CREDIT (the customer service refused the reservation; the loan stays APPROVED), CURRENCY_MISMATCH or CUSTOMER_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: CUSTOMER_SERVICE_UNAVAILABLE - the credit could not be reserved; the loan stays APPROVED, retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /api/v1/loans/{loanId}/payments:
     post:
       tags: [LoanManagement]
       summary: Make loan payment
       operationId: makePayment
+      description: |-
+        Applies a repayment to the schedule in installment order, interest first, and records how it
+        was allocated. When the schedule is fully paid the loan becomes FULLY_PAID and the customer's
+        reserved credit is released after the repayment is stored.
       security:
         - bearerAuth: []
-          dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
         - $ref: '#/components/parameters/InteractionId'
         - $ref: '#/components/parameters/LoanId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -270,6 +321,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '400':
+          description: INVALID_REQUEST (missing or non-positive amount, currency not ISO 4217 or not the loan currency, amount above what is due, x-idempotency-key longer than 128)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: INVALID_LOAN_STATE, CONCURRENT_UPDATE or DUPLICATE_REQUEST (the same key is being processed; retry)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: IDEMPOTENCY_KEY_REUSED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /api/v1/loans/{loanId}/cancel:
     post:
@@ -278,7 +347,6 @@ paths:
       operationId: cancelLoan
       security:
         - bearerAuth: []
-          dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -315,17 +383,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-
+        '409':
+          description: INVALID_LOAN_STATE (the loan is not in a state that allows this) or CONCURRENT_UPDATE (retry)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '400':
+          description: INVALID_REQUEST
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
-    dpopAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: DPoP
   parameters:
     Authorization:
       name: Authorization
@@ -336,9 +411,21 @@ components:
     DPoP:
       name: DPoP
       in: header
-      required: true
+      required: false
+      description: Not required on these first-party and internal paths (Bearer tokens); accepted and ignored if sent.
       schema:
         type: string
+    IdempotencyKey:
+      name: x-idempotency-key
+      in: header
+      required: false
+      description: |-
+        Optional. A repeat of the same request (same caller, key, loan and amount) is applied once and
+        returns the loan; the same key with another loan or amount is 422 IDEMPOTENCY_KEY_REUSED.
+        Keys are scoped to the caller (the customer_id claim for customers, the token subject otherwise).
+      schema:
+        type: string
+        maxLength: 128
     InteractionId:
       name: X-FAPI-Interaction-ID
       in: header
@@ -354,19 +441,23 @@ components:
   schemas:
     CreateLoanRequest:
       type: object
-      required: [customerId, principalAmount, annualInterestRate, termInMonths]
+      required: [customerId, principalAmount, currency, annualInterestRate, termInMonths]
       properties:
         customerId:
           type: string
+          description: For a customer caller, must equal the customer_id claim of the token (else 403).
         principalAmount:
           type: number
           format: double
         currency:
           type: string
-          example: USD
+          pattern: '^[A-Z]{3}$'
+          description: ISO 4217. Required; there is no default currency.
+          example: AED
         annualInterestRate:
           type: number
           format: double
+          description: Nominal annual rate in percent (6.5 = 6.5%), compounded monthly on the declining balance.
         termInMonths:
           type: integer
           minimum: 1
@@ -378,20 +469,24 @@ components:
         amount:
           type: number
           format: double
+          exclusiveMinimum: true
+          minimum: 0
         currency:
           type: string
-          example: USD
+          pattern: '^[A-Z]{3}$'
+          description: ISO 4217; must be the loan's currency.
+          example: AED
 
     ReasonRequest:
       type: object
-      required: [reason]
       properties:
         reason:
           type: string
+          maxLength: 500
 
     LoanResponse:
       type: object
-      required: [loanId, customerId, principalAmount, annualInterestRate, termInMonths, status, applicationDate, outstandingBalance, monthlyPayment, createdAt, lastModifiedAt]
+      required: [loanId, customerId, principalAmount, annualInterestRate, rateBasis, currency, termInMonths, status, applicationDate, outstandingBalance, monthlyPayment, createdAt, lastModifiedAt]
       properties:
         loanId:
           type: string
@@ -403,6 +498,23 @@ components:
         annualInterestRate:
           type: number
           format: double
+          description: |-
+            Percent per year (6.5 = 6.5%). NOMINAL_ANNUAL: the nominal rate. FLAT_TOTAL: the flat total
+            rate annualised for display, flatTotalRate * 100 * 12 / termInMonths.
+        rateBasis:
+          type: string
+          enum: [NOMINAL_ANNUAL, FLAT_TOTAL]
+          description: NOMINAL_ANNUAL for loans created by this service; FLAT_TOTAL for loans migrated from the monolith.
+        flatTotalRate:
+          type: number
+          format: double
+          nullable: true
+          description: |-
+            FLAT_TOTAL loans only: the monolith's interest rate as it stored it, a fraction of the principal
+            charged once over the whole term (0.200 = 20%). Null for NOMINAL_ANNUAL loans.
+        currency:
+          type: string
+          description: ISO 4217 currency of every amount of the loan.
         termInMonths:
           type: integer
         status:
@@ -426,9 +538,11 @@ components:
         outstandingBalance:
           type: number
           format: double
+          description: Everything still due on the schedule, unpaid principal plus scheduled interest.
         monthlyPayment:
           type: number
           format: double
+          description: The first installment of the schedule (for migrated loans, the monolith's installment).
         createdAt:
           type: string
           format: date-time
@@ -442,6 +556,10 @@ components:
       properties:
         code:
           type: string
+          description: |-
+            Stable machine-readable code: INVALID_REQUEST, FORBIDDEN, LOAN_NOT_FOUND, INVALID_LOAN_STATE,
+            CONCURRENT_UPDATE, DUPLICATE_REQUEST, INSUFFICIENT_CREDIT, CURRENCY_MISMATCH, CUSTOMER_NOT_FOUND,
+            IDEMPOTENCY_KEY_REUSED, CUSTOMER_SERVICE_UNAVAILABLE, INTERNAL_ERROR.
         message:
           type: string
         interactionId:

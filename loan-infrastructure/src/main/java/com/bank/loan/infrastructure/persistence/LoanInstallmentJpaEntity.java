@@ -34,6 +34,12 @@ public class LoanInstallmentJpaEntity {
     @Column(name = "amount", nullable = false, precision = 19, scale = 4)
     private BigDecimal amount;
 
+    @Column(name = "principal_amount", nullable = false, precision = 19, scale = 4)
+    private BigDecimal principalAmount;
+
+    @Column(name = "interest_amount", nullable = false, precision = 19, scale = 4)
+    private BigDecimal interestAmount;
+
     @Column(name = "paid_amount", nullable = false, precision = 19, scale = 4)
     private BigDecimal paidAmount;
 
@@ -61,6 +67,8 @@ public class LoanInstallmentJpaEntity {
     public UUID getInstallmentId() { return installmentId; }
     public int getInstallmentNumber() { return installmentNumber; }
     public BigDecimal getAmount() { return amount; }
+    public BigDecimal getPrincipalAmount() { return principalAmount; }
+    public BigDecimal getInterestAmount() { return interestAmount; }
     public BigDecimal getPaidAmount() { return paidAmount; }
     public String getCurrency() { return currency; }
     public LocalDate getDueDate() { return dueDate; }
@@ -68,6 +76,8 @@ public class LoanInstallmentJpaEntity {
     public String getStatus() { return status; }
 
     void setAmount(BigDecimal amount) { this.amount = amount; }
+    void setPrincipalAmount(BigDecimal principalAmount) { this.principalAmount = principalAmount; }
+    void setInterestAmount(BigDecimal interestAmount) { this.interestAmount = interestAmount; }
     void setPaidAmount(BigDecimal paidAmount) { this.paidAmount = paidAmount; }
     void setCurrency(String currency) { this.currency = currency; }
     void setDueDate(LocalDate dueDate) { this.dueDate = dueDate; }

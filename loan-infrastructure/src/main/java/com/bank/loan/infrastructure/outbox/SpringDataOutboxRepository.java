@@ -7,6 +7,7 @@ import org.springframework.data.repository.query.Param;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 public interface SpringDataOutboxRepository extends JpaRepository<OutboxEventJpaEntity, UUID> {
@@ -20,7 +21,7 @@ public interface SpringDataOutboxRepository extends JpaRepository<OutboxEventJpa
 
     @Query(value = """
         select * from outbox_event
-        where published_at is null
+        where published_at is null and parked_at is null
         order by created_seq
         limit :batchSize
         """, nativeQuery = true)
@@ -30,5 +31,11 @@ public interface SpringDataOutboxRepository extends JpaRepository<OutboxEventJpa
     @Query("delete from OutboxEventJpaEntity e where e.publishedAt < :before")
     int deletePublishedBefore(@Param("before") Instant before);
 
-    long countByPublishedAtIsNull();
+    /** Backlog: rows still to be relayed (parked rows are counted separately). */
+    long countByPublishedAtIsNullAndParkedAtIsNull();
+
+    long countByParkedAtIsNotNull();
+
+    @Query("select min(e.occurredAt) from OutboxEventJpaEntity e where e.publishedAt is null and e.parkedAt is null")
+    Optional<Instant> oldestPendingOccurredAt();
 }

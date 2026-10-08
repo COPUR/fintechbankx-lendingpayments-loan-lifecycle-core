@@ -19,6 +19,11 @@ import java.util.concurrent.TimeUnit;
  * scale out without reordering an aggregate's events. A failed send stops the
  * batch and is retried on the next run; consumers de-duplicate on eventId,
  * which makes the at-least-once delivery safe.
+ *
+ * A row that fails {@code maxAttempts} times is parked (parked_at set) and the
+ * relay moves on, so one poison row cannot hold back every later event.
+ * Parked rows show in the outbox_parked_events gauge; re-drive them by
+ * clearing parked_at once the cause is fixed.
  */
 public class OutboxRelay {
 
@@ -32,10 +37,18 @@ public class OutboxRelay {
     private final int batchSize;
     private final Duration sendTimeout;
     private final Duration retention;
+    private final int maxAttempts;
 
     public OutboxRelay(SpringDataOutboxRepository outbox, KafkaTemplate<String, String> kafka,
                        TransactionTemplate transactions, Clock clock, int batchSize,
                        Duration sendTimeout, Duration retention) {
+        this(outbox, kafka, transactions, clock, batchSize, sendTimeout, retention, 10);
+    }
+
+    public OutboxRelay(SpringDataOutboxRepository outbox, KafkaTemplate<String, String> kafka,
+                       TransactionTemplate transactions, Clock clock, int batchSize,
+                       Duration sendTimeout, Duration retention, int maxAttempts) {
+        this.maxAttempts = Math.max(1, maxAttempts);
         this.outbox = outbox;
         this.kafka = kafka;
         this.transactions = transactions;
@@ -65,8 +78,15 @@ public class OutboxRelay {
                     row.markFailed("interrupted");
                     break;
                 } catch (Exception e) {
-                    log.warn("Outbox relay could not publish event {} to {}; will retry", row.getEventId(), row.getTopic(), e);
                     row.markFailed(e.getClass().getSimpleName());
+                    if (row.getAttempts() >= maxAttempts) {
+                        row.park(clock.instant());
+                        log.error("Outbox relay parked event {} for {} after {} failed sends; later events continue",
+                            row.getEventId(), row.getTopic(), row.getAttempts(), e);
+                        continue;
+                    }
+                    log.warn("Outbox relay could not publish event {} to {} (attempt {} of {}); will retry",
+                        row.getEventId(), row.getTopic(), row.getAttempts(), maxAttempts, e);
                     break;
                 }
             }
@@ -86,6 +106,9 @@ public class OutboxRelay {
         record.headers().add("eventId", row.getEventId().toString().getBytes(StandardCharsets.UTF_8));
         record.headers().add("correlationId", row.getCorrelationId().getBytes(StandardCharsets.UTF_8));
         record.headers().add("x-fapi-interaction-id", row.getCorrelationId().getBytes(StandardCharsets.UTF_8));
+        if (row.getTraceparent() != null) {
+            record.headers().add("traceparent", row.getTraceparent().getBytes(StandardCharsets.UTF_8));
+        }
         return record;
     }
 }

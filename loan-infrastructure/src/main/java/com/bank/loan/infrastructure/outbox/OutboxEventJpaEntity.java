@@ -56,6 +56,12 @@ public class OutboxEventJpaEntity {
     @Column(name = "last_error", length = 512)
     private String lastError;
 
+    @Column(name = "parked_at")
+    private Instant parkedAt;
+
+    @Column(name = "traceparent", length = 55, updatable = false)
+    private String traceparent;
+
     protected OutboxEventJpaEntity() {
     }
 
@@ -73,6 +79,11 @@ public class OutboxEventJpaEntity {
         this.occurredAt = occurredAt;
     }
 
+    public OutboxEventJpaEntity withTraceparent(String traceparent) {
+        this.traceparent = traceparent;
+        return this;
+    }
+
     public UUID getEventId() { return eventId; }
     public String getAggregateType() { return aggregateType; }
     public String getAggregateId() { return aggregateId; }
@@ -85,6 +96,8 @@ public class OutboxEventJpaEntity {
     public Instant getPublishedAt() { return publishedAt; }
     public int getAttempts() { return attempts; }
     public String getLastError() { return lastError; }
+    public Instant getParkedAt() { return parkedAt; }
+    public String getTraceparent() { return traceparent; }
 
     void markPublished(Instant at) {
         this.publishedAt = at;
@@ -95,5 +108,10 @@ public class OutboxEventJpaEntity {
     void markFailed(String error) {
         this.attempts++;
         this.lastError = error == null ? null : error.substring(0, Math.min(error.length(), 512));
+    }
+
+    /** Takes the row out of the relay after too many failed sends. */
+    void park(Instant at) {
+        this.parkedAt = at;
     }
 }

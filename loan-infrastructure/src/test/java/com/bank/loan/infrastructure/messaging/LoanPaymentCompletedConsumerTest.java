@@ -1,0 +1,200 @@
+package com.bank.loan.infrastructure.messaging;
+
+import com.bank.loan.domain.LoanId;
+import com.bank.loan.domain.PaymentId;
+import com.bank.loan.domain.port.in.LoanRepaymentUseCase;
+import com.bank.loan.domain.port.in.RecordCompletedLoanPaymentCommand;
+import com.bank.shared.kernel.domain.Money;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.apache.kafka.clients.consumer.Consumer;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.header.Headers;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.listener.DefaultErrorHandler;
+import org.springframework.kafka.listener.MessageListenerContainer;
+import org.springframework.kafka.support.SendResult;
+import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionOperations;
+
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@SuppressWarnings("unchecked")
+class LoanPaymentCompletedConsumerTest {
+
+    private static final UUID EVENT_ID = UUID.fromString("6f1c3a3e-1a52-4f7e-9d43-0b8a3d9f0c11");
+    private static final String EVENT = """
+        {"eventId":"6f1c3a3e-1a52-4f7e-9d43-0b8a3d9f0c11","eventType":"Payments.Payment.LoanPaymentCompleted.v1",
+         "occurredAt":"2026-10-08T06:00:00Z","aggregateId":"PAY-1","aggregateVersion":3,"correlationId":"corr-1",
+         "causationId":null,"producer":"svc-pay-initiation-settlement",
+         "data":{"paymentId":"PAY-1","customerId":"CUST-1","loanId":"LOAN-1",
+                 "actualAmount":{"amount":"1100.00","currency":"AED"},"transactionReference":"SETTLE-1",
+                 "completedAt":"2026-10-08T05:59:59Z","futureField":"ignored"}}
+        """;
+    private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-10-08T07:00:00Z"), ZoneOffset.UTC);
+
+    private final ObjectMapper json = new ObjectMapper();
+
+    @Test
+    void envelopeFieldsAreReadAndUnknownFieldsIgnored() {
+        LoanPaymentCompleted event = LoanPaymentCompleted.parse(json, EVENT);
+
+        assertThat(event.eventId()).isEqualTo(EVENT_ID);
+        assertThat(event.paymentId()).isEqualTo("PAY-1");
+        assertThat(event.loanId()).isEqualTo("LOAN-1");
+        assertThat(event.actualAmount()).isEqualTo(Money.aed(new BigDecimal("1100.00")));
+    }
+
+    @Test
+    void recordsOutsideTheContractAreViolations() {
+        assertThatThrownBy(() -> LoanPaymentCompleted.parse(json, "not json"))
+            .isInstanceOf(ContractViolationException.class);
+        assertThatThrownBy(() -> LoanPaymentCompleted.parse(json, "[1]"))
+            .isInstanceOf(ContractViolationException.class);
+        assertThatThrownBy(() -> LoanPaymentCompleted.parse(json, EVENT.replace("LoanPaymentCompleted.v1", "LoanPaymentCompleted.v2")))
+            .isInstanceOf(ContractViolationException.class).hasMessageContaining("eventType");
+        assertThatThrownBy(() -> LoanPaymentCompleted.parse(json, EVENT.replace("6f1c3a3e-1a52-4f7e-9d43-0b8a3d9f0c11", "nope")))
+            .isInstanceOf(ContractViolationException.class).hasMessageContaining("UUID");
+        assertThatThrownBy(() -> LoanPaymentCompleted.parse(json, EVENT.replace("\"loanId\":\"LOAN-1\",", "")))
+            .isInstanceOf(ContractViolationException.class).hasMessageContaining("loanId");
+        assertThatThrownBy(() -> LoanPaymentCompleted.parse(json, EVENT.replace("\"1100.00\"", "\"eleven\"")))
+            .isInstanceOf(ContractViolationException.class).hasMessageContaining("decimal");
+        assertThatThrownBy(() -> LoanPaymentCompleted.parse(json, EVENT.replace("\"AED\"", "\"DIRHAM\"")))
+            .isInstanceOf(ContractViolationException.class).hasMessageContaining("ISO 4217");
+    }
+
+    @Test
+    void listenerAppliesTheRepaymentInTheInboxTransaction() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        LoanRepaymentUseCase repayments = mock(LoanRepaymentUseCase.class);
+        when(jdbc.update(anyString(), any(), any(), any(), any())).thenReturn(1);
+        boolean[] inTransaction = new boolean[1];
+        TransactionOperations transactions = new TransactionOperations() {
+            @Override
+            public <T> T execute(TransactionCallback<T> action) {
+                inTransaction[0] = true;
+                try {
+                    return action.doInTransaction(null);
+                } finally {
+                    inTransaction[0] = false;
+                }
+            }
+        };
+        when(repayments.recordCompletedLoanPayment(any())).thenAnswer(invocation -> {
+            assertThat(inTransaction[0]).isTrue();
+            return true;
+        });
+
+        new LoanPaymentCompletedListener(json, new JdbcInbox(jdbc), repayments, transactions)
+            .onLoanPaymentCompleted(new ConsumerRecord<>(LoanPaymentCompleted.TOPIC, 0, 42L, "PAY-1", EVENT));
+
+        verify(repayments).recordCompletedLoanPayment(new RecordCompletedLoanPaymentCommand(PaymentId.of("PAY-1"),
+            LoanId.of("LOAN-1"), Money.aed(new BigDecimal("1100.00"))));
+        verify(jdbc).update(anyString(), eq(EVENT_ID), eq(RepaymentConsumerConfiguration.CONSUMER_GROUP),
+            eq("Payments.Payment.LoanPaymentCompleted.v1"), eq(LoanPaymentCompleted.TOPIC));
+    }
+
+    @Test
+    void anEventAlreadyInTheInboxIsSkipped() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        LoanRepaymentUseCase repayments = mock(LoanRepaymentUseCase.class);
+        when(jdbc.update(anyString(), any(), any(), any(), any())).thenReturn(0);
+        LoanPaymentCompletedListener listener = new LoanPaymentCompletedListener(json, new JdbcInbox(jdbc), repayments,
+            TransactionOperations.withoutTransaction());
+
+        assertThat(listener.process(LoanPaymentCompleted.parse(json, EVENT))).isFalse();
+        verify(repayments, never()).recordCompletedLoanPayment(any());
+    }
+
+    @Test
+    void consumerFollowsThePlatformConventions() {
+        Map<String, Object> props = RepaymentConsumerConfiguration.consumerProperties(Map.of("bootstrap.servers", "b:9092"));
+
+        assertThat(props)
+            .containsEntry(ConsumerConfig.GROUP_ID_CONFIG, "cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1")
+            .containsEntry(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed")
+            .containsEntry(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false)
+            .containsEntry(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
+            .containsEntry("bootstrap.servers", "b:9092");
+    }
+
+    @Test
+    void contractViolationGoesStraightToTheLoanDlqWithDlqHeadersAndNoMessage() {
+        KafkaTemplate<String, String> kafka = mock(KafkaTemplate.class);
+        when(kafka.send(any(ProducerRecord.class))).thenReturn(CompletableFuture.completedFuture(
+            new SendResult<>(null, new RecordMetadata(new TopicPartition("evt.ln.loan.dlq.v1", 0), 0, 0, 0, 0, 0))));
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        DefaultErrorHandler handler = RepaymentConsumerConfiguration.errorHandler(kafka,
+            meters.counter("consumer.dlq.messages"), CLOCK);
+        ConsumerRecord<String, String> record = new ConsumerRecord<>(LoanPaymentCompleted.TOPIC, 2, 77L, "PAY-1", "not json");
+        record.headers().add("eventId", EVENT_ID.toString().getBytes(StandardCharsets.UTF_8));
+        record.headers().add("correlationId", "corr-1".getBytes(StandardCharsets.UTF_8));
+
+        boolean recovered = handler.handleOne(new ContractViolationException("Record value is not JSON for customer Jane"),
+            record, mock(Consumer.class), mock(MessageListenerContainer.class));
+
+        assertThat(recovered).isTrue();
+        ArgumentCaptor<ProducerRecord<String, String>> sent = ArgumentCaptor.forClass(ProducerRecord.class);
+        verify(kafka).send(sent.capture());
+        ProducerRecord<String, String> dead = sent.getValue();
+        assertThat(dead.topic()).isEqualTo("evt.ln.loan.dlq.v1");
+        assertThat(dead.key()).isEqualTo("PAY-1");
+        assertThat(dead.value()).isEqualTo("not json");
+        Headers headers = dead.headers();
+        assertThat(text(headers, "dlq-original-topic")).isEqualTo(LoanPaymentCompleted.TOPIC);
+        assertThat(text(headers, "dlq-original-partition")).isEqualTo("2");
+        assertThat(text(headers, "dlq-original-offset")).isEqualTo("77");
+        assertThat(text(headers, "dlq-consumer-group")).isEqualTo("cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1");
+        assertThat(text(headers, "dlq-error-class")).isEqualTo(ContractViolationException.class.getName());
+        assertThat(text(headers, "dlq-attempts")).isEqualTo("1");
+        assertThat(text(headers, "dlq-failed-at")).isEqualTo("2026-10-08T07:00:00Z");
+        assertThat(text(headers, "eventId")).isEqualTo(EVENT_ID.toString());
+        assertThat(text(headers, "correlationId")).isEqualTo("corr-1");
+        headers.forEach(header -> assertThat(new String(header.value(), StandardCharsets.UTF_8)).doesNotContain("Jane"));
+        assertThat(meters.counter("consumer.dlq.messages").count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void aTransientFailureIsRetriedBeforeItIsDeadLettered() {
+        KafkaTemplate<String, String> kafka = mock(KafkaTemplate.class);
+        DefaultErrorHandler handler = RepaymentConsumerConfiguration.errorHandler(kafka,
+            new SimpleMeterRegistry().counter("c"), CLOCK);
+        ConsumerRecord<String, String> record = new ConsumerRecord<>(LoanPaymentCompleted.TOPIC, 0, 1L, "PAY-1", EVENT);
+
+        boolean recovered = handler.handleOne(new IllegalStateException("database down"), record,
+            mock(Consumer.class), mock(MessageListenerContainer.class));
+
+        assertThat(recovered).isFalse();
+        verify(kafka, never()).send(any(ProducerRecord.class));
+        assertThat(RepaymentConsumerConfiguration.dlqHeaders(record, new IllegalStateException("x"), CLOCK)
+            .lastHeader("dlq-attempts").value()).isEqualTo("4".getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String text(Headers headers, String name) {
+        return headers.lastHeader(name) == null ? null : new String(headers.lastHeader(name).value(), StandardCharsets.UTF_8);
+    }
+}

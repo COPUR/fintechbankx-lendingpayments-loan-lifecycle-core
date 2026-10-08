@@ -39,6 +39,13 @@ public class LoanJpaEntity {
     @Column(name = "annual_interest_rate", nullable = false, precision = 7, scale = 4)
     private BigDecimal annualInterestRate;
 
+    @Column(name = "rate_basis", nullable = false, length = 16)
+    private String rateBasis;
+
+    /** Written only by the backfill; read-only here. */
+    @Column(name = "legacy_flat_rate", precision = 19, scale = 6, insertable = false, updatable = false)
+    private BigDecimal legacyFlatRate;
+
     @Column(name = "term_months", nullable = false)
     private int termMonths;
 
@@ -89,6 +96,8 @@ public class LoanJpaEntity {
     public BigDecimal getPrincipalAmount() { return principalAmount; }
     public String getCurrency() { return currency; }
     public BigDecimal getAnnualInterestRate() { return annualInterestRate; }
+    public String getRateBasis() { return rateBasis; }
+    public BigDecimal getLegacyFlatRate() { return legacyFlatRate; }
     public int getTermMonths() { return termMonths; }
     public String getStatus() { return status; }
     public LocalDate getApplicationDate() { return applicationDate; }
@@ -106,6 +115,7 @@ public class LoanJpaEntity {
     void setPrincipalAmount(BigDecimal principalAmount) { this.principalAmount = principalAmount; }
     void setCurrency(String currency) { this.currency = currency; }
     void setAnnualInterestRate(BigDecimal annualInterestRate) { this.annualInterestRate = annualInterestRate; }
+    void setRateBasis(String rateBasis) { this.rateBasis = rateBasis; }
     void setTermMonths(int termMonths) { this.termMonths = termMonths; }
     void setStatus(String status) { this.status = status; }
     void setApplicationDate(LocalDate applicationDate) { this.applicationDate = applicationDate; }

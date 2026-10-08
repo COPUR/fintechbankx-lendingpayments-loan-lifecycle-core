@@ -18,9 +18,10 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Turns Loan domain events into the public envelope of the AsyncAPI contract
- * svc-ln-loan-lifecycle.yaml (asyncapi catalog): topic evt.ln.loan.&lt;event&gt;.v1,
- * eventType Lending.Loan.&lt;Event&gt;.v1, money as decimal strings, ids only.
+ * Turns Loan domain events into the public envelope of the provider contract
+ * api/asyncapi/svc-ln-loan-lifecycle.yaml (to be published to the asyncapi
+ * catalog): topic evt.ln.loan.&lt;event&gt;.v1, eventType
+ * Lending.Loan.&lt;Event&gt;.v1, money as decimal strings, ids only.
  */
 public class LoanEventEnvelopeFactory {
 
@@ -80,6 +81,7 @@ public class LoanEventEnvelopeFactory {
             case LoanPaymentMadeEvent e -> new PublicEvent("payment-made", "PaymentMade", data(
                 "loanId", e.getLoanId().getValue(),
                 "customerId", e.getCustomerId().getValue(),
+                "paymentId", e.getPaymentId() == null ? null : e.getPaymentId().getValue(),
                 "paymentAmount", money(e.getPaymentAmount()),
                 "previousBalance", money(e.getPreviousBalance()),
                 "newBalance", money(e.getNewBalance())));

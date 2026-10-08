@@ -33,24 +33,49 @@ public class OutboxConfiguration {
     }
 
     /**
-     * Backlog of events not yet on Kafka. Alert on growth: it means the relay
-     * or the brokers are down while loans keep changing.
+     * Backlog of events not yet on Kafka (platform name outbox_pending_events).
+     * Alert on growth: it means the relay or the brokers are down while loans
+     * keep changing.
      */
     @Bean
-    Gauge loanOutboxPendingGauge(MeterRegistry registry, SpringDataOutboxRepository outbox) {
-        return Gauge.builder("loan.outbox.pending", outbox, SpringDataOutboxRepository::countByPublishedAtIsNull)
+    Gauge outboxPendingGauge(MeterRegistry registry, SpringDataOutboxRepository outbox) {
+        return Gauge.builder("outbox.pending.events", outbox, SpringDataOutboxRepository::countByPublishedAtIsNullAndParkedAtIsNull)
             .description("Loan events written to the outbox but not yet published to Kafka")
             .register(registry);
     }
 
+    /** Rows the relay gave up on (outbox_parked_events); any value above 0 needs an operator. */
+    @Bean
+    Gauge outboxParkedGauge(MeterRegistry registry, SpringDataOutboxRepository outbox) {
+        return Gauge.builder("outbox.parked.events", outbox, SpringDataOutboxRepository::countByParkedAtIsNotNull)
+            .description("Loan events parked after loan.outbox.relay.max-attempts failed sends")
+            .register(registry);
+    }
+
+    /** Age of the oldest event still waiting (outbox_oldest_pending_age_seconds); 0 when the backlog is empty. */
+    @Bean
+    Gauge outboxOldestPendingAgeGauge(MeterRegistry registry, SpringDataOutboxRepository outbox, Clock clock) {
+        return Gauge.builder("outbox.oldest.pending.age", outbox, repo -> oldestPendingAgeSeconds(repo, clock))
+            .baseUnit("seconds")
+            .description("Seconds since the oldest unpublished loan event occurred")
+            .register(registry);
+    }
+
+    static double oldestPendingAgeSeconds(SpringDataOutboxRepository outbox, Clock clock) {
+        return outbox.oldestPendingOccurredAt()
+            .map(oldest -> (double) Duration.between(oldest, clock.instant()).toSeconds())
+            .orElse(0d);
+    }
+
     /**
      * The relay runs in every replica; the advisory lock lets only one of
-     * them publish at a time. Disable with loan.outbox.relay.enabled=false
-     * (tests, or a dedicated relay deployment).
+     * them publish at a time. Off unless loan.outbox.relay.enabled=true
+     * (OUTBOX_RELAY_ENABLED): it stays off until the evt.ln.loan.* topics
+     * exist in the platform catalog (runbook step 4).
      */
     @Configuration
     @EnableScheduling
-    @ConditionalOnProperty(name = "loan.outbox.relay.enabled", havingValue = "true", matchIfMissing = true)
+    @ConditionalOnProperty(name = "loan.outbox.relay.enabled", havingValue = "true")
     static class RelayConfiguration {
 
         @Bean
@@ -59,9 +84,11 @@ public class OutboxConfiguration {
                                 PlatformTransactionManager transactionManager,
                                 Clock clock,
                                 @Value("${loan.outbox.relay.batch-size:100}") int batchSize,
-                                @Value("${loan.outbox.relay.send-timeout:PT10S}") Duration sendTimeout,
-                                @Value("${loan.outbox.retention:P7D}") Duration retention) {
-            return new OutboxRelay(outbox, kafka, new TransactionTemplate(transactionManager), clock, batchSize, sendTimeout, retention);
+                                @Value("${loan.outbox.relay.send-timeout:PT35S}") Duration sendTimeout,
+                                @Value("${loan.outbox.retention:P7D}") Duration retention,
+                                @Value("${loan.outbox.relay.max-attempts:10}") int maxAttempts) {
+            return new OutboxRelay(outbox, kafka, new TransactionTemplate(transactionManager), clock, batchSize,
+                sendTimeout, retention, maxAttempts);
         }
 
         @Bean

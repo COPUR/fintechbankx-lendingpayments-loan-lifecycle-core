@@ -32,9 +32,23 @@ public class OutboxLoanEventPublisher implements LoanEventPublisher {
     @Transactional(propagation = Propagation.MANDATORY)
     public void publish(Loan loan, List<DomainEvent> events) {
         String correlationId = currentCorrelationId();
+        String traceparent = currentTraceparent();
         outbox.saveAll(events.stream()
-            .map(event -> envelopes.toOutboxRow(loan, event, correlationId))
+            .map(event -> envelopes.toOutboxRow(loan, event, correlationId).withTraceparent(traceparent))
             .toList());
+    }
+
+    /**
+     * W3C traceparent of the current span (Micrometer Tracing puts traceId and
+     * spanId in the MDC), or null outside a traced request.
+     */
+    static String currentTraceparent() {
+        String traceId = MDC.get("traceId");
+        String spanId = MDC.get("spanId");
+        if (traceId == null || spanId == null || !traceId.matches("[0-9a-f]{32}") || !spanId.matches("[0-9a-f]{16}")) {
+            return null;
+        }
+        return "00-" + traceId + "-" + spanId + "-01";
     }
 
     private static String currentCorrelationId() {

@@ -2,7 +2,7 @@ package com.bank.loan.infrastructure.persistence;
 
 import com.bank.loan.domain.Loan;
 import com.bank.loan.domain.LoanId;
-import com.bank.loan.domain.LoanRepository;
+import com.bank.loan.domain.port.out.LoanRepository;
 import com.bank.loan.domain.LoanStatus;
 import com.bank.shared.kernel.domain.CustomerId;
 import org.springframework.dao.OptimisticLockingFailureException;
