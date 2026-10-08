@@ -12,3 +12,6 @@ build/
 # The provider lock file is committed (reproducible provider versions).
 *.tfstate
 *.tfstate.*
+
+# AsyncAPI gate dependencies (npm ci --prefix scripts/ci)
+scripts/ci/node_modules/
