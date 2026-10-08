@@ -21,6 +21,7 @@ import org.springframework.web.client.RestClientException;
 
 import java.math.BigDecimal;
 import java.util.Currency;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -39,9 +40,16 @@ import java.util.regex.Pattern;
  *   <li>Idempotency keys are derived from the loan: {@code {loanId}:reserve}
  *       ({@code :g{n}} after n cancelled reservations), {@code {loanId}:release},
  *       and {@code {reserveKey}:compensation} to cancel a reservation; the
- *       body's {@code reference} is the loan id. A cancellation stores its
- *       intent before releasing, and an unconfirmed one is re-sent before
- *       the next reservation ({@link ReservationGenerations}).</li>
+ *       body's {@code reference} is the loan id. A reservation is recorded
+ *       (RESERVING) before it is sent and marked RESERVED once accepted; a
+ *       cancellation stores its intent before releasing, and an unconfirmed
+ *       one is re-sent before the next reservation, by the cancellation of
+ *       the loan, or by the recovery sweep ({@link ReservationGenerations}).</li>
+ *   <li>A release is sent only for a reservation known to be accepted: the
+ *       customer service subtracts a release without checking that a
+ *       reservation for the reference exists (customer #13
+ *       CreditProfile.releaseCredit), so a blind release would free credit
+ *       held by the customer's other loans.</li>
  *   <li>409 CONCURRENT_UPDATE / DUPLICATE_REQUEST are retried with the same
  *       key, at most {@code maxAttempts} times, then unavailable.</li>
  *   <li>422 INSUFFICIENT_CREDIT is the only refusal
@@ -58,9 +66,10 @@ import java.util.regex.Pattern;
  *       "insufficient credit".</li>
  * </ul>
  *
- * No transaction is involved: the application calls this port outside its
- * database transactions, and cancels a reservation itself when storing the
- * disbursement fails.
+ * No transaction of the caller is involved, except in
+ * {@link #markReservationUsed}, which joins the disbursement transaction: the
+ * application calls the other methods outside its database transactions, and
+ * cancels a reservation itself when storing the disbursement fails.
  */
 public class CustomerProfileHttpAdapter implements CustomerCreditService {
 
@@ -137,7 +146,22 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
             }
             generations.compensationDone(loanId, compensated);
         }
-        return moveCredit(loanId, customerId, amount, paths.reserve(), reserveKey(loanId, generations.current(loanId)));
+        int generation = generations.current(loanId);
+        try {
+            generations.beginReservation(loanId, generation);
+        } catch (RuntimeException notStored) {
+            throw new CustomerCreditUnavailableException("Could not record the reservation "
+                + reserveKey(loanId, generation) + " before sending it; nothing reserved", notStored);
+        }
+        // An exception here leaves the row RESERVING: whether the provider applied it is unknown.
+        CreditDecision decision = moveCredit(loanId, customerId, amount, paths.reserve(), reserveKey(loanId, generation));
+        try {
+            generations.reservationAnswered(loanId, generation, decision == CreditDecision.ACCEPTED);
+        } catch (RuntimeException notRecorded) {
+            log.warn("Reservation {} was answered {} but the answer was not recorded; the row stays RESERVING",
+                reserveKey(loanId, generation), decision, notRecorded);
+        }
+        return decision;
     }
 
     /**
@@ -149,18 +173,74 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
     @Override
     public CreditDecision cancelReservation(LoanId loanId, CustomerId customerId, Money amount) {
         int generation = generations.current(loanId);
+        boolean claimed;
         try {
-            generations.beginCompensation(loanId, generation);
+            claimed = generations.beginCompensation(loanId, generation);
         } catch (RuntimeException notStored) {
             throw new CustomerCreditUnavailableException("Could not record the compensation of "
                 + reserveKey(loanId, generation) + "; reservation kept, nothing released", notStored);
         }
+        if (!claimed) {
+            log.info("Reservation {} is no longer outstanding (released or used meanwhile); nothing to cancel",
+                reserveKey(loanId, generation));
+            return CreditDecision.ACCEPTED;
+        }
+        return sendCompensation(loanId, customerId, amount, generation);
+    }
+
+    /**
+     * Re-sends a pending compensation, then compensates a reservation
+     * recorded as RESERVED. A reservation still RESERVING or UNCONFIRMED is
+     * left alone: it may never have been applied, and the customer service
+     * would subtract a release of it from other loans' credit.
+     */
+    @Override
+    public UnusedReservation releaseUnusedReservation(LoanId loanId, CustomerId customerId, Money amount) {
+        UnusedReservation outcome = UnusedReservation.NONE;
+        OptionalInt pending = generations.pendingCompensation(loanId);
+        if (pending.isPresent()) {
+            if (sendCompensation(loanId, customerId, amount, pending.getAsInt()) != CreditDecision.ACCEPTED) {
+                throw new CustomerCreditUnavailableException("Customer service did not confirm the release of "
+                    + reserveKey(loanId, pending.getAsInt()));
+            }
+            outcome = UnusedReservation.RELEASED;
+        }
+        Optional<ReservationGenerations.Reservation> row = generations.find(loanId);
+        if (row.isEmpty() || row.get().state() == null || row.get().state() == ReservationGenerations.State.USED) {
+            return outcome;
+        }
+        int generation = row.get().generation();
+        if (row.get().state() != ReservationGenerations.State.RESERVED) {
+            log.warn("Reservation {} is {}: not known to be applied, so it is not released",
+                reserveKey(loanId, generation), row.get().state());
+            return UnusedReservation.UNCONFIRMED;
+        }
+        if (!generations.beginCompensationOfAccepted(loanId, generation)) {
+            return outcome;
+        }
+        if (sendCompensation(loanId, customerId, amount, generation) != CreditDecision.ACCEPTED) {
+            throw new CustomerCreditUnavailableException("Customer service did not confirm the release of "
+                + reserveKey(loanId, generation));
+        }
+        return UnusedReservation.RELEASED;
+    }
+
+    @Override
+    public void markReservationUsed(LoanId loanId) {
+        if (!generations.markUsed(loanId)) {
+            throw new CustomerCreditUnavailableException("The credit reservation of loan " + loanId.getValue()
+                + " was released meanwhile; the disbursement is not stored");
+        }
+    }
+
+    /** The compensation of {@code generation} is recorded as pending; sends it and clears it once accepted. */
+    private CreditDecision sendCompensation(LoanId loanId, CustomerId customerId, Money amount, int generation) {
         CreditDecision undone = moveCredit(loanId, customerId, amount, paths.release(), compensationKey(loanId, generation));
         if (undone == CreditDecision.ACCEPTED) {
             try {
                 generations.compensationDone(loanId, generation);
             } catch (RuntimeException notRecorded) {
-                log.warn("Release {} was accepted but not recorded; the next reservation re-sends it under the same key",
+                log.warn("Release {} was accepted but not recorded; it is re-sent under the same key",
                     compensationKey(loanId, generation), notRecorded);
             }
         }

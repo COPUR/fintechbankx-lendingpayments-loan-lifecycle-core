@@ -15,6 +15,7 @@ import com.bank.loan.domain.port.in.RecordCompletedLoanPaymentCommand;
 import com.bank.loan.domain.port.in.RepayLoanCommand;
 import com.bank.loan.domain.port.out.CustomerCreditService;
 import com.bank.loan.domain.port.out.CustomerCreditService.CreditDecision;
+import com.bank.loan.domain.port.out.CustomerCreditService.UnusedReservation;
 import com.bank.loan.domain.port.out.LoanEventPublisher;
 import com.bank.loan.domain.port.out.LoanRepository;
 import com.bank.loan.domain.port.out.RepaymentLedger;
@@ -41,9 +42,13 @@ import java.util.function.Supplier;
  * is held while waiting on another service:
  * <ul>
  *   <li>apply: credit check, then create and save;</li>
- *   <li>disburse: read, reserve credit, then reload-disburse-save; if storing
- *       fails the reservation is cancelled again (unless another request
- *       disbursed the loan meanwhile);</li>
+ *   <li>disburse: read, reserve credit, then reload-disburse-save (which also
+ *       marks the reservation used); if storing fails the reservation is
+ *       cancelled again (unless another request disbursed the loan
+ *       meanwhile);</li>
+ *   <li>cancel and reject: change-save; after that commits, a reservation
+ *       this service recorded as accepted for the loan (a failed or abandoned
+ *       disbursement) is released under its compensation key;</li>
  *   <li>repay: allocate-save-record in one transaction; when the loan is fully
  *       paid the credit is released after that transaction commits.</li>
  * </ul>
@@ -105,7 +110,9 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
         return inTransaction(() -> {
             Loan loan = load(loanId);
             loan.reject(reason);
-            return saveAndPublish(loan);
+            Loan saved = saveAndPublish(loan);
+            afterCommit(() -> releaseUnusedReservation(saved));
+            return saved;
         });
     }
 
@@ -114,8 +121,35 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
         return inTransaction(() -> {
             Loan loan = load(loanId);
             loan.cancel(reason);
-            return saveAndPublish(loan);
+            Loan saved = saveAndPublish(loan);
+            afterCommit(() -> releaseUnusedReservation(saved));
+            return saved;
         });
+    }
+
+    /**
+     * Review 5460235552: a loan closed before disbursement may still hold
+     * credit reserved by a failed or abandoned disbursement. The adapter
+     * releases it only if it recorded the reservation as accepted, so a
+     * release never frees credit held by other loans. The closure has
+     * committed and stands whatever happens here; an unconfirmed release
+     * stays pending and the recovery sweep re-sends it under the same key.
+     */
+    private void releaseUnusedReservation(Loan loan) {
+        try {
+            UnusedReservation outcome = customerCreditService.releaseUnusedReservation(
+                loan.getId(), loan.getCustomerId(), loan.getPrincipalAmount());
+            if (outcome == UnusedReservation.RELEASED) {
+                log.info("Loan {} was closed with credit still reserved; the reservation was released",
+                    loan.getId().getValue());
+            } else if (outcome == UnusedReservation.UNCONFIRMED) {
+                log.warn("Loan {} was closed while a reservation for it is unconfirmed; left for the recovery sweep",
+                    loan.getId().getValue());
+            }
+        } catch (RuntimeException failure) {
+            log.error("Loan {} was closed but its reserved credit could not be released yet; the recovery sweep re-sends it",
+                loan.getId().getValue(), failure);
+        }
     }
 
     /**
@@ -137,7 +171,10 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
             return inTransaction(() -> {
                 Loan loan = load(loanId);
                 loan.disburse();
-                return saveAndPublish(loan);
+                Loan disbursed = saveAndPublish(loan);
+                // Same transaction: fails (and rolls the disbursement back) if the reservation was released meanwhile.
+                customerCreditService.markReservationUsed(loanId);
+                return disbursed;
             });
         } catch (RuntimeException failure) {
             cancelReservationUnlessDisbursed(approved, failure);
@@ -147,10 +184,12 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
 
     private void cancelReservationUnlessDisbursed(Loan approved, RuntimeException failure) {
         try {
-            if (!findLoan(approved.getId()).getStatus().canBeDisbursed()) {
-                // Another request disbursed (or closed) the loan; the reservation is its reservation.
+            if (!findLoan(approved.getId()).getStatus().isNeverDisbursed()) {
+                // Another request disbursed the loan; the reservation (same key) is its reservation.
                 return;
             }
+            // Still APPROVED, or closed meanwhile: nothing uses the reservation. The adapter
+            // sends nothing if the closure already released it.
             CreditDecision undone = customerCreditService.cancelReservation(
                 approved.getId(), approved.getCustomerId(), approved.getPrincipalAmount());
             if (undone != CreditDecision.ACCEPTED) {

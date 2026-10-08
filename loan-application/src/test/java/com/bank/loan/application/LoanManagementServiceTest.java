@@ -12,6 +12,7 @@ import com.bank.loan.domain.port.in.RecordCompletedLoanPaymentCommand;
 import com.bank.loan.domain.port.in.RepayLoanCommand;
 import com.bank.loan.domain.port.out.CustomerCreditService;
 import com.bank.loan.domain.port.out.CustomerCreditService.CreditDecision;
+import com.bank.loan.domain.port.out.CustomerCreditService.UnusedReservation;
 import com.bank.loan.domain.port.out.CustomerCreditUnavailableException;
 import com.bank.loan.domain.LoanStatus;
 import com.bank.loan.domain.PaymentId;
@@ -440,6 +441,115 @@ class LoanManagementServiceTest {
 
         assertThat(transactions.commits).isEqualTo(1);
         verify(customerCreditService).releaseCredit(loan.getId(), loan.getCustomerId(), loan.getPrincipalAmount());
+    }
+
+    // --- review 5460235552: a loan closed before disbursement releases what it still holds ------------
+
+    @Test
+    void cancellingAnApprovedLoanReleasesItsUnusedReservationAfterTheCancellationCommitted() {
+        Loan approved = loan("LOAN-SVC-CXL", "25000.00", 24);
+        approved.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-CXL"))).thenReturn(Optional.of(approved));
+        when(loanRepository.save(approved)).thenReturn(approved);
+        when(customerCreditService.releaseUnusedReservation(any(), any(), any())).thenAnswer(invocation -> {
+            assertThat(transactions.active).isFalse();
+            assertThat(transactions.commits).isEqualTo(1);
+            return UnusedReservation.RELEASED;
+        });
+
+        Loan cancelled = service.cancel(LoanId.of("LOAN-SVC-CXL"), "Customer withdrew");
+
+        assertThat(cancelled.getStatus()).isEqualTo(LoanStatus.CANCELLED);
+        verify(customerCreditService).releaseUnusedReservation(LoanId.of("LOAN-SVC-CXL"), approved.getCustomerId(),
+            Money.aed(new BigDecimal("25000.00")));
+    }
+
+    @Test
+    void rejectingALoanAlsoReleasesAnUnusedReservation() {
+        Loan created = loan("LOAN-SVC-REJ", "8000.00", 12);
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-REJ"))).thenReturn(Optional.of(created));
+        when(loanRepository.save(created)).thenReturn(created);
+        when(customerCreditService.releaseUnusedReservation(any(), any(), any())).thenReturn(UnusedReservation.NONE);
+
+        service.reject(LoanId.of("LOAN-SVC-REJ"), "Policy");
+
+        verify(customerCreditService).releaseUnusedReservation(LoanId.of("LOAN-SVC-REJ"), created.getCustomerId(),
+            Money.aed(new BigDecimal("8000.00")));
+    }
+
+    @Test
+    void aReleaseThatFailsOrIsUnconfirmedDoesNotUndoTheCancellation() {
+        Loan first = loan("LOAN-SVC-CXL2", "25000.00", 24);
+        first.approve();
+        Loan second = loan("LOAN-SVC-CXL3", "25000.00", 24);
+        second.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-CXL2"))).thenReturn(Optional.of(first));
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-CXL3"))).thenReturn(Optional.of(second));
+        when(loanRepository.save(any(Loan.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(customerCreditService.releaseUnusedReservation(eq(LoanId.of("LOAN-SVC-CXL2")), any(), any()))
+            .thenThrow(new CustomerCreditUnavailableException("down"));
+        when(customerCreditService.releaseUnusedReservation(eq(LoanId.of("LOAN-SVC-CXL3")), any(), any()))
+            .thenReturn(UnusedReservation.UNCONFIRMED);
+
+        assertThat(service.cancel(LoanId.of("LOAN-SVC-CXL2"), "Customer withdrew").getStatus()).isEqualTo(LoanStatus.CANCELLED);
+        assertThat(service.cancel(LoanId.of("LOAN-SVC-CXL3"), "Customer withdrew").getStatus()).isEqualTo(LoanStatus.CANCELLED);
+        assertThat(transactions.rollbacks).isZero();
+    }
+
+    @Test
+    void theDisbursementMarksItsReservationUsedInsideItsTransaction() {
+        Loan approved = loan("LOAN-SVC-USED", "10000.00", 12);
+        approved.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-USED"))).thenReturn(Optional.of(approved));
+        when(loanRepository.save(approved)).thenReturn(approved);
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        List<Boolean> transactionOpen = new ArrayList<>();
+        org.mockito.Mockito.doAnswer(invocation -> transactionOpen.add(transactions.active))
+            .when(customerCreditService).markReservationUsed(LoanId.of("LOAN-SVC-USED"));
+
+        service.disburse(LoanId.of("LOAN-SVC-USED"));
+
+        assertThat(transactionOpen).containsExactly(true);
+    }
+
+    @Test
+    void aReservationReleasedMeanwhileRollsTheDisbursementBack() {
+        Loan approved = loan("LOAN-SVC-GONE", "10000.00", 12);
+        approved.approve();
+        Loan stillApproved = loan("LOAN-SVC-GONE", "10000.00", 12);
+        stillApproved.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-GONE")))
+            .thenReturn(Optional.of(approved), Optional.of(approved), Optional.of(stillApproved));
+        when(loanRepository.save(any(Loan.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        org.mockito.Mockito.doThrow(new CustomerCreditUnavailableException("released meanwhile"))
+            .when(customerCreditService).markReservationUsed(any());
+        when(customerCreditService.cancelReservation(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-GONE")))
+            .isInstanceOf(CustomerCreditUnavailableException.class);
+
+        assertThat(transactions.rollbacks).isEqualTo(1);
+        verify(customerCreditService).cancelReservation(any(), any(), any());
+    }
+
+    @Test
+    void reservationIsCancelledWhenTheLoanWasCancelledWhileItWasBeingDisbursed() {
+        Loan approved = loan("LOAN-SVC-CXLRACE", "10000.00", 12);
+        approved.approve();
+        Loan cancelledMeanwhile = loan("LOAN-SVC-CXLRACE", "10000.00", 12);
+        cancelledMeanwhile.approve();
+        cancelledMeanwhile.cancel("Customer withdrew");
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-CXLRACE")))
+            .thenReturn(Optional.of(approved), Optional.of(cancelledMeanwhile), Optional.of(cancelledMeanwhile));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        when(customerCreditService.cancelReservation(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-CXLRACE")))
+            .isInstanceOf(IllegalStateException.class);
+
+        verify(customerCreditService).cancelReservation(LoanId.of("LOAN-SVC-CXLRACE"), approved.getCustomerId(),
+            Money.aed(new BigDecimal("10000.00")));
     }
 
     /**

@@ -53,6 +53,16 @@ public enum LoanStatus {
         return this == APPROVED;
     }
     
+    /**
+     * True if the loan was never disbursed: CREATED, PENDING_APPROVAL,
+     * APPROVED, or closed before a disbursement (REJECTED, CANCELLED). Credit
+     * reserved for such a loan is not used by a disbursement.
+     */
+    public boolean isNeverDisbursed() {
+        return this == CREATED || this == PENDING_APPROVAL || this == APPROVED
+            || this == REJECTED || this == CANCELLED;
+    }
+
     public boolean canBeCancelled() {
         return this == CREATED || this == PENDING_APPROVAL || this == APPROVED;
     }

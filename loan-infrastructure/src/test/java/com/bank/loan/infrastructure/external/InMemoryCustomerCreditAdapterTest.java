@@ -72,4 +72,22 @@ class InMemoryCustomerCreditAdapterTest {
     private static Money aed(String amount) {
         return Money.aed(new BigDecimal(amount));
     }
+
+    @Test
+    void onlyAnUnusedReservationIsReleasedWhenTheLoanIsClosed() {
+        CustomerId customer = CustomerId.of("CUST-12345678");
+        LoanId used = LoanId.of("LOAN-MEM-USED");
+
+        adapter.reserveCredit(LOAN, customer, aed("25000.00"));
+        adapter.reserveCredit(used, customer, aed("10000.00"));
+        adapter.markReservationUsed(used);
+
+        assertThat(adapter.releaseUnusedReservation(LOAN, customer, aed("25000.00")))
+            .isEqualTo(com.bank.loan.domain.port.out.CustomerCreditService.UnusedReservation.RELEASED);
+        assertThat(adapter.releaseUnusedReservation(LOAN, customer, aed("25000.00")))
+            .isEqualTo(com.bank.loan.domain.port.out.CustomerCreditService.UnusedReservation.NONE);
+        assertThat(adapter.releaseUnusedReservation(used, customer, aed("10000.00")))
+            .isEqualTo(com.bank.loan.domain.port.out.CustomerCreditService.UnusedReservation.NONE);
+        assertThat(adapter.getAvailableCredit(customer)).isEqualTo(aed("90000.00"));
+    }
 }

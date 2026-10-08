@@ -58,6 +58,7 @@ class ErrorStatusOverHttpIT {
 
     @BeforeEach
     void customerToken() {
+        PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.credit_reservation_generation");
         PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.outbox_event");
         PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.loan");
         when(jwtDecoder.decode(anyString())).thenReturn(Jwt.withTokenValue("t").header("alg", "RS256")
