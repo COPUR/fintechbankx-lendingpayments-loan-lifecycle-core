@@ -17,14 +17,19 @@ import org.apache.kafka.common.header.Headers;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
+import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.kafka.listener.MessageListenerContainer;
+import org.springframework.kafka.support.KafkaHeaders;
 import org.springframework.kafka.support.SendResult;
+import org.springframework.kafka.support.serializer.DeserializationException;
 import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionOperations;
 
 import java.math.BigDecimal;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
@@ -192,6 +197,35 @@ class LoanPaymentCompletedConsumerTest {
         verify(kafka, never()).send(any(ProducerRecord.class));
         assertThat(RepaymentConsumerConfiguration.dlqHeaders(record, new IllegalStateException("x"), CLOCK)
             .lastHeader("dlq-attempts").value()).isEqualTo("4".getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** dlq-attempts is the delivery attempt the container recorded, not a guess from the exception type. */
+    @Test
+    void dlqAttemptsIsTheDeliveryAttemptTheContainerRecorded() {
+        ConsumerRecord<String, String> record = new ConsumerRecord<>(LoanPaymentCompleted.TOPIC, 0, 5L, "PAY-1", EVENT);
+        record.headers().add(KafkaHeaders.DELIVERY_ATTEMPT, ByteBuffer.allocate(Integer.BYTES).putInt(2).array());
+
+        assertThat(text(RepaymentConsumerConfiguration.dlqHeaders(record, new IllegalStateException("x"), CLOCK),
+            "dlq-attempts")).isEqualTo("2");
+    }
+
+    @Test
+    void theContainerRecordsTheDeliveryAttempt() {
+        ConcurrentKafkaListenerContainerFactory<String, String> factory = new RepaymentConsumerConfiguration()
+            .repaymentListenerContainerFactory(new KafkaProperties(), mock(KafkaTemplate.class), new SimpleMeterRegistry(),
+                CLOCK, 1);
+
+        assertThat(factory.getContainerProperties().isDeliveryAttemptHeader()).isTrue();
+    }
+
+    /** Without the header (not set by a container): non-retryable failures, deserialization included, count once. */
+    @Test
+    void withoutTheHeaderNonRetryableFailuresIncludingDeserializationCountOnce() {
+        ConsumerRecord<String, String> record = new ConsumerRecord<>(LoanPaymentCompleted.TOPIC, 0, 6L, "PAY-1", EVENT);
+        DeserializationException bad = new DeserializationException("cannot deserialize", new byte[] {1}, false,
+            new IllegalStateException("bad bytes"));
+
+        assertThat(text(RepaymentConsumerConfiguration.dlqHeaders(record, bad, CLOCK), "dlq-attempts")).isEqualTo("1");
     }
 
     private static String text(Headers headers, String name) {

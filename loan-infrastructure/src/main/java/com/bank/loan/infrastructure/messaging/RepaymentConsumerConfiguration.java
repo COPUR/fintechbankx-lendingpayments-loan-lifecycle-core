@@ -7,6 +7,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -23,9 +24,11 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.listener.ContainerProperties;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
+import org.springframework.kafka.support.KafkaHeaders;
 import org.springframework.kafka.support.serializer.DeserializationException;
 import org.springframework.util.backoff.ExponentialBackOff;
 
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.Map;
@@ -75,6 +78,9 @@ public class RepaymentConsumerConfiguration {
         factory.setConsumerFactory(new DefaultKafkaConsumerFactory<>(props));
         factory.setConcurrency(concurrency);
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.RECORD);
+        // The container stamps each delivery with KafkaHeaders.DELIVERY_ATTEMPT (from the
+        // error handler's FailedRecordTracker); dlq-attempts reports that number.
+        factory.getContainerProperties().setDeliveryAttemptHeader(true);
         factory.setCommonErrorHandler(errorHandler(kafka, meters.counter("consumer.dlq.messages", "group", CONSUMER_GROUP), clock));
         return factory;
     }
@@ -110,8 +116,9 @@ public class RepaymentConsumerConfiguration {
 
     /** DeadLetterHeaders of the platform envelope schema; exception class only. */
     static Headers dlqHeaders(ConsumerRecord<?, ?> record, Exception ex, Clock clock) {
-        Throwable cause = ex.getCause() != null && ex.getClass().getName().startsWith("org.springframework.kafka")
-            ? ex.getCause() : ex;
+        // Unwrap the listener wrappers, but keep a DeserializationException: it is the failure itself.
+        Throwable cause = ex.getCause() != null && !(ex instanceof DeserializationException)
+            && ex.getClass().getName().startsWith("org.springframework.kafka") ? ex.getCause() : ex;
         RecordHeaders headers = new RecordHeaders();
         copy(record, headers, "eventType");
         copy(record, headers, "eventId");
@@ -120,14 +127,25 @@ public class RepaymentConsumerConfiguration {
         add(headers, "dlq-original-partition", String.valueOf(record.partition()));
         add(headers, "dlq-original-offset", String.valueOf(record.offset()));
         add(headers, "dlq-consumer-group", CONSUMER_GROUP);
-        add(headers, "dlq-attempts", String.valueOf(attempts(cause)));
+        add(headers, "dlq-attempts", String.valueOf(attempts(record, cause)));
         add(headers, "dlq-error-class", cause.getClass().getName());
         add(headers, "dlq-failed-at", clock.instant().toString());
         return headers;
     }
 
-    private static int attempts(Throwable cause) {
-        return cause instanceof ContractViolationException || cause instanceof IllegalArgumentException ? 1 : RETRIES + 1;
+    /**
+     * The delivery attempt that failed, as recorded by the container
+     * (KafkaHeaders.DELIVERY_ATTEMPT, deliveryAttemptHeader on). Only without
+     * that header (a record not delivered by this container) is it inferred:
+     * 1 for the failures that skip retries, otherwise all retries.
+     */
+    static int attempts(ConsumerRecord<?, ?> record, Throwable cause) {
+        Header delivery = record.headers().lastHeader(KafkaHeaders.DELIVERY_ATTEMPT);
+        if (delivery != null && delivery.value() != null && delivery.value().length == Integer.BYTES) {
+            return ByteBuffer.wrap(delivery.value()).getInt();
+        }
+        return cause instanceof ContractViolationException || cause instanceof IllegalArgumentException
+            || cause instanceof DeserializationException ? 1 : RETRIES + 1;
     }
 
     private static void copy(ConsumerRecord<?, ?> record, RecordHeaders headers, String name) {
