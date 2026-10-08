@@ -161,8 +161,11 @@ resource "aws_rds_cluster_instance" "database" {
 # bootstrap in docs/migration creates the role and writes
 # {"username", "password"} here; Terraform never sees the value. External
 # Secrets Operator (ClusterSecretStore aws-secrets-manager) syncs it into the
-# pods' Kubernetes Secret. Same name as terraform-modules aurora-postgresql
-# app_secret_name.
+# pods' Kubernetes Secret. Same shape as terraform-modules aurora-postgresql
+# app_secret_name (<env>/<slug>/<name>, 019a842), the migration secret next
+# to it. Neither secret is tagged fintechbankx.io/value-in-state: Terraform
+# never writes or reads their values, so the PR plan role (terraform-modules
+# f8202f0) only describes them and never gets GetSecretValue on them.
 resource "aws_secretsmanager_secret" "app_database" {
   # <env>/<service-slug>/...: the platform ESO role may read only
   # secret:<env>/*, so "<env>-<slug>/db-app" would be refused (same shape as
