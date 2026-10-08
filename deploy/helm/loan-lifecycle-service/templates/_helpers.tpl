@@ -2,14 +2,25 @@
 {{- .Chart.Name -}}
 {{- end -}}
 
-{{- /* app.kubernetes.io/name is the service account name (platform contract). */ -}}
-{{- define "loan.selectorLabels" -}}
+{{- /*
+app.kubernetes.io/name is the service account name (platform contract) on every
+pod, the migration Job's included: mesh NetworkPolicies grant Aurora egress by
+that label only. app.kubernetes.io/component tells the pods apart (api for the
+Deployment, db-migration for the Job), so the Service, PDB, HPA and Deployment
+never select the Job pod.
+*/ -}}
+{{- define "loan.baseLabels" -}}
 app.kubernetes.io/name: {{ .Values.serviceAccount.name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{- define "loan.selectorLabels" -}}
+{{ include "loan.baseLabels" . }}
+app.kubernetes.io/component: api
+{{- end -}}
+
 {{- define "loan.labels" -}}
-{{ include "loan.selectorLabels" . }}
+{{ include "loan.baseLabels" . }}
 app.kubernetes.io/version: {{ .Values.image.tag | default .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}

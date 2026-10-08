@@ -52,11 +52,12 @@ spec:
   activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds }}
   template:
     metadata:
-      # Not the Deployment's selector labels: the Service, PDB and
-      # NetworkPolicy must not select the migration pod.
+      # app.kubernetes.io/name = the service account, as on the service
+      # pods: mesh NetworkPolicies grant Aurora egress (5432) by that label
+      # only. component db-migration (not api) keeps the Service, PDB, HPA
+      # and Deployment from selecting this pod.
       labels:
-        app.kubernetes.io/name: {{ include "loan.migrationName" . }}
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- include "loan.baseLabels" . | nindent 8 }}
         app.kubernetes.io/component: db-migration
         fintechbankx.io/service-id: {{ index .Values.podLabels "fintechbankx.io/service-id" }}
         fintechbankx.io/squad: {{ .Values.squad }}

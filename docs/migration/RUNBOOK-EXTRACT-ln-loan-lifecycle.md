@@ -108,9 +108,13 @@ Keycloak `RequestAuthentication` (first-party web, mobile and staff tokens; `aud
 | Amazon MSK | the broker hostnames of the IAM listener (`KAFKA_BOOTSTRAP_SERVERS`) | 9098 `TLS` | outbox relay and repayment consumer (IAM auth via IRSA) |
 | AWS STS (regional endpoint) | `sts.<region>.amazonaws.com` | 443 `TLS` | IRSA web-identity exchange used by the MSK IAM client |
 
-The Flyway migration Job (Helm hook) runs without a sidecar by default (`migration.istioSidecar: false`),
-so it is not subject to the egress policy but only reaches Aurora; tell the mesh team if the cluster runs
-native sidecars, then turn the sidecar on.
+The Flyway migration Job (Helm pre-install/pre-upgrade hook) needs egress to Aurora on 5432 as well. It runs
+without a sidecar by default (`migration.istioSidecar: false`), so the Istio egress policy does not apply to it,
+but the mesh repo's NetworkPolicies do: they grant Aurora egress by `app.kubernetes.io/name` only, so the Job
+pod carries `app.kubernetes.io/name=loan-lifecycle-service` like the service pods, and
+`app.kubernetes.io/component=db-migration` (service pods: `api`) keeps it out of the Service, PDB and
+Deployment selectors. Ask the mesh team to keep the 5432 egress rule keyed on that label (not on the
+component) and tell them if the cluster runs native sidecars, then turn the sidecar on.
 
 **C. Callee ALLOW rules (this service as the caller, principal `cluster.local/ns/lending/sa/loan-lifecycle-service`).**
 
