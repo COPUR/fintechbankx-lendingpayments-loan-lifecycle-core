@@ -1,6 +1,7 @@
 # Copied for loan's consumer contract test (CustomerProfileHttpAdapterContractTest).
 # Source: fintechbankx-customer-profile-kyc-core, branch claude/customer-risk-compliance-deployable-ygi0zo (PR #13),
-# commit c3596f2, file api/openapi/customer-context.yaml. Replace with the catalogued version once merged.
+# commit 435aa83, file api/openapi/customer-context.yaml (422 CURRENCY_MISMATCH for a valid but different ISO
+# currency, 400 for a malformed one). Replace with the catalogued version once merged.
 openapi: 3.0.3
 info:
   title: Customer Context Service API
@@ -24,7 +25,7 @@ paths:
       operationId: createCustomer
       security:
         - bearerAuth: []
-          dpopAuth: []
+        - dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -80,7 +81,7 @@ paths:
       operationId: getCustomer
       security:
         - bearerAuth: []
-          dpopAuth: []
+        - dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -123,7 +124,7 @@ paths:
         the service's allowed list), staff, and the customer themself.
       security:
         - bearerAuth: []
-          dpopAuth: []
+        - dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -162,7 +163,7 @@ paths:
       operationId: updateCreditLimit
       security:
         - bearerAuth: []
-          dpopAuth: []
+        - dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -199,6 +200,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: CONCURRENT_UPDATE, the customer kept changing while the service retried; retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: CREDIT_LIMIT_BELOW_USED_CREDIT, the new limit is below the credit the customer already uses
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /api/v1/customers/{customerId}/credit/reserve:
     post:
@@ -213,7 +226,7 @@ paths:
         a 409. The answer is the credit position only (no personal data).
       security:
         - bearerAuth: []
-          dpopAuth: []
+        - dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -258,13 +271,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '409':
-          description: Idempotency key reused for a different credit movement, or a concurrent update
+          description: Idempotency key reused for a different credit movement (IDEMPOTENCY_KEY_REUSED), or the customer kept changing while the service retried a lost race (CONCURRENT_UPDATE)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
-          description: Not enough available credit
+          description: INSUFFICIENT_CREDIT (not enough available credit), or CURRENCY_MISMATCH (a valid ISO 4217 currency other than the customer's credit currency; a malformed currency is 400)
           content:
             application/json:
               schema:
@@ -283,7 +296,7 @@ paths:
         a 409. The answer is the credit position only (no personal data).
       security:
         - bearerAuth: []
-          dpopAuth: []
+        - dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -328,7 +341,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '409':
-          description: Idempotency key reused for a different credit movement, or a concurrent update
+          description: Idempotency key reused for a different credit movement (IDEMPOTENCY_KEY_REUSED), or the customer kept changing while the service retried a lost race (CONCURRENT_UPDATE)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: CURRENCY_MISMATCH, a valid ISO 4217 currency other than the customer's credit currency (a malformed currency is 400)
           content:
             application/json:
               schema:
@@ -347,7 +366,7 @@ paths:
         cannot be updated, nothing is recorded (503).
       security:
         - bearerAuth: []
-          dpopAuth: []
+        - dpopAuth: []
       parameters:
         - $ref: '#/components/parameters/Authorization'
         - $ref: '#/components/parameters/DPoP'
@@ -430,10 +449,17 @@ components:
     DPoP:
       name: DPoP
       in: header
-      required: true
+      required: false
       schema:
         type: string
-      description: DPoP proof JWT.
+      description: |-
+        DPoP proof (RFC 9449). Optional here: per the platform contract
+        (addendum 2026-10-08) DPoP binding applies only to open-finance TPP
+        clients. This service is called with internal client-credentials,
+        staff and first-party web/mobile tokens, which are not DPoP-bound, so
+        it does not verify DPoP; a DPoP header sent anyway is ignored. The
+        service enforces the issuer, its own service id in aud, and the azp
+        allow-list for SERVICE callers.
     InteractionId:
       name: X-FAPI-Interaction-ID
       in: header
@@ -453,8 +479,14 @@ components:
       required: true
       description: |-
         Caller-chosen key, unique per customer, that makes a credit movement
-        safe to retry. Derive it from what the movement is for (for example
-        "<loanId>:reserve") so a retry resends the same key.
+        safe to retry. It must be deterministic: derived from what the
+        movement is for, never random, so a retry after a timeout resends the
+        same key and the credit moves once. svc-ln-loan-lifecycle uses
+        "<loanId>:reserve" (":g<n>" appended after n cancelled reservations),
+        "<loanId>:reserve...:compensation" to cancel a reservation, and
+        "<loanId>:release" when the loan is repaid, with the loan id as the
+        body's reference. The same key with a different amount, currency,
+        movement or reference is 409 IDEMPOTENCY_KEY_REUSED.
       schema:
         type: string
         maxLength: 128
@@ -475,6 +507,7 @@ components:
         initialCreditLimit:
           type: number
           format: double
+          description: At most as many decimal places as the currency allows (2 for USD and AED, 0 for JPY). More is a 400 INVALID_REQUEST, never rounded; trailing zeros are fine.
         currency:
           type: string
           example: USD
@@ -486,6 +519,7 @@ components:
         amount:
           type: number
           format: double
+          description: At most as many decimal places as the currency allows (2 for USD and AED, 0 for JPY). More is a 400 INVALID_REQUEST, never rounded; trailing zeros are fine.
         currency:
           type: string
           example: USD
@@ -497,6 +531,7 @@ components:
         amount:
           type: number
           format: double
+          description: At most as many decimal places as the currency allows (2 for USD and AED, 0 for JPY). More is a 400 INVALID_REQUEST, never rounded; trailing zeros are fine.
         currency:
           type: string
           example: USD

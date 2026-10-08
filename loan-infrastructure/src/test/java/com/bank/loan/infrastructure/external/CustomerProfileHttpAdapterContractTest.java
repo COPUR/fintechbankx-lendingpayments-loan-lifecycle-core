@@ -64,7 +64,10 @@ class CustomerProfileHttpAdapterContractTest {
             assertThat(responses(post)).as(path + " statuses the adapter maps").containsKeys("400", "403", "404", "409");
         }
         assertThat(responses(operation(CustomerProfileHttpAdapter.Paths.DEFAULT.reserve(), "post")))
-            .as("422 INSUFFICIENT_CREDIT on reserve").containsKey("422");
+            .as("422 INSUFFICIENT_CREDIT / CURRENCY_MISMATCH on reserve").containsKey("422");
+        // customer #13 (435aa83): a valid but different ISO currency is 422 CURRENCY_MISMATCH on release too
+        assertThat(responses(operation(CustomerProfileHttpAdapter.Paths.DEFAULT.release(), "post")))
+            .as("422 CURRENCY_MISMATCH on release").containsKey("422");
     }
 
     @Test

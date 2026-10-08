@@ -30,6 +30,15 @@ class ApiExceptionHandlerTest {
     }
 
     @Test
+    void aRejectedCreditMovementIsANonRetryable422NotA503() {
+        var rejected = handler.creditMovementRejected(new com.bank.loan.domain.port.out.CreditMovementRejectedException(
+            "Customer service answered 400 INVALID_REQUEST", null));
+
+        assertThat(rejected.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+        assertThat(rejected.getBody().code()).isEqualTo("CREDIT_MOVEMENT_REJECTED");
+    }
+
+    @Test
     void currencyMismatchAndUnknownCustomerAre422WithTheirOwnCodes() {
         var mismatch = handler.currencyMismatch(new CreditCurrencyMismatchException(
             java.util.Currency.getInstance("USD"), java.util.Currency.getInstance("AED")));

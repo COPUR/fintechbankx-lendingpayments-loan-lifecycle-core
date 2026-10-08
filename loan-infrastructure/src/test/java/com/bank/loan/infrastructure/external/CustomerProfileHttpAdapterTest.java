@@ -190,8 +190,11 @@ class CustomerProfileHttpAdapterTest {
             .isInstanceOf(CreditCustomerNotFoundException.class);
         assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
             .isInstanceOf(CreditCurrencyMismatchException.class).hasMessageContaining("AED");
+        // 400 (e.g. a malformed currency, customer #13): loan sent something the provider will never
+        // accept; a non-retryable rejection (422 in loan), not "customer service unavailable" (503).
         assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
-            .isInstanceOf(CustomerCreditUnavailableException.class).hasMessageContaining("400 INVALID_REQUEST");
+            .isInstanceOf(com.bank.loan.domain.port.out.CreditMovementRejectedException.class)
+            .hasMessageContaining("400 INVALID_REQUEST");
         assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
             .isInstanceOf(CustomerCreditUnavailableException.class).hasMessageContaining("422 SOMETHING_NEW");
         server.verify();

@@ -2,6 +2,7 @@ package com.bank.loan.infrastructure.external;
 
 import com.bank.loan.domain.port.out.CreditCurrencyMismatchException;
 import com.bank.loan.domain.port.out.CreditCustomerNotFoundException;
+import com.bank.loan.domain.port.out.CreditMovementRejectedException;
 import com.bank.loan.domain.port.out.CustomerCreditService;
 import com.bank.loan.domain.port.out.CustomerCreditUnavailableException;
 import com.bank.loan.domain.LoanId;
@@ -46,7 +47,9 @@ import java.util.regex.Pattern;
  *   <li>422 INSUFFICIENT_CREDIT is the only refusal
  *       ({@link CreditDecision#REFUSED}); 422 CURRENCY_MISMATCH is
  *       {@link CreditCurrencyMismatchException}; 404 is
- *       {@link CreditCustomerNotFoundException}; anything else (400, 401,
+ *       {@link CreditCustomerNotFoundException}; 400 is
+ *       {@link CreditMovementRejectedException} on a movement (non-retryable,
+ *       422 in loan); anything else (400 on the position read, 401,
  *       403, other 422, 409 IDEMPOTENCY_KEY_REUSED, 5xx, timeout, no service
  *       token) is {@link CustomerCreditUnavailableException}.</li>
  *   <li>Currency: the credit position's {@code currency} is used; only if the
@@ -241,8 +244,16 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
                         customerId.getValue(), code);
                     return CreditDecision.REFUSED;
                 }
+                // Customer #13 (435aa83, copied in src/test/resources/contracts/customer-context.yaml):
+                // 422 CURRENCY_MISMATCH when the ISO currency is valid but not the customer's credit
+                // currency, 400 when it is malformed. Refresh the copied contract when customer's
+                // push lands in the catalog.
                 if (status == HttpStatus.UNPROCESSABLE_ENTITY.value() && "CURRENCY_MISMATCH".equals(code)) {
                     throw new CreditCurrencyMismatchException(amount.getCurrency(), null);
+                }
+                if (status == HttpStatus.BAD_REQUEST.value()) {
+                    throw new CreditMovementRejectedException("Customer service answered " + status + " " + code
+                        + " to credit " + movement + " " + idempotencyKey + "; not retried", error);
                 }
                 if (status == HttpStatus.NOT_FOUND.value()) {
                     throw new CreditCustomerNotFoundException(customerId.getValue());

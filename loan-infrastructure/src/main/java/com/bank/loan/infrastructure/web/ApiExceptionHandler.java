@@ -2,6 +2,7 @@ package com.bank.loan.infrastructure.web;
 
 import com.bank.loan.domain.port.out.CreditCurrencyMismatchException;
 import com.bank.loan.domain.port.out.CreditCustomerNotFoundException;
+import com.bank.loan.domain.port.out.CreditMovementRejectedException;
 import com.bank.loan.domain.port.out.CustomerCreditUnavailableException;
 import com.bank.loan.application.IdempotencyKeyReusedException;
 import com.bank.loan.application.InsufficientCreditException;
@@ -52,6 +53,17 @@ public class ApiExceptionHandler {
     @ExceptionHandler(CreditCurrencyMismatchException.class)
     ResponseEntity<ErrorResponse> currencyMismatch(CreditCurrencyMismatchException ex) {
         return error(HttpStatus.UNPROCESSABLE_ENTITY, "CURRENCY_MISMATCH", ex.getMessage());
+    }
+
+    /**
+     * The customer service rejected the credit movement as invalid (its 400):
+     * retrying the same request cannot succeed, so a 422, not a 503.
+     */
+    @ExceptionHandler(CreditMovementRejectedException.class)
+    ResponseEntity<ErrorResponse> creditMovementRejected(CreditMovementRejectedException ex) {
+        log.warn("Customer service rejected a credit movement: {}", ex.getMessage());
+        return error(HttpStatus.UNPROCESSABLE_ENTITY, "CREDIT_MOVEMENT_REJECTED",
+            "The customer service rejected the credit movement for this loan");
     }
 
     /** The customer service does not know the customer; not a credit refusal. */

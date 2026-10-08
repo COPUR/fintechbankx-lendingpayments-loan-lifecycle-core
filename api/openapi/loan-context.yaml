@@ -67,7 +67,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
-          description: INSUFFICIENT_CREDIT, CURRENCY_MISMATCH (the customer's credit is held in another currency) or CUSTOMER_NOT_FOUND
+          description: INSUFFICIENT_CREDIT, CURRENCY_MISMATCH (the customer's credit is held in another currency), CUSTOMER_NOT_FOUND or CREDIT_MOVEMENT_REJECTED (the customer service rejected the credit movement as invalid; retrying will not help)
           content:
             application/json:
               schema:
@@ -261,7 +261,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
-          description: INSUFFICIENT_CREDIT (the customer service refused the reservation; the loan stays APPROVED), CURRENCY_MISMATCH or CUSTOMER_NOT_FOUND
+          description: INSUFFICIENT_CREDIT (the customer service refused the reservation; the loan stays APPROVED), CURRENCY_MISMATCH, CUSTOMER_NOT_FOUND or CREDIT_MOVEMENT_REJECTED (the customer service rejected the reservation as invalid; the loan stays APPROVED)
           content:
             application/json:
               schema:
@@ -559,7 +559,7 @@ components:
           description: |-
             Stable machine-readable code: INVALID_REQUEST, FORBIDDEN, LOAN_NOT_FOUND, INVALID_LOAN_STATE,
             CONCURRENT_UPDATE, DUPLICATE_REQUEST, INSUFFICIENT_CREDIT, CURRENCY_MISMATCH, CUSTOMER_NOT_FOUND,
-            IDEMPOTENCY_KEY_REUSED, CUSTOMER_SERVICE_UNAVAILABLE, INTERNAL_ERROR.
+            CREDIT_MOVEMENT_REJECTED, IDEMPOTENCY_KEY_REUSED, CUSTOMER_SERVICE_UNAVAILABLE, INTERNAL_ERROR.
         message:
           type: string
         interactionId:
