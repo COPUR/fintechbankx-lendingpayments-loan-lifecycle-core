@@ -539,6 +539,54 @@ class CustomerProfileHttpAdapterTest {
         server.verify();
     }
 
+    // --- customer release-by-reference (provider contract pending) -----------------------------------
+
+    /** 422 RESERVATION_NOT_FOUND: nothing was reserved under the loan's reference, so the release intent is done. */
+    @Test
+    void aReleaseOfAReservationTheCustomerServiceDoesNotHoldCompletesTheIntent() {
+        Money ten = Money.aed(new BigDecimal("10.00"));
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve:compensation"))
+            .andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY).contentType(MediaType.APPLICATION_JSON)
+                .body("{\"code\":\"RESERVATION_NOT_FOUND\",\"message\":\"no reservation for the reference\"}"));
+
+        io.micrometer.core.instrument.simple.SimpleMeterRegistry meters = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        CustomerProfileHttpAdapter counted = new CustomerProfileHttpAdapter(builder.build(), () -> "service-token",
+            Currency.getInstance("AED"), generations, 3, CustomerProfileHttpAdapter.Paths.DEFAULT, meters);
+
+        counted.reserveCredit(LOAN, CUSTOMER, ten);
+        assertThat(counted.releaseUnusedReservation(LOAN, CUSTOMER, ten)).isEqualTo(UnusedReservation.NONE);
+        assertThat(counted.releaseUnusedReservation(LOAN, CUSTOMER, ten)).isEqualTo(UnusedReservation.NONE);
+
+        assertThat(generations.pendingCompensation(LOAN)).isEmpty();
+        assertThat(meters.get("loan.credit.releases.unmatched").counter().count()).isEqualTo(1.0);
+        assertThat(meters.get("loan.credit.releases.unmatched").counter().getId().getTags()).isEmpty();
+        server.verify();
+    }
+
+    /** 422 RELEASE_EXCEEDS_RESERVATION is a bug signal: the row is left for an operator, nothing is re-sent. */
+    @Test
+    void aReleaseExceedingTheReservationIsLeftForAnOperator() {
+        Money ten = Money.aed(new BigDecimal("10.00"));
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY).contentType(MediaType.APPLICATION_JSON)
+                .body("{\"code\":\"RELEASE_EXCEEDS_RESERVATION\",\"message\":\"more than reserved\"}"));
+
+        adapter.reserveCredit(LOAN, CUSTOMER, ten);
+        assertThatThrownBy(() -> adapter.releaseUnusedReservation(LOAN, CUSTOMER, ten))
+            .isInstanceOf(CustomerCreditUnavailableException.class)
+            .hasMessageContaining("RELEASE_EXCEEDS_RESERVATION");
+        assertThatThrownBy(() -> adapter.releaseUnusedReservation(LOAN, CUSTOMER, ten))
+            .isInstanceOf(CustomerCreditUnavailableException.class)
+            .hasMessageContaining("operator");
+
+        assertThat(generations.pendingCompensation(LOAN)).hasValue(0);
+        assertThat(generations.releaseRefusal(LOAN)).isEqualTo("RELEASE_EXCEEDS_RESERVATION");
+        server.verify();
+    }
+
     /**
      * In-memory {@link ReservationGenerations} with the compare-and-set rules
      * of JdbcReservationGenerations, and switchable store failures.
@@ -679,6 +727,27 @@ class CustomerProfileHttpAdapterTest {
         @Override
         public synchronized long countUnconfirmed() {
             return rows.values().stream().filter(row -> row.state() == State.UNCONFIRMED).count();
+        }
+
+        private final Map<LoanId, String> refusals = new HashMap<>();
+
+        @Override
+        public synchronized void releaseRefused(LoanId loanId, int generation, String reason) {
+            refusals.put(loanId, reason);
+        }
+
+        @Override
+        public synchronized java.util.Optional<String> releaseRefusedReason(LoanId loanId) {
+            return java.util.Optional.ofNullable(refusals.get(loanId));
+        }
+
+        @Override
+        public synchronized long countReleaseRefused() {
+            return refusals.size();
+        }
+
+        synchronized String releaseRefusal(LoanId loanId) {
+            return refusals.get(loanId);
         }
 
         synchronized State state(LoanId loanId) {

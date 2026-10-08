@@ -22,7 +22,7 @@ import java.util.stream.Collectors;
 
 /**
  * {@link ReservationGenerations} over sc_ln_loan_lifecycle.credit_reservation_generation
- * (V3, V6, V9). Every write except {@link #markUsed} runs in a new transaction
+ * (V3, V6, V9, V10). Every write except {@link #markUsed} runs in a new transaction
  * of its own: it records what is about to be, or was, sent to the customer
  * service, outside any loan transaction (which may roll back). Compare-and-set
  * updates make concurrent requests and replicas agree on which caller
@@ -163,6 +163,7 @@ public class JdbcReservationGenerations implements ReservationGenerations {
               from credit_reservation_generation r join loan l on l.loan_id = r.loan_id
              where l.status in (%s)
                and (r.pending_compensation is not null or r.reservation_state in ('RESERVING', 'RESERVED'))
+               and r.release_refused_code is null
                and r.updated_at < ?
              order by r.updated_at
              limit ?
@@ -179,6 +180,28 @@ public class JdbcReservationGenerations implements ReservationGenerations {
              where loan_id = ? and generation = ? and reservation_state = 'RESERVING'
             """, loanId.getValue(), generation));
         return updated != null && updated > 0;
+    }
+
+    @Override
+    public void releaseRefused(LoanId loanId, int generation, String code) {
+        newTransaction.executeWithoutResult(status -> jdbc.update("""
+            update credit_reservation_generation set release_refused_code = ?, updated_at = now()
+             where loan_id = ? and pending_compensation = ?
+            """, code, loanId.getValue(), generation));
+    }
+
+    @Override
+    public Optional<String> releaseRefusedReason(LoanId loanId) {
+        return jdbc.queryForList("select release_refused_code from credit_reservation_generation"
+                + " where loan_id = ? and release_refused_code is not null", String.class, loanId.getValue())
+            .stream().findFirst();
+    }
+
+    @Override
+    public long countReleaseRefused() {
+        Long count = jdbc.queryForObject(
+            "select count(*) from credit_reservation_generation where release_refused_code is not null", Long.class);
+        return count == null ? 0 : count;
     }
 
     @Override

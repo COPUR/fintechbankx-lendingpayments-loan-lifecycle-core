@@ -90,11 +90,26 @@ public class CustomerCreditClientConfiguration {
             .register(registry);
     }
 
+    /**
+     * reason="release_exceeds_reservation": the customer service refused a
+     * compensating release as more than the loan's reservation (release by
+     * reference, provider contract pending). A bug signal; alert on any value
+     * above zero.
+     */
+    @Bean
+    Gauge creditReleasesRefusedGauge(MeterRegistry registry, ReservationGenerations reservationGenerations) {
+        return Gauge.builder(OPERATOR_GAUGE, reservationGenerations, ReservationGenerations::countReleaseRefused)
+            .tag("reason", "release_exceeds_reservation")
+            .description("Credit reservations an operator must resolve")
+            .register(registry);
+    }
+
     @Bean
     CustomerCreditService customerCreditService(
             RestClient.Builder builder,
             OAuth2AuthorizedClientManager serviceAuthorizedClientManager,
             ReservationGenerations reservationGenerations,
+            MeterRegistry meters,
             @Value("${loan.customer-credit.base-url}") String baseUrl,
             @Value("${loan.customer-credit.client-registration-id:customer-service}") String registrationId,
             @Value("${loan.customer-credit.ledger-currency:}") String ledgerCurrency,
@@ -114,7 +129,7 @@ public class CustomerCreditClientConfiguration {
         return new CustomerProfileHttpAdapter(client,
             serviceToken(serviceAuthorizedClientManager, registrationId),
             ledgerCurrency(ledgerCurrency), reservationGenerations, maxAttempts,
-            new CustomerProfileHttpAdapter.Paths(positionPath, reservePath, releasePath));
+            new CustomerProfileHttpAdapter.Paths(positionPath, reservePath, releasePath), meters);
     }
 
     /**

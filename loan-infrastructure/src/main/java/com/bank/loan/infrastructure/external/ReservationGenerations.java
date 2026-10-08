@@ -99,12 +99,27 @@ public interface ReservationGenerations {
     /**
      * Rows of never-disbursed loans with a pending compensation or a
      * RESERVING or RESERVED reservation, unchanged since {@code before},
-     * oldest first.
+     * oldest first; rows left for an operator after a refused release are
+     * not included.
      */
     List<Unresolved> unresolved(Instant before, int limit);
 
     /** In its own transaction: a RESERVING row of {@code generation} becomes UNCONFIRMED. */
     boolean markUnconfirmed(LoanId loanId, int generation);
+
+    /**
+     * In its own transaction: the customer service refused the pending
+     * compensation of {@code generation} with {@code code} (a bug signal,
+     * RELEASE_EXCEEDS_RESERVATION). It stays pending, is not re-sent, and is
+     * left for an operator.
+     */
+    void releaseRefused(LoanId loanId, int generation, String code);
+
+    /** The code that refused the loan's pending compensation, if an operator must resolve it. */
+    Optional<String> releaseRefusedReason(LoanId loanId);
+
+    /** Pending compensations the customer service refused (operator). */
+    long countReleaseRefused();
 
     /** Never-disbursed loans whose credit may still be held: pending compensations and outstanding reservations. */
     long countPending();

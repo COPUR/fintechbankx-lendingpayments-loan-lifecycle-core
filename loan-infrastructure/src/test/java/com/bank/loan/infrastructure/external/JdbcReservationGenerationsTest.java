@@ -125,6 +125,22 @@ class JdbcReservationGenerationsTest {
         assertThat(generations.markUnconfirmed(LoanId.of("LOAN-G17"), 0)).isFalse();
     }
 
+    @Test
+    void aRefusedReleaseIsRecordedOnItsPendingCompensationAndCounted() {
+        when(transactions.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+        when(jdbc.queryForList(contains("release_refused_code"), eq(String.class), eq("LOAN-G18")))
+            .thenReturn(List.of("RELEASE_EXCEEDS_RESERVATION"));
+        when(jdbc.queryForList(contains("release_refused_code"), eq(String.class), eq("LOAN-G19"))).thenReturn(List.of());
+        when(jdbc.queryForObject(contains("release_refused_code is not null"), eq(Long.class))).thenReturn(2L);
+
+        generations.releaseRefused(LoanId.of("LOAN-G18"), 0, "RELEASE_EXCEEDS_RESERVATION");
+
+        verify(jdbc).update(contains("set release_refused_code = ?"), eq("RELEASE_EXCEEDS_RESERVATION"), eq("LOAN-G18"), eq(0));
+        assertThat(generations.releaseRefusedReason(LoanId.of("LOAN-G18"))).contains("RELEASE_EXCEEDS_RESERVATION");
+        assertThat(generations.releaseRefusedReason(LoanId.of("LOAN-G19"))).isEmpty();
+        assertThat(generations.countReleaseRefused()).isEqualTo(2);
+    }
+
     private static ReservationGenerations.Reservation row(String loanId, int generation,
                                                           ReservationGenerations.State state, Integer pending) {
         return new ReservationGenerations.Reservation(LoanId.of(loanId), generation, state, pending, java.time.Instant.EPOCH);

@@ -10,6 +10,9 @@ import com.bank.loan.infrastructure.web.CorrelationIdFilter;
 import com.bank.shared.kernel.domain.CustomerId;
 import com.bank.shared.kernel.domain.Money;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -50,7 +53,11 @@ import java.util.regex.Pattern;
  *       customer service subtracts a release without checking that a
  *       reservation for the reference exists (customer #13
  *       CreditProfile.releaseCredit), so a blind release would free credit
- *       held by the customer's other loans.</li>
+ *       held by the customer's other loans. Customer release by reference
+ *       (provider contract pending, codes RESERVATION_NOT_FOUND and
+ *       RELEASE_EXCEEDS_RESERVATION) is mapped in {@code sendCompensation};
+ *       the release names the reservation with the same reference (the
+ *       loan id) it was reserved with.</li>
  *   <li>409 CONCURRENT_UPDATE / DUPLICATE_REQUEST are retried with the same
  *       key, at most {@code maxAttempts} times, then unavailable.</li>
  *   <li>422 INSUFFICIENT_CREDIT is the only refusal
@@ -85,6 +92,29 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
     private final ReservationGenerations generations;
     private final int maxAttempts;
     private final Paths paths;
+    private final Counter unmatchedReleases;
+
+    /** Customer release-by-reference codes (provider contract pending, see the class comment). */
+    static final String RESERVATION_NOT_FOUND = "RESERVATION_NOT_FOUND";
+    static final String RELEASE_EXCEEDS_RESERVATION = "RELEASE_EXCEEDS_RESERVATION";
+    static final String UNMATCHED_RELEASES = "loan.credit.releases.unmatched";
+
+    /** What became of a compensating release. */
+    private enum Compensation { RELEASED, NOTHING_HELD, REFUSED }
+
+    /** 422 from the customer service on a release that names the loan's reservation. */
+    static final class ReleaseRefusedException extends CustomerCreditUnavailableException {
+        private final String code;
+
+        ReleaseRefusedException(String code, String message, Throwable cause) {
+            super(message, cause);
+            this.code = code;
+        }
+
+        String code() {
+            return code;
+        }
+    }
 
     /** Provider paths; {customerId} is expanded. */
     public record Paths(String creditPosition, String reserve, String release) {
@@ -101,6 +131,15 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
 
     public CustomerProfileHttpAdapter(RestClient restClient, Supplier<String> bearerToken, Currency ledgerCurrency,
                                       ReservationGenerations generations, int maxAttempts, Paths paths) {
+        this(restClient, bearerToken, ledgerCurrency, generations, maxAttempts, paths, new SimpleMeterRegistry());
+    }
+
+    public CustomerProfileHttpAdapter(RestClient restClient, Supplier<String> bearerToken, Currency ledgerCurrency,
+                                      ReservationGenerations generations, int maxAttempts, Paths paths,
+                                      MeterRegistry meters) {
+        this.unmatchedReleases = Counter.builder(UNMATCHED_RELEASES)
+            .description("Compensating releases the customer service answered RESERVATION_NOT_FOUND: nothing was reserved")
+            .register(meters);
         this.paths = paths;
         this.restClient = restClient;
         this.bearerToken = bearerToken;
@@ -140,12 +179,10 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
         OptionalInt pending = generations.pendingCompensation(loanId);
         if (pending.isPresent()) {
             int compensated = pending.getAsInt();
-            CreditDecision undone = moveCredit(loanId, customerId, amount, paths.release(), compensationKey(loanId, compensated));
-            if (undone != CreditDecision.ACCEPTED) {
+            if (sendCompensation(loanId, customerId, amount, compensated) == Compensation.REFUSED) {
                 throw new CustomerCreditUnavailableException("Customer service did not confirm the release of the "
                     + "compensated reservation " + reserveKey(loanId, compensated) + "; not reserving again");
             }
-            generations.compensationDone(loanId, compensated);
         }
         int generation = generations.current(loanId);
         try {
@@ -186,7 +223,8 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
                 reserveKey(loanId, generation));
             return CreditDecision.ACCEPTED;
         }
-        return sendCompensation(loanId, customerId, amount, generation);
+        return sendCompensation(loanId, customerId, amount, generation) == Compensation.REFUSED
+            ? CreditDecision.REFUSED : CreditDecision.ACCEPTED;
     }
 
     /**
@@ -200,11 +238,7 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
         UnusedReservation outcome = UnusedReservation.NONE;
         OptionalInt pending = generations.pendingCompensation(loanId);
         if (pending.isPresent()) {
-            if (sendCompensation(loanId, customerId, amount, pending.getAsInt()) != CreditDecision.ACCEPTED) {
-                throw new CustomerCreditUnavailableException("Customer service did not confirm the release of "
-                    + reserveKey(loanId, pending.getAsInt()));
-            }
-            outcome = UnusedReservation.RELEASED;
+            outcome = released(sendCompensation(loanId, customerId, amount, pending.getAsInt()), loanId, pending.getAsInt());
         }
         Optional<ReservationGenerations.Reservation> row = generations.find(loanId);
         if (row.isEmpty() || row.get().state() == null || row.get().state() == ReservationGenerations.State.USED) {
@@ -219,11 +253,16 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
         if (!generations.beginCompensationOfAccepted(loanId, generation)) {
             return outcome;
         }
-        if (sendCompensation(loanId, customerId, amount, generation) != CreditDecision.ACCEPTED) {
-            throw new CustomerCreditUnavailableException("Customer service did not confirm the release of "
+        return released(sendCompensation(loanId, customerId, amount, generation), loanId, generation);
+    }
+
+    private static UnusedReservation released(Compensation compensation, LoanId loanId, int generation) {
+        return switch (compensation) {
+            case RELEASED -> UnusedReservation.RELEASED;
+            case NOTHING_HELD -> UnusedReservation.NONE;
+            case REFUSED -> throw new CustomerCreditUnavailableException("Customer service did not confirm the release of "
                 + reserveKey(loanId, generation));
-        }
-        return UnusedReservation.RELEASED;
+        };
     }
 
     @Override
@@ -234,18 +273,55 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
         }
     }
 
-    /** The compensation of {@code generation} is recorded as pending; sends it and clears it once accepted. */
-    private CreditDecision sendCompensation(LoanId loanId, CustomerId customerId, Money amount, int generation) {
-        CreditDecision undone = moveCredit(loanId, customerId, amount, paths.release(), compensationKey(loanId, generation));
-        if (undone == CreditDecision.ACCEPTED) {
+    /**
+     * The compensation of {@code generation} is recorded as pending; sends it
+     * and clears it once it is done. Under the customer's release by
+     * reference (provider contract pending):
+     * <ul>
+     *   <li>422 RESERVATION_NOT_FOUND: nothing was reserved under the loan's
+     *       reference, so there is nothing to release; the intent is done,
+     *       logged and counted (loan_credit_releases_unmatched_total);</li>
+     *   <li>422 RELEASE_EXCEEDS_RESERVATION: this service asked to release
+     *       more than is held, a bug signal. The compensation stays pending
+     *       with the code recorded, is never re-sent, and waits for an operator
+     *       (loan_credit_reservations_operator{reason="release_exceeds_reservation"}).</li>
+     * </ul>
+     */
+    private Compensation sendCompensation(LoanId loanId, CustomerId customerId, Money amount, int generation) {
+        Optional<String> refused = generations.releaseRefusedReason(loanId);
+        if (refused.isPresent()) {
+            throw new CustomerCreditUnavailableException("Release " + compensationKey(loanId, generation)
+                + " was refused with " + refused.get() + " and is left for an operator; not re-sent");
+        }
+        Compensation outcome;
+        try {
+            outcome = moveCredit(loanId, customerId, amount, paths.release(), compensationKey(loanId, generation))
+                == CreditDecision.ACCEPTED ? Compensation.RELEASED : Compensation.REFUSED;
+        } catch (ReleaseRefusedException refusal) {
+            if (!RESERVATION_NOT_FOUND.equals(refusal.code())) {
+                try {
+                    generations.releaseRefused(loanId, generation, refusal.code());
+                } catch (RuntimeException notRecorded) {
+                    refusal.addSuppressed(notRecorded);
+                }
+                log.error("Customer service refused release {} with {}: more than the loan's reservation; "
+                    + "left for an operator", compensationKey(loanId, generation), refusal.code());
+                throw refusal;
+            }
+            unmatchedReleases.increment();
+            log.warn("Customer service holds no reservation for release {} ({}); nothing to release",
+                compensationKey(loanId, generation), refusal.code());
+            outcome = Compensation.NOTHING_HELD;
+        }
+        if (outcome != Compensation.REFUSED) {
             try {
                 generations.compensationDone(loanId, generation);
             } catch (RuntimeException notRecorded) {
-                log.warn("Release {} was accepted but not recorded; it is re-sent under the same key",
+                log.warn("Release {} was answered but not recorded; it is re-sent under the same key",
                     compensationKey(loanId, generation), notRecorded);
             }
         }
-        return undone;
+        return outcome;
     }
 
     @Override
@@ -328,6 +404,11 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
                 // 422 CURRENCY_MISMATCH when the ISO currency is valid but not the customer's credit
                 // currency, 400 when it is malformed. Refresh the copied contract when customer's
                 // push lands in the catalog.
+                if (status == HttpStatus.UNPROCESSABLE_ENTITY.value()
+                        && (RESERVATION_NOT_FOUND.equals(code) || RELEASE_EXCEEDS_RESERVATION.equals(code))) {
+                    throw new ReleaseRefusedException(code, "Customer service answered " + status + " " + code
+                        + " to credit " + movement, error);
+                }
                 if (status == HttpStatus.UNPROCESSABLE_ENTITY.value() && "CURRENCY_MISMATCH".equals(code)) {
                     throw new CreditCurrencyMismatchException(amount.getCurrency(), null);
                 }

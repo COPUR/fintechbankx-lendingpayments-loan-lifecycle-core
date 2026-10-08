@@ -105,11 +105,17 @@ class CustomerCreditClientConfigurationTest {
 
         configuration.creditReservationsPendingGauge(registry, generations);
         configuration.creditReservationsUnconfirmedGauge(registry, generations);
+        org.mockito.Mockito.when(generations.countReleaseRefused()).thenReturn(4L);
+        configuration.creditReleasesRefusedGauge(registry, generations);
 
         assertThat(registry.get("loan.credit.reservations.pending").gauge().value()).isEqualTo(2.0);
         assertThat(registry.get("loan.credit.reservations.pending").gauge().getId().getTags()).isEmpty();
-        assertThat(registry.get("loan.credit.reservations.operator").gauge().getId().getTags())
-            .containsExactly(io.micrometer.core.instrument.Tag.of("reason", "unconfirmed"));
-        assertThat(registry.get("loan.credit.reservations.operator").gauge().value()).isEqualTo(1.0);
+        assertThat(registry.get("loan.credit.reservations.operator").tag("reason", "unconfirmed").gauge().value())
+            .isEqualTo(1.0);
+        assertThat(registry.get("loan.credit.reservations.operator").tag("reason", "release_exceeds_reservation")
+            .gauge().value()).isEqualTo(4.0);
+        assertThat(registry.get("loan.credit.reservations.operator").gauges())
+            .allSatisfy(gauge -> assertThat(gauge.getId().getTags()).extracting(io.micrometer.core.instrument.Tag::getKey)
+                .containsExactly("reason"));
     }
 }
