@@ -131,7 +131,7 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
             approved.getId(), approved.getCustomerId(), approved.getPrincipalAmount());
         if (reservation != CreditDecision.ACCEPTED) {
             throw new InsufficientCreditException(String.format(
-                "Customer service refused to reserve %s for loan %s", approved.getPrincipalAmount(), loanId.getValue()));
+                "Customer service refused to reserve %s for the loan", approved.getPrincipalAmount()));
         }
         try {
             return inTransaction(() -> {

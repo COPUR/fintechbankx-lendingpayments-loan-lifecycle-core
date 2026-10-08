@@ -157,7 +157,8 @@ class LoanManagementServiceTest {
 
         assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-REF")))
             .isInstanceOf(InsufficientCreditException.class)
-            .hasMessageContaining("refused to reserve AED 10000.00 for loan LOAN-SVC-REF");
+            .hasMessageContaining("refused to reserve AED 10000.00")
+            .message().doesNotContain("LOAN-SVC-REF");
 
         assertThat(approvedLoan.getStatus()).isEqualTo(LoanStatus.APPROVED);
         assertThat(approvedLoan.getDomainEvents()).isEmpty();

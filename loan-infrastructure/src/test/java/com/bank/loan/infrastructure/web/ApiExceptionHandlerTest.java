@@ -49,6 +49,9 @@ class ApiExceptionHandlerTest {
         assertThat(mismatch.getBody().message()).isEqualTo("The loan is in USD but the customer's credit is held in AED");
         assertThat(unknown.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
         assertThat(unknown.getBody().code()).isEqualTo("CUSTOMER_NOT_FOUND");
+        assertThat(unknown.getBody().message()).doesNotContain("CUST-9");
+        assertThat(handler.notFound(com.bank.loan.application.LoanNotFoundException.withId("L-1")).getBody().message())
+            .doesNotContain("L-1");
     }
 
     @Test

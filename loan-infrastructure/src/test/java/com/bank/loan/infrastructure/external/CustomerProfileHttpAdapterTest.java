@@ -112,7 +112,7 @@ class CustomerProfileHttpAdapterTest {
         assertThatThrownBy(() -> adapter.getAvailableCredit(CUSTOMER)).isInstanceOf(CreditCustomerNotFoundException.class);
         assertThatThrownBy(() -> adapter.hasAvailableCredit(CUSTOMER, Money.aed(BigDecimal.ONE)))
             .isInstanceOf(CreditCustomerNotFoundException.class)
-            .hasMessageContaining("CUST-HTTP-1");
+            .message().doesNotContain("CUST-HTTP-1");
     }
 
     @Test
@@ -168,7 +168,8 @@ class CustomerProfileHttpAdapterTest {
 
         assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
             .isInstanceOf(CustomerCreditUnavailableException.class)
-            .hasMessageContaining("kept reporting DUPLICATE_REQUEST");
+            .hasMessageContaining("kept reporting DUPLICATE_REQUEST")
+            .message().doesNotContain("LOAN-HTTP-1");   // the idempotency key carries the loan id
         server.verify();
     }
 
@@ -194,9 +195,11 @@ class CustomerProfileHttpAdapterTest {
         // accept; a non-retryable rejection (422 in loan), not "customer service unavailable" (503).
         assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
             .isInstanceOf(com.bank.loan.domain.port.out.CreditMovementRejectedException.class)
-            .hasMessageContaining("400 INVALID_REQUEST");
+            .hasMessageContaining("400 INVALID_REQUEST")
+            .message().doesNotContain("LOAN-HTTP-1");
         assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
-            .isInstanceOf(CustomerCreditUnavailableException.class).hasMessageContaining("422 SOMETHING_NEW");
+            .isInstanceOf(CustomerCreditUnavailableException.class).hasMessageContaining("422 SOMETHING_NEW")
+            .message().doesNotContain("LOAN-HTTP-1");
         server.verify();
     }
 

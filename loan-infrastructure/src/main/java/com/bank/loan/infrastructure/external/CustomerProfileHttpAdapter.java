@@ -224,8 +224,8 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
                     .retrieve()
                     .body(CreditPosition.class);
                 if (position != null) {
-                    log.debug("Credit {} {} accepted; customer {} has {} available", movement, idempotencyKey,
-                        customerId.getValue(), position.availableCredit());
+                    log.debug("Credit {} {} accepted; {} available", movement, idempotencyKey,
+                        position.availableCredit());
                 }
                 return CreditDecision.ACCEPTED;
             } catch (HttpClientErrorException error) {
@@ -237,11 +237,10 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
                         continue;
                     }
                     throw new CustomerCreditUnavailableException("Customer service kept reporting " + code
-                        + " for credit " + movement + " " + idempotencyKey, error);
+                        + " for credit " + movement, error);
                 }
                 if (status == HttpStatus.UNPROCESSABLE_ENTITY.value() && "INSUFFICIENT_CREDIT".equals(code)) {
-                    log.info("Customer service refused credit {} {} for {}: {}", movement, idempotencyKey,
-                        customerId.getValue(), code);
+                    log.info("Customer service refused credit {} {}: {}", movement, idempotencyKey, code);
                     return CreditDecision.REFUSED;
                 }
                 // Customer #13 (435aa83, still so at 58f7369, copied in src/test/resources/contracts/customer-context.yaml):
@@ -253,16 +252,16 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
                 }
                 if (status == HttpStatus.BAD_REQUEST.value()) {
                     throw new CreditMovementRejectedException("Customer service answered " + status + " " + code
-                        + " to credit " + movement + " " + idempotencyKey + "; not retried", error);
+                        + " to credit " + movement + "; not retried", error);
                 }
                 if (status == HttpStatus.NOT_FOUND.value()) {
                     throw new CreditCustomerNotFoundException(customerId.getValue());
                 }
                 throw new CustomerCreditUnavailableException("Customer service answered " + status + " " + code
-                    + " to credit " + movement + " " + idempotencyKey, error);
+                    + " to credit " + movement, error);
             } catch (RestClientException unavailable) {
-                throw new CustomerCreditUnavailableException("Customer service unavailable for credit " + movement
-                    + " " + idempotencyKey, unavailable);
+                throw new CustomerCreditUnavailableException("Customer service unavailable for credit " + movement,
+                    unavailable);
             }
         }
     }

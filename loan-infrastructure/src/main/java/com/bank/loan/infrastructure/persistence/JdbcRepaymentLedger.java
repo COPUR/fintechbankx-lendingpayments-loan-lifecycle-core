@@ -91,7 +91,7 @@ public class JdbcRepaymentLedger implements RepaymentLedger {
                 """,
             repayment.allocations().stream().map(allocation -> new Object[] {
                 repayment.paymentId().getValue(),
-                requireInstallment(installmentIds, allocation, loanId),
+                requireInstallment(installmentIds, allocation),
                 loanId,
                 allocation.installmentNumber(),
                 allocation.amount().getAmount(),
@@ -119,10 +119,10 @@ public class JdbcRepaymentLedger implements RepaymentLedger {
         return paid == null ? 0 : paid;
     }
 
-    private static UUID requireInstallment(Map<Integer, UUID> ids, InstallmentAllocation allocation, String loanId) {
+    private static UUID requireInstallment(Map<Integer, UUID> ids, InstallmentAllocation allocation) {
         UUID id = ids.get(allocation.installmentNumber());
         if (id == null) {
-            throw new IllegalStateException("Loan " + loanId + " has no installment " + allocation.installmentNumber());
+            throw new IllegalStateException("The loan has no installment " + allocation.installmentNumber());
         }
         return id;
     }
