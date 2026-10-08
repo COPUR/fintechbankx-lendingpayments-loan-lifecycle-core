@@ -24,6 +24,7 @@ spec:
         app: {{ .Values.serviceAccount.name }}
         version: {{ .Values.image.tag | quote }}
         sidecar.istio.io/inject: "true"
+        fintechbankx.io/squad: {{ .Values.squad }}
         {{- toYaml .Values.podLabels | nindent 8 }}
       annotations:
         sidecar.istio.io/inject: "true"

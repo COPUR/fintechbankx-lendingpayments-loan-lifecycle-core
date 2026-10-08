@@ -13,6 +13,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/version: {{ .Values.image.tag | default .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+fintechbankx.io/squad: {{ required "squad is required (lending)" .Values.squad }}
 {{- end -}}
 
 {{- define "loan.secretName" -}}

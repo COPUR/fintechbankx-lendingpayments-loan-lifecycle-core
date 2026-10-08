@@ -42,16 +42,27 @@ autoscaling:
   maxReplicas: 12
   targetCPUUtilizationPercentage: 65
 
-# Who may open connections to the pods (Kubernetes NetworkPolicy; mesh ALLOW
-# rules by caller principal live in the mesh repo, see README "Callers").
+# Owning squad, rendered as the common label fintechbankx.io/squad on every
+# object (platform review round 2: lending for loan).
+squad: lending
+
+# NetworkPolicy belongs to the mesh repo (platform review round 2, cicd-templates
+# 1dd1138), so the chart renders none by default. Opt-in only for a cluster the
+# mesh repo does not cover yet; it never admits a /0 CIDR, only namespaces.
 networkPolicy:
-  enabled: true
+  enabled: false
   # 8080: the ingress gateway and these caller namespaces
   ingressNamespace: istio-ingress
   callerNamespaces:
     - payments
-  # 8081 (actuator, Prometheus scrape)
+  # Scrape: the observability PodMonitor reads Istio's merged metrics on 15020
+  # (app 8081 and Envoy), so 15020 and 8081 from this namespace only.
   observabilityNamespace: observability
+
+# Metrics: the observability repo's PodMonitor fintechbankx-services is the
+# single scrape path (pod label fintechbankx.io/service-id plus the
+# prometheus.io annotations). This chart ships no ServiceMonitor (cicd-templates
+# 0f86859).
 
 podDisruptionBudget:
   minAvailable: 2
@@ -77,7 +88,7 @@ config:
   SERVICE_CLIENT_ID: svc-ln-loan-lifecycle
   CUSTOMER_SERVICE_BASE_URL: ""   # REQUIRED e.g. http://customer-profile-kyc-service.customer.svc.cluster.local:8080
   # REQUIRED http or in-memory. Switch to http only after the customer
-  # cutover has passed its step 4 (runbook precondition table).
+  # cutover has passed its step 5 (runbook precondition table).
   CUSTOMER_CREDIT_ADAPTER: ""
   # REQUIRED ISO 4217 currency the customer service holds credit in. No
   # default: the book's currency is a business decision, never assumed.

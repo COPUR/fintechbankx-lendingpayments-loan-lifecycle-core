@@ -119,7 +119,7 @@ ALLOW rules on namespace `lending` for these principals:
 | `cluster.local/ns/payments/sa/payment-initiation-settlement-service` | 8080 | reads a loan before taking a repayment (if the payments service calls this API) |
 | `cluster.local/ns/observability/sa/<prometheus SA>` | 8081 | Prometheus scrape of `/actuator/prometheus` |
 
-The chart's NetworkPolicy admits 8080 from `istio-ingress` and `payments`, 8081 from `observability`.
+NetworkPolicy belongs to the mesh repo, so the chart's own is off by default (`networkPolicy.enabled: false`); opted in, it admits 8080 from `istio-ingress` and `payments`, and 15020 and 8081 from `observability`, never a CIDR. Metrics are scraped only by the observability repo's PodMonitor (pod label `fintechbankx.io/service-id`, Istio merged metrics); the chart ships no ServiceMonitor. Every object carries `fintechbankx.io/squad: lending`.
 
 ## Dokümantasyon ve Referanslar
 - [Enterprise Architecture Hub](https://github.com/COPUR/fintechbankx-governance-architecture-enablement-enterprise-architecture)

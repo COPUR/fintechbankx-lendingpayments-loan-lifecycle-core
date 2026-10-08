@@ -1,5 +1,5 @@
 {{- if .Values.networkPolicy.enabled }}
-# Layer-4 allow list. The mesh (default-deny AuthorizationPolicy, STRICT
+# Opt-in only: NetworkPolicy belongs to the mesh repo. Layer-4 allow list. The mesh (default-deny AuthorizationPolicy, STRICT
 # mTLS) authorises callers by principal on top of this; this chart ships no
 # PeerAuthentication or AuthorizationPolicy (platform contract).
 apiVersion: networking.k8s.io/v1
@@ -32,6 +32,8 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: {{ .Values.networkPolicy.observabilityNamespace }}
       ports:
+        - port: 15020
+          protocol: TCP
         - port: {{ .Values.service.managementPort }}
           protocol: TCP
 {{- end }}
