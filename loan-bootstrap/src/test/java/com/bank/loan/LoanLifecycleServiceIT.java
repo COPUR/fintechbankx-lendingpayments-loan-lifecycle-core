@@ -458,13 +458,18 @@ class LoanLifecycleServiceIT {
                 : CompletableFuture.completedFuture(null);
         });
         OutboxRelay relay = new OutboxRelay(outbox, kafka, new TransactionTemplate(transactionManager),
-            Clock.systemUTC(), 100, Duration.ofSeconds(35), Duration.ofDays(7), 2);
+            Clock.systemUTC(), 100, Duration.ofSeconds(35), Duration.ofDays(7));
 
-        relay.relayOnce();
-        relay.relayOnce();
+        // RecordTooLarge is not retryable: parked on its first failure, the batch moves on.
         relay.relayOnce();
 
         assertThat(outbox.countByParkedAtIsNotNull()).isEqualTo(1);
+        assertThat(jdbc.queryForMap("""
+            select attempts, first_failed_at is not null as failed_at_set, last_error from sc_ln_loan_lifecycle.outbox_event
+            where aggregate_id = ? and parked_at is not null
+            """, first))
+            .containsEntry("attempts", 1).containsEntry("failed_at_set", true)
+            .containsEntry("last_error", "RecordTooLargeException: too large");
         assertThat(jdbc.queryForObject("""
             select count(*) from sc_ln_loan_lifecycle.outbox_event where aggregate_id = ? and published_at is not null
             """, Integer.class, second)).isEqualTo(1);

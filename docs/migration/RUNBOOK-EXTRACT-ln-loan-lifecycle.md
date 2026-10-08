@@ -30,7 +30,7 @@ Extraction of the Loan aggregate from `enterprise-loan-management-system` into
 | `compliance_reports` (V13) | `svc-cmp-evidence` | separate slice |
 | `loan_service.*` (loan/V1) | not migrated | parallel schema from an earlier split attempt; confirm it has no rows before the cutover |
 
-Migrations: `loan-infrastructure/src/main/resources/db/migration/V1..V4`. The service never reads
+Migrations: `loan-infrastructure/src/main/resources/db/migration/V1..V5`. The service never reads
 monolith tables and the monolith must not read `sc_ln_loan_lifecycle`.
 
 ### Database roles
@@ -148,15 +148,15 @@ Rollback triggers (measured from the start of step 2 (d), any one):
 | 5xx rate on `/api/v1/loans/**` | > 1 % over 10 minutes |
 | `CUSTOMER_SERVICE_UNAVAILABLE` (503) on disburse | > 5 % over 10 minutes |
 | `consumer.dlq.messages{group=cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1}` | > 0 in the window |
-| `outbox.parked.events` | > 0 |
-| `outbox.oldest.pending.age` (once the relay is on) | > 300 s |
+| `outbox_parked_events` | > 0 |
+| `outbox_oldest_pending_age_seconds` (once the relay is on) | > 300 s |
 | Reconcile re-run against the frozen monolith snapshot | any `|f` line |
 
 ## 6. Acceptance checklist
 
 - [x] Service builds and checks standalone (`ci/test` runs `./gradlew check` with PostgreSQL; ArchUnit rules; coverage)
 - [x] Own schema and migrations; Hibernate validates entities against them at startup
-- [x] Events written through a transactional outbox, relayed in order; poison rows parked after 10 attempts
+- [x] Events written through a transactional outbox, relayed in order; non-retryable rows parked at once, retryable failures parked only after 24 h of continuous failure (section 7)
 - [x] Customer credit through the customer service API (no shared table); consumer contract test against customer-context.yaml
 - [x] Delta backfill rehearsed with reconciliation in CI
 - [ ] Monolith anti-corruption client and write-freeze flag (enterprise-loan-management-system)
@@ -165,3 +165,39 @@ Rollback triggers (measured from the start of step 2 (d), any one):
 - [ ] DBA bootstrap of `loan_lifecycle_owner` and `loan_lifecycle_app` per environment, secrets filled
 - [ ] Mesh team requests A (gateway route), B (Aurora, MSK, STS egress), C (callee ALLOW rules) applied, plus the ALLOW rules for the callers in README
 - [ ] Production backfill and reconciliation report attached here
+
+## 7. Parked outbox events
+
+Same policy as risk-decisioning and compliance-evidence. `OutboxRelay` parks a row (sets `parked_at`, keeps
+the reason in `last_error`) at once when Kafka refuses it permanently (`RecordTooLargeException`,
+`SerializationException`, `TopicAuthorizationException`, `InvalidTopicException`, any error that is not a
+Kafka `RetriableException` or a timeout).
+
+Retryable failures (Kafka `RetriableException`: timeouts, not enough replicas, leader or network errors,
+unknown topic or partition; and the relay's own send timeout) never count toward parking: they stop the batch
+and the row is retried on the next run. Such a row is parked only when it has been failing continuously for
+longer than `loan.outbox.relay.retryable-park-after` (`OUTBOX_RELAY_RETRYABLE_PARK_AFTER`, default `PT24H`),
+measured from its `first_failed_at` (V5, set with the injected clock). There is no attempt-count cap; an
+ordinary outage only delays events.
+
+Note: a loan raises several events, so parking a row lets later events of the same loan go out before it.
+Consumers must tolerate that until the row is replayed (they de-duplicate on `eventId` and carry
+`aggregateVersion`).
+
+Alerts: `outbox_oldest_pending_age_seconds{service="svc-ln-loan-lifecycle"}` for a stalled relay or an outage
+(warn above 300 s, page above 1800 s); `outbox_parked_events` above zero; `outbox_pending_events` for the
+backlog.
+
+Replay, after fixing the cause:
+
+```sql
+SELECT event_id, created_seq, topic, attempts, first_failed_at, last_error, parked_at
+FROM sc_ln_loan_lifecycle.outbox_event
+WHERE published_at IS NULL AND parked_at IS NOT NULL
+ORDER BY created_seq;
+
+-- first_failed_at must be reset too, otherwise the 24 h ceiling parks the row again on its first retryable failure.
+UPDATE sc_ln_loan_lifecycle.outbox_event
+SET parked_at = NULL, first_failed_at = NULL, attempts = 0, last_error = NULL
+WHERE event_id = '<event id>' AND published_at IS NULL AND parked_at IS NOT NULL;
+```
