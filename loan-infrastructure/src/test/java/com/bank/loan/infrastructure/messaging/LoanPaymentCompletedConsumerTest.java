@@ -93,6 +93,39 @@ class LoanPaymentCompletedConsumerTest {
             .isInstanceOf(ContractViolationException.class).hasMessageContaining("ISO 4217");
     }
 
+    /**
+     * ADR-019 section 4: the consumed record's correlationId (envelope, else
+     * the correlationId header) and its eventId as causationId go to the use
+     * case as plain ids; no Kafka type crosses the port.
+     */
+    @Test
+    void theConsumedEventsCorrelationAndEventIdAreHandedToTheUseCase() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        LoanRepaymentUseCase repayments = mock(LoanRepaymentUseCase.class);
+        when(jdbc.update(anyString(), any(), any(), any(), any())).thenReturn(1);
+        TransactionOperations transactions = new TransactionOperations() {
+            @Override
+            public <T> T execute(TransactionCallback<T> action) {
+                return action.doInTransaction(null);
+            }
+        };
+        LoanPaymentCompletedListener listener = new LoanPaymentCompletedListener(json, new JdbcInbox(jdbc), repayments, transactions);
+
+        listener.onPaymentEvent(paymentRecord("Payments.Payment.LoanPaymentCompleted.v1", EVENT));
+        ConsumerRecord<String, String> withoutEnvelopeCorrelation =
+            paymentRecord("Payments.Payment.LoanPaymentCompleted.v1", EVENT.replace("\"correlationId\":\"corr-1\",", ""));
+        withoutEnvelopeCorrelation.headers().remove("correlationId");
+        withoutEnvelopeCorrelation.headers().add("correlationId", "corr-header".getBytes(StandardCharsets.UTF_8));
+        listener.onPaymentEvent(withoutEnvelopeCorrelation);
+
+        ArgumentCaptor<RecordCompletedLoanPaymentCommand> commands = ArgumentCaptor.forClass(RecordCompletedLoanPaymentCommand.class);
+        verify(repayments, org.mockito.Mockito.times(2)).recordCompletedLoanPayment(commands.capture());
+        assertThat(commands.getAllValues().get(0).causation())
+            .isEqualTo(new com.bank.loan.domain.port.out.EventCausation("corr-1", EVENT_ID.toString()));
+        assertThat(commands.getAllValues().get(1).causation())
+            .isEqualTo(new com.bank.loan.domain.port.out.EventCausation("corr-header", EVENT_ID.toString()));
+    }
+
     @Test
     void listenerAppliesTheRepaymentInTheInboxTransaction() {
         JdbcTemplate jdbc = mock(JdbcTemplate.class);
@@ -119,7 +152,8 @@ class LoanPaymentCompletedConsumerTest {
             .onPaymentEvent(paymentRecord("Payments.Payment.LoanPaymentCompleted.v1", EVENT));
 
         verify(repayments).recordCompletedLoanPayment(new RecordCompletedLoanPaymentCommand(PaymentId.of("PAY-1"),
-            LoanId.of("LOAN-1"), Money.aed(new BigDecimal("1100.00"))));
+            LoanId.of("LOAN-1"), Money.aed(new BigDecimal("1100.00")),
+            new com.bank.loan.domain.port.out.EventCausation("corr-1", EVENT_ID.toString())));
         verify(jdbc).update(anyString(), eq(EVENT_ID), eq(RepaymentConsumerConfiguration.CONSUMER_GROUP),
             eq("Payments.Payment.LoanPaymentCompleted.v1"), eq("evt.pay.payment.v1"));
     }

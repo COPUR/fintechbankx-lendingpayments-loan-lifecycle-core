@@ -13,5 +13,19 @@ import java.util.List;
  */
 public interface LoanEventPublisher {
 
-    void publish(Loan loan, List<DomainEvent> events);
+    /**
+     * Events of a change that started a flow here (a loan API request, the
+     * recovery sweep): the implementation takes the request's correlation id,
+     * or a new one, and no causation.
+     */
+    default void publish(Loan loan, List<DomainEvent> events) {
+        publish(loan, events, null);
+    }
+
+    /**
+     * Events of a change caused by another message (ADR-019 section 4): they
+     * carry its correlationId and causationId. {@code causation} null means
+     * the change started a flow, as {@link #publish(Loan, List)}.
+     */
+    void publish(Loan loan, List<DomainEvent> events, EventCausation causation);
 }

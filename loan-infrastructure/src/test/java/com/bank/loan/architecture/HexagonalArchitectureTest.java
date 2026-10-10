@@ -49,6 +49,19 @@ class HexagonalArchitectureTest {
             .check(main);
     }
 
+    /**
+     * Rule 2b (ADR-019 section 4): a consumed record's correlation reaches the
+     * use cases as plain ids (EventCausation); no messaging or JSON types in
+     * the application layer.
+     */
+    @Test
+    void applicationIsFreeOfMessagingTypes() {
+        noClasses().that().resideInAPackage(ROOT + ".application..")
+            .should().dependOnClassesThat().resideInAnyPackage(
+                "org.apache.kafka..", "org.springframework.kafka..", "com.fasterxml.jackson..")
+            .check(main);
+    }
+
     /** Rule 3: controllers and Kafka listeners drive the use cases through domain.port.in. */
     @Test
     void inboundAdaptersDependOnUseCaseInterfacesNotOnTheirImplementations() {

@@ -4,6 +4,7 @@ import com.bank.loan.domain.LoanId;
 import com.bank.loan.domain.PaymentId;
 import com.bank.loan.domain.port.in.LoanRepaymentUseCase;
 import com.bank.loan.domain.port.in.RecordCompletedLoanPaymentCommand;
+import com.bank.loan.domain.port.out.EventCausation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.header.Header;
@@ -13,6 +14,7 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.transaction.support.TransactionOperations;
 
 import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 
 /**
  * Consumes the payment aggregate topic evt.pay.payment.v1 and applies
@@ -63,7 +65,29 @@ public class LoanPaymentCompletedListener {
                 record.offset(), RepaymentConsumerConfiguration.CONSUMER_GROUP, LoanPaymentCompleted.EVENT_TYPE);
             return;
         }
-        process(LoanPaymentCompleted.parse(json, record.value()), record.topic());
+        LoanPaymentCompleted event = LoanPaymentCompleted.parse(json, record.value());
+        process(event, record.topic(), causation(event, record));
+    }
+
+    /**
+     * ADR-019 section 4: the loan events this record causes carry its
+     * correlationId (the envelope's; the correlationId header if the envelope
+     * has none; a new id, logged, if neither) and its eventId as causationId.
+     * Plain ids only: no Kafka type crosses the use-case port.
+     */
+    static EventCausation causation(LoanPaymentCompleted event, ConsumerRecord<String, String> record) {
+        String correlationId = event.correlationId();
+        if (correlationId == null || correlationId.isBlank()) {
+            Header header = record.headers().lastHeader("correlationId");
+            correlationId = header == null || header.value() == null
+                ? null : new String(header.value(), StandardCharsets.UTF_8);
+        }
+        if (correlationId == null || correlationId.isBlank()) {
+            correlationId = UUID.randomUUID().toString();
+            log.warn("Event {} carries no correlationId; the loan events it causes start correlation {}",
+                event.eventId(), correlationId);
+        }
+        return new EventCausation(correlationId, event.eventId().toString());
     }
 
     /** The required eventType header (common EventHeaders), UTF-8 text. */
@@ -76,11 +100,11 @@ public class LoanPaymentCompletedListener {
     }
 
     boolean process(LoanPaymentCompleted event) {
-        return process(event, LoanPaymentCompleted.TOPIC);
+        return process(event, LoanPaymentCompleted.TOPIC, null);
     }
 
     /** @return true if the event was applied now, false if it was a duplicate */
-    boolean process(LoanPaymentCompleted event, String topic) {
+    boolean process(LoanPaymentCompleted event, String topic, EventCausation causation) {
         return Boolean.TRUE.equals(transactions.execute(status -> {
             if (!inbox.markProcessed(event.eventId(), RepaymentConsumerConfiguration.CONSUMER_GROUP,
                     LoanPaymentCompleted.EVENT_TYPE, topic)) {
@@ -89,7 +113,7 @@ public class LoanPaymentCompletedListener {
                 return false;
             }
             repayments.recordCompletedLoanPayment(new RecordCompletedLoanPaymentCommand(
-                PaymentId.of(event.paymentId()), LoanId.of(event.loanId()), event.actualAmount()));
+                PaymentId.of(event.paymentId()), LoanId.of(event.loanId()), event.actualAmount(), causation));
             return true;
         }));
     }

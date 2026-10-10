@@ -24,6 +24,12 @@ info:
     envelope's; x-fapi-interaction-id only when the flow started at the loan API (events raised by the repayment
     consumer or the credit reservation sweep carry none); traceparent (W3C) when the request was traced.
 
+    Correlation (ADR-019 section 4, end to end): events raised by a loan API request carry its
+    x-fapi-interaction-id as correlationId and a null causationId. Events raised by a consumed
+    Payments.Payment.LoanPaymentCompleted.v1 carry that record's correlationId (its envelope's, else its
+    correlationId header) and its eventId as causationId. Events of the credit reservation sweep start a flow:
+    a new correlationId, causationId null.
+
     Consumed: evt.pay.payment.v1, the payment aggregate's topic. The repayment consumer reads the eventType
     header first, handles only Payments.Payment.LoanPaymentCompleted.v1 and skips every other event type
     (offset committed, never failed, never dead-lettered). A record it gives up on goes to this service's own

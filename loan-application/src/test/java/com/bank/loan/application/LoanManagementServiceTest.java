@@ -288,6 +288,25 @@ class LoanManagementServiceTest {
         });
     }
 
+    /**
+     * ADR-019 section 4: the loan events raised by a consumed payment event
+     * carry that event's correlationId, and its eventId as causationId, all
+     * the way to the outbox port (no new correlation id, no Kafka types).
+     */
+    @Test
+    void eventsOfACompletedLoanPaymentCarryTheConsumedEventsCorrelationAndCausation() {
+        Loan loan = disbursedLoan("LOAN-SVC-CAUSE");
+        org.mockito.Mockito.clearInvocations(eventPublisher);
+        com.bank.loan.domain.port.out.EventCausation causation = new com.bank.loan.domain.port.out.EventCausation(
+            "corr-pay-1", "6f1c3a3e-1a52-4f7e-9d43-0b8a3d9f0c11");
+
+        service.recordCompletedLoanPayment(new RecordCompletedLoanPaymentCommand(PaymentId.of("PAY-CAUSE-1"),
+            LoanId.of("LOAN-SVC-CAUSE"), Money.aed(new BigDecimal("250.00")), causation));
+
+        verify(eventPublisher).publish(eq(loan), org.mockito.ArgumentMatchers.anyList(), eq(causation));
+        verify(eventPublisher, never()).publish(any(Loan.class), org.mockito.ArgumentMatchers.anyList());
+    }
+
     @Test
     void completedLoanPaymentForAnUnknownLoanFails() {
         when(loanRepository.findById(any(LoanId.class))).thenReturn(Optional.empty());

@@ -13,9 +13,11 @@ import java.util.UUID;
  * (provider svc-pay-initiation-settlement), one of the event types on the
  * payment aggregate topic evt.pay.payment.v1 (ADR-019, one topic per
  * aggregate). Unknown fields are ignored so additive changes on the provider
- * side do not break the consumer.
+ * side do not break the consumer. {@code correlationId} is the envelope's,
+ * null when the provider left it out (the listener then falls back to the
+ * record header).
  */
-record LoanPaymentCompleted(UUID eventId, String paymentId, String loanId, Money actualAmount) {
+record LoanPaymentCompleted(UUID eventId, String correlationId, String paymentId, String loanId, Money actualAmount) {
 
     static final String TOPIC = "evt.pay.payment.v1";
     static final String EVENT_TYPE = "Payments.Payment.LoanPaymentCompleted.v1";
@@ -44,7 +46,8 @@ record LoanPaymentCompleted(UUID eventId, String paymentId, String loanId, Money
         try {
             Money actual = Money.of(new BigDecimal(required(amount, "amount")),
                 Currency.getInstance(required(amount, "currency")));
-            return new LoanPaymentCompleted(eventId, required(data, "paymentId"), required(data, "loanId"), actual);
+            return new LoanPaymentCompleted(eventId, text(envelope, "correlationId"), required(data, "paymentId"),
+                required(data, "loanId"), actual);
         } catch (NumberFormatException badAmount) {
             throw new ContractViolationException("actualAmount.amount is not a decimal", badAmount);
         } catch (ContractViolationException violation) {

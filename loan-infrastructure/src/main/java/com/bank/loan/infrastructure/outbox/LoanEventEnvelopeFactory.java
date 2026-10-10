@@ -38,6 +38,11 @@ public class LoanEventEnvelopeFactory {
     }
 
     public OutboxEventJpaEntity toOutboxRow(Loan loan, DomainEvent event, String correlationId) {
+        return toOutboxRow(loan, event, correlationId, null);
+    }
+
+    /** causationId: eventId of the message that caused the event; null when it starts a flow. */
+    public OutboxEventJpaEntity toOutboxRow(Loan loan, DomainEvent event, String correlationId, String causationId) {
         PublicEvent mapped = map(event);
         UUID eventId = UUID.fromString(event.getEventId());
         String aggregateId = loan.getId().getValue();
@@ -50,7 +55,7 @@ public class LoanEventEnvelopeFactory {
         envelope.put("aggregateId", aggregateId);
         envelope.put("aggregateVersion", aggregateVersion);
         envelope.put("correlationId", correlationId);
-        envelope.put("causationId", null);
+        envelope.put("causationId", causationId);
         envelope.put("producer", PRODUCER);
         envelope.put("data", mapped.data());
 

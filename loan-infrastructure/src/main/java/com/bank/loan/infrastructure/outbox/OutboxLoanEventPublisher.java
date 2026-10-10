@@ -1,6 +1,7 @@
 package com.bank.loan.infrastructure.outbox;
 
 import com.bank.loan.domain.Loan;
+import com.bank.loan.domain.port.out.EventCausation;
 import com.bank.loan.domain.port.out.LoanEventPublisher;
 import com.bank.loan.infrastructure.web.CorrelationIdFilter;
 import com.bank.shared.kernel.domain.DomainEvent;
@@ -28,14 +29,22 @@ public class OutboxLoanEventPublisher implements LoanEventPublisher {
         this.envelopes = envelopes;
     }
 
+    /**
+     * correlationId: the causing message's when there is one (ADR-019
+     * section 4, end to end), else the API request's x-fapi-interaction-id,
+     * else a new id. causationId: the causing message's eventId, else null
+     * (the events start a flow).
+     */
     @Override
     @Transactional(propagation = Propagation.MANDATORY)
-    public void publish(Loan loan, List<DomainEvent> events) {
+    public void publish(Loan loan, List<DomainEvent> events, EventCausation causation) {
         String interactionId = currentInteractionId();
-        String correlationId = interactionId != null ? interactionId : UUID.randomUUID().toString();
+        String correlationId = causation != null ? causation.correlationId()
+            : interactionId != null ? interactionId : UUID.randomUUID().toString();
+        String causationId = causation == null ? null : causation.causationId();
         String traceparent = currentTraceparent();
         outbox.saveAll(events.stream()
-            .map(event -> envelopes.toOutboxRow(loan, event, correlationId)
+            .map(event -> envelopes.toOutboxRow(loan, event, correlationId, causationId)
                 .withTraceparent(traceparent)
                 .withFapiInteractionId(interactionId))
             .toList());

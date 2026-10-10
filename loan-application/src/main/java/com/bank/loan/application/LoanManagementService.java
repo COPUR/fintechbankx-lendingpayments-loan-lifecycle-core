@@ -16,6 +16,7 @@ import com.bank.loan.domain.port.in.RepayLoanCommand;
 import com.bank.loan.domain.port.out.CustomerCreditService;
 import com.bank.loan.domain.port.out.CustomerCreditService.CreditDecision;
 import com.bank.loan.domain.port.out.CustomerCreditService.UnusedReservation;
+import com.bank.loan.domain.port.out.EventCausation;
 import com.bank.loan.domain.port.out.LoanEventPublisher;
 import com.bank.loan.domain.port.out.LoanRepository;
 import com.bank.loan.domain.port.out.RepaymentLedger;
@@ -221,7 +222,7 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
                 }
             }
             return applyRepayment(load(command.loanId()), PaymentId.generate(), command.amount(), Repayment.Source.API,
-                command.requestScope(), command.idempotencyKey());
+                command.requestScope(), command.idempotencyKey(), null);
         });
     }
 
@@ -238,7 +239,7 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
                 return false;
             }
             applyRepayment(load(command.loanId()), command.paymentId(), command.amount(), Repayment.Source.PAYMENT_EVENT,
-                null, null);
+                null, null, command.causation());
             return true;
         });
     }
@@ -249,9 +250,9 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
     }
 
     private Loan applyRepayment(Loan loan, PaymentId paymentId, Money amount, Repayment.Source source,
-                                String requestScope, String idempotencyKey) {
+                                String requestScope, String idempotencyKey, EventCausation causation) {
         PaymentResult result = loan.makePayment(paymentId, amount);
-        Loan saved = saveAndPublish(loan);
+        Loan saved = saveAndPublish(loan, causation);
         repaymentLedger.record(Repayment.of(result, amount, Instant.now(clock), source, requestScope, idempotencyKey));
         if (result.isLoanFullyPaid()) {
             afterCommit(() -> releaseCredit(saved));
@@ -307,10 +308,22 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
      * inside the same transaction, then clears them from the aggregate.
      */
     private Loan saveAndPublish(Loan loan) {
+        return saveAndPublish(loan, null);
+    }
+
+    /**
+     * As {@link #saveAndPublish(Loan)}; with a causation (a consumed message)
+     * the events carry its correlationId and causationId (ADR-019 section 4).
+     */
+    private Loan saveAndPublish(Loan loan, EventCausation causation) {
         List<DomainEvent> events = List.copyOf(loan.getDomainEvents());
         Loan savedLoan = loanRepository.save(loan);
         if (!events.isEmpty()) {
-            eventPublisher.publish(savedLoan, events);
+            if (causation == null) {
+                eventPublisher.publish(savedLoan, events);
+            } else {
+                eventPublisher.publish(savedLoan, events, causation);
+            }
         }
         loan.clearDomainEvents();
         return savedLoan;

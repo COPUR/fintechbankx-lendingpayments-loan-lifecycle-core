@@ -375,6 +375,30 @@ class LoanLifecycleServiceIT {
             Integer.class)).isPositive();
     }
 
+    /**
+     * ADR-019 section 4, end to end: the Lending.Loan.PaymentMade.v1 row
+     * raised by a consumed Payments.Payment.LoanPaymentCompleted.v1 carries
+     * the consumed record's correlationId (column, header source and
+     * envelope) and its eventId as causationId.
+     */
+    @Test
+    void eventsRaisedByAConsumedPaymentCarryItsCorrelationAndCausation() throws Exception {
+        String loanId = disbursedLoan("5000.00");
+        LoanPaymentCompletedListener listener = new LoanPaymentCompletedListener(json, new JdbcInbox(jdbc), repayments,
+            new TransactionTemplate(transactionManager));
+
+        listener.onPaymentEvent(record("2c9d7e1a-5b3f-4c8e-9a1d-7f6e5d4c3b2a", "PAY-EVT-CORR", loanId));
+
+        java.util.Map<String, Object> row = jdbc.queryForMap("select correlation_id, payload::text as payload, fapi_interaction_id"
+            + " from sc_ln_loan_lifecycle.outbox_event where aggregate_id = ? and event_type = 'Lending.Loan.PaymentMade.v1'",
+            loanId);
+        assertThat(row.get("correlation_id")).isEqualTo("corr-it");
+        assertThat(row.get("fapi_interaction_id")).isNull();
+        com.fasterxml.jackson.databind.JsonNode envelope = json.readTree((String) row.get("payload"));
+        assertThat(envelope.get("correlationId").asText()).isEqualTo("corr-it");
+        assertThat(envelope.get("causationId").asText()).isEqualTo("2c9d7e1a-5b3f-4c8e-9a1d-7f6e5d4c3b2a");
+    }
+
     @Test
     void failedRepaymentLeavesNoInboxRowSoTheEventIsRetried() throws Exception {
         String loanId = disbursedLoan("1000.00");

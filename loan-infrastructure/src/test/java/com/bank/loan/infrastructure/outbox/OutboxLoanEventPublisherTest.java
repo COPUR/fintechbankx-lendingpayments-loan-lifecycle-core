@@ -67,6 +67,37 @@ class OutboxLoanEventPublisherTest {
         assertThat(OutboxLoanEventPublisher.currentTraceparent()).isNull();
     }
 
+    /** ADR-019 section 4: events caused by a consumed message carry its correlationId and eventId. */
+    @Test
+    void eventsCausedByAConsumedMessageCarryItsCorrelationAndCausation() throws Exception {
+        Loan loan = loan();
+
+        publisher.publish(loan, List.copyOf(loan.getDomainEvents()),
+            new com.bank.loan.domain.port.out.EventCausation("corr-pay-1", "6f1c3a3e-1a52-4f7e-9d43-0b8a3d9f0c11"));
+
+        ArgumentCaptor<List<OutboxEventJpaEntity>> rows = ArgumentCaptor.forClass(List.class);
+        verify(outbox).saveAll(rows.capture());
+        OutboxEventJpaEntity row = rows.getValue().getFirst();
+        assertThat(row.getCorrelationId()).isEqualTo("corr-pay-1");
+        assertThat(row.getFapiInteractionId()).isNull();
+        com.fasterxml.jackson.databind.JsonNode envelope = new ObjectMapper().readTree(row.getPayload());
+        assertThat(envelope.get("correlationId").asText()).isEqualTo("corr-pay-1");
+        assertThat(envelope.get("causationId").asText()).isEqualTo("6f1c3a3e-1a52-4f7e-9d43-0b8a3d9f0c11");
+    }
+
+    /** A flow that starts at the API has no cause: causationId stays null, as before. */
+    @Test
+    void eventsThatStartAFlowHaveNoCausation() throws Exception {
+        MDC.put(CorrelationIdFilter.MDC_KEY, "corr-api");
+        Loan loan = loan();
+
+        publisher.publish(loan, List.copyOf(loan.getDomainEvents()));
+
+        ArgumentCaptor<List<OutboxEventJpaEntity>> rows = ArgumentCaptor.forClass(List.class);
+        verify(outbox).saveAll(rows.capture());
+        assertThat(new ObjectMapper().readTree(rows.getValue().getFirst().getPayload()).get("causationId").isNull()).isTrue();
+    }
+
     private static Loan loan() {
         return Loan.create(LoanId.of("LOAN-PUB"), CustomerId.of("CUST-PUB"), Money.aed(new BigDecimal("6000.00")),
             InterestRate.of(new BigDecimal("6.0")), LoanTerm.ofMonths(6));
