@@ -68,7 +68,16 @@ podDisruptionBudget:
   minAvailable: 2
 
 # Non-secret runtime settings, rendered into a ConfigMap. Values marked
-# REQUIRED have no default; the chart fails to render without them.
+# REQUIRED have no default; the chart fails to render without them. The chart
+# also refuses to render (templates/_helpers.tpl loan.guardEnvKey), whatever
+# the case of the key: SPRING_CONFIG_IMPORT, SPRING_CONFIG_LOCATION and
+# SPRING_CONFIG_ADDITIONAL_LOCATION (Spring configuration is never redirected
+# from values; a configtree exists only as a chart-rendered value on
+# optional:configtree:/etc/fintechbankx/config/, and this chart renders none);
+# SPRING_DATASOURCE_URL and SPRING_FLYWAY_URL (DB_URL is the guarded way in);
+# FINTECHBANKX_TLS_ENFORCE and a SPRING_PROFILES_ACTIVE that includes "local"
+# (the startup TLS assertion is never switched off by the chart). There is no
+# extraEnv: every pod setting goes through config.
 config:
   # REQUIRED (deploy/terraform output jdbc_url). Must verify the server
   # certificate against the mounted RDS CA bundle (databaseCa below), e.g.

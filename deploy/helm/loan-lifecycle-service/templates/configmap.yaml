@@ -10,6 +10,16 @@
 {{- if not (has .Values.config.CUSTOMER_CREDIT_ADAPTER (list "http" "in-memory")) }}
 {{- fail "config.CUSTOMER_CREDIT_ADAPTER must be http or in-memory" }}
 {{- end }}
+{{- /* Round 5: no Spring configuration redirection, no datasource URL bypass, TLS assertion never off (loan.guardEnvKey). */ -}}
+{{- range $key, $_ := .Values.config }}
+{{- include "loan.guardEnvKey" (list "config" $key) }}
+{{- end }}
+{{- /* The local profile (application-local.yml) switches the TLS assertion off, so the chart never activates it. */ -}}
+{{- range $profile := splitList "," (toString (.Values.config.SPRING_PROFILES_ACTIVE | default "")) }}
+{{- if eq (trim $profile) "local" }}
+{{- fail "config.SPRING_PROFILES_ACTIVE must not activate the local profile: it switches the startup TLS assertion off" }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

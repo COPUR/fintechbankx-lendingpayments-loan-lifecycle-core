@@ -73,6 +73,23 @@ jobs:
             echo "chart rendered a DB_URL without sslmode=verify-full and the RDS CA bundle" >&2
             exit 1
           fi
+          # Round 5 (governance 2b and 4, _helpers.tpl loan.guardEnvKey): no value may redirect Spring's
+          # configuration (even to the fixed configtree mount), bypass the DB_URL guard or switch the
+          # startup TLS assertion off, whatever the case of the key.
+          for forbidden in "config.SPRING_CONFIG_IMPORT=optional:configtree:/etc/fintechbankx/config/" \
+                           "config.spring_config_location=file:/etc/other/" \
+                           "config.Spring_Config_Additional_Location=file:/etc/other/" \
+                           "config.SPRING_DATASOURCE_URL=jdbc:postgresql://other:5432/db" \
+                           "config.SPRING_FLYWAY_URL=jdbc:postgresql://other:5432/db" \
+                           "config.FINTECHBANKX_TLS_ENFORCE=false" \
+                           "config.SPRING_PROFILES_ACTIVE=kafka-msk\,local"; do
+            if helm template ci "$chart" $args --set-string "$forbidden" > /dev/null 2>&1; then
+              echo "chart rendered with $forbidden" >&2
+              exit 1
+            fi
+          done
+          # The guard leaves the settings the chart needs alone.
+          helm template ci "$chart" $args --set-string config.SPRING_PROFILES_ACTIVE=kafka-msk > /dev/null
           # Flyway runs only in the hook Job, as the schema owner; the pods never get that secret.
           job="$(helm template ci "$chart" $args --show-only templates/migration-job.yaml)"
           grep -q 'helm.sh/hook: pre-install,pre-upgrade' <<<"$job"
