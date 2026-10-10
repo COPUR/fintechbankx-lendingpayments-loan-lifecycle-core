@@ -262,6 +262,39 @@ class OutboxRelayTest {
         assertThat(poison.isParkCounted()).isTrue();          // the relay counted it already
     }
 
+    /**
+     * One topic per aggregate: a loan's sagas rely on its events in order. A
+     * row parked on a payload error holds back the later rows of the same
+     * loan in the same run (they wait for the replay); other loans continue.
+     */
+    @Test
+    void aRowParkedInThisRunHoldsBackTheLaterRowsOfItsLoanOnly() {
+        OutboxEventJpaEntity poison = row("LOAN-P");
+        OutboxEventJpaEntity laterOfSameLoan = row("LOAN-P");
+        OutboxEventJpaEntity otherLoan = row("LOAN-Q");
+        when(outbox.tryRelayLock(anyLong())).thenReturn(true);
+        when(outbox.findUnpublishedBatch(50)).thenReturn(List.of(poison, laterOfSameLoan, otherLoan));
+        List<String> sent = new java.util.ArrayList<>();
+        when(kafka.send(any(ProducerRecord.class))).thenAnswer(invocation -> {
+            ProducerRecord<String, String> record = invocation.getArgument(0);
+            sent.add(header(record, "eventId"));
+            return poison.getEventId().toString().equals(header(record, "eventId"))
+                ? CompletableFuture.failedFuture(new RecordTooLargeException("The message is 2000000 bytes"))
+                : CompletableFuture.completedFuture((SendResult<String, String>) null);
+        });
+
+        assertThat(relay.relayOnce()).isEqualTo(1);
+
+        assertThat(sent).containsExactly(poison.getEventId().toString(), otherLoan.getEventId().toString());
+        assertThat(poison.getParkedAt()).isEqualTo(NOW);
+        assertThat(laterOfSameLoan.getPublishedAt()).isNull();
+        assertThat(laterOfSameLoan.getParkedAt()).isNull();
+        assertThat(laterOfSameLoan.getAttempts()).isZero();
+        assertThat(laterOfSameLoan.getLastError()).isNull();
+        assertThat(otherLoan.getPublishedAt()).isEqualTo(NOW);
+        assertThat(failures("RecordTooLargeException")).isZero();
+    }
+
     static Stream<Arguments> payloadErrors() {
         return Stream.of(
             Arguments.of(new RecordTooLargeException("The message is 2000000 bytes"),

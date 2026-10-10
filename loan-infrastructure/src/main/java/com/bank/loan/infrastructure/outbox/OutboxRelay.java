@@ -16,7 +16,9 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -34,7 +36,12 @@ import java.util.concurrent.TimeoutException;
  *   <li>payload errors (RecordTooLarge, Serialization, InvalidTopic): the row
  *   can never be sent as it is; it is parked at once (parked_at, park_reason,
  *   last_error), counted in outbox.parked.events tagged with the exception's
- *   simple class name (alert on any increase), and the batch continues;</li>
+ *   simple class name (alert on any increase), and the batch continues with
+ *   the other loans. A parked row (this one, or an operator park) holds back
+ *   the later rows of its loan until it is replayed: skipped for the rest of
+ *   this run here, and by {@link SpringDataOutboxRepository#findUnpublishedBatch}
+ *   in later runs. With one topic per aggregate the loan's sagas rely on its
+ *   events in order;</li>
  *   <li>every other error (retryable broker or network errors, the relay's own
  *   send timeout, authorization, anything unclassified) never parks a row,
  *   however long it lasts: the batch stops, nothing is marked, the relay backs
@@ -93,9 +100,14 @@ public class OutboxRelay {
             }
             countOperatorParks();
             List<OutboxEventJpaEntity> batch = outbox.findUnpublishedBatch(batchSize);
+            Set<String> heldBack = new HashSet<>();
             int sent = 0;
             boolean failed = false;
             for (OutboxEventJpaEntity row : batch) {
+                if (heldBack.contains(row.getAggregateId())) {
+                    // A row of this loan was parked earlier in this run: its later rows wait for the replay.
+                    continue;
+                }
                 try {
                     kafka.send(toRecord(row)).get(sendTimeout.toMillis(), TimeUnit.MILLISECONDS);
                     row.markPublished(clock.instant());
@@ -110,8 +122,9 @@ public class OutboxRelay {
                         recordParked(unwrap(e).getClass().getSimpleName());
                         row.markFailed(reason);
                         row.park(clock.instant(), "payload error: " + reason);
-                        log.error("Outbox relay parked event {} for {}: payload error {}; later events continue (ADR-021 decision 4)",
-                            row.getEventId(), row.getTopic(), reason);
+                        heldBack.add(row.getAggregateId());
+                        log.error("Outbox relay parked event {} ({}): payload error {}; the loan's later events wait for "
+                            + "the replay, other loans continue (ADR-021 decision 4)", row.getEventId(), row.getEventType(), reason);
                         continue;
                     }
                     failed = true;

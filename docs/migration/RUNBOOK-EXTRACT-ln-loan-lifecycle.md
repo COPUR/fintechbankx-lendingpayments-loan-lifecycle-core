@@ -30,7 +30,7 @@ Extraction of the Loan aggregate from `enterprise-loan-management-system` into
 | `compliance_reports` (V13) | `svc-cmp-evidence` | separate slice |
 | `loan_service.*` (loan/V1) | not migrated | parallel schema from an earlier split attempt; confirm it has no rows before the cutover |
 
-Migrations: `loan-infrastructure/src/main/resources/db/migration/V1..V6`. The service never reads
+Migrations: `loan-infrastructure/src/main/resources/db/migration/V1..V12`. The service never reads
 monolith tables and the monolith must not read `sc_ln_loan_lifecycle`.
 
 ### Database roles
@@ -171,7 +171,7 @@ Rollback triggers (measured from the start of step 2 (d), any one):
 
 - [x] Service builds and checks standalone (`ci/test` runs `./gradlew check` with PostgreSQL; ArchUnit rules; coverage)
 - [x] Own schema and migrations; Hibernate validates entities against them at startup
-- [x] Events written through a transactional outbox, relayed in order; ADR-021 decision 4 (adr-runbooks #10 e6dd76a): payload errors park the row at once and the batch continues; every other error (retryable, authorization, unclassified) parks nothing however long it lasts: the batch stops, nothing is marked, the relay backs off, and only an operator parks a row, with a recorded reason (section 7)
+- [x] Events written through a transactional outbox, relayed in order; a parked row holds back its loan's later rows until it is replayed (V12); ADR-021 decision 4 (adr-runbooks #10 e6dd76a): payload errors park the row at once and the batch continues; every other error (retryable, authorization, unclassified) parks nothing however long it lasts: the batch stops, nothing is marked, the relay backs off, and only an operator parks a row, with a recorded reason (section 7)
 - [x] Customer credit through the customer service API (no shared table); consumer contract test against customer-context.yaml
 - [x] Delta backfill rehearsed with reconciliation in CI
 - [ ] Monolith anti-corruption client and write-freeze flag (enterprise-loan-management-system)
@@ -196,9 +196,15 @@ ADR-021 decision 4 (adr-runbooks #10, e6dd76a), the rule for every service's out
   `outbox_send_failures_total{exception="<simple class name>"}`. There is no time ceiling: the row stays at the
   head until the cause is fixed or an operator parks it.
 
-Note: a loan raises several events, so parking a row lets later events of the same loan go out before it.
-Consumers must tolerate that until the row is replayed (they de-duplicate on `eventId` and carry
-`aggregateVersion`).
+A parked row holds back its loan. With one topic per aggregate (`evt.ln.loan.v1`) the loan's sagas rely on its
+events arriving in order, so every later row of the same loan waits until the parked row is replayed: the relay
+skips them for the rest of the run in which it parked the row, and its pending query skips every loan with a
+parked row (payload park or operator park) in later runs (V12, partial index `ix_outbox_parked_aggregate`; the
+same rule as bulk-orchestration). Rows of other loans are not held back. The held-back rows stay in
+`outbox_pending_events` and in `outbox_oldest_pending_age_seconds`, so `OutboxRelayStalled` fires for them too
+if the parked row is not replayed within 15 minutes; `outbox_parked_rows` above 0 at the same time tells the two
+causes apart. Replaying the parked row (SQL below) releases its loan: the next run sends the loan's rows in
+their order.
 
 Alerts. The squad acts on the platform alerts (observability `prometheus/rules/kafka-outbox.rules.yml`,
 PR #11 head eca7aa0, routed by the `squad` label); this chart ships no outbox alert rule:
@@ -211,7 +217,7 @@ PR #11 head eca7aa0, routed by the `squad` label); this chart ships no outbox al
 
 `outbox_parked_rows` shows the rows parked now and `outbox_pending_events` the backlog.
 
-Find the head of the queue and the parked rows:
+Find the head of the queue and the parked rows, and the rows each parked row holds back:
 
 ```sql
 SELECT event_id, created_seq, topic, attempts, last_error, parked_at, park_reason
@@ -219,6 +225,13 @@ FROM sc_ln_loan_lifecycle.outbox_event
 WHERE published_at IS NULL
 ORDER BY created_seq
 LIMIT 20;
+
+SELECT p.aggregate_id AS loan_id, p.event_id AS parked_event, p.park_reason, count(h.event_id) AS held_back
+FROM sc_ln_loan_lifecycle.outbox_event p
+LEFT JOIN sc_ln_loan_lifecycle.outbox_event h
+  ON h.aggregate_id = p.aggregate_id AND h.published_at IS NULL AND h.parked_at IS NULL
+WHERE p.parked_at IS NOT NULL
+GROUP BY p.aggregate_id, p.event_id, p.park_reason;
 ```
 
 Operator park (only when the head row itself is the problem and the incident lead agrees; the relay never

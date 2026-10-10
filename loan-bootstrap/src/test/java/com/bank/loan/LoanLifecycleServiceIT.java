@@ -7,6 +7,7 @@ import com.bank.loan.domain.port.in.LoanRepaymentUseCase;
 import com.bank.loan.domain.port.out.LoanRepository;
 import com.bank.loan.infrastructure.messaging.JdbcInbox;
 import com.bank.loan.infrastructure.messaging.LoanPaymentCompletedListener;
+import com.bank.loan.infrastructure.outbox.OutboxEventJpaEntity;
 import com.bank.loan.infrastructure.outbox.OutboxRelay;
 import com.bank.loan.infrastructure.outbox.SpringDataOutboxRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -16,6 +17,7 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -487,7 +489,7 @@ class LoanLifecycleServiceIT {
 
     @Test
     @SuppressWarnings("unchecked")
-    void poisonRowIsParkedAndDoesNotBlockLaterRows() throws Exception {
+    void poisonRowIsParkedAndDoesNotBlockOtherLoans() throws Exception {
         String first = createLoan("7000.00", 12, "6.0");
         String second = createLoan("8000.00", 12, "6.0");
         when(kafka.send(any(ProducerRecord.class))).thenAnswer(invocation -> {
@@ -513,6 +515,93 @@ class LoanLifecycleServiceIT {
         assertThat(jdbc.queryForObject("""
             select count(*) from sc_ln_loan_lifecycle.outbox_event where aggregate_id = ? and published_at is not null
             """, Integer.class, second)).isEqualTo(1);
+    }
+
+    /**
+     * One topic per aggregate (evt.ln.loan.v1): the loan's sagas rely on its
+     * events in order. A parked row (here an operator park) holds back every
+     * later row of the same loan until it is replayed; other loans continue.
+     * After the runbook's replay the loan's rows go out in their order.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void aParkedRowHoldsBackTheLaterRowsOfItsLoanUntilItIsReplayed() throws Exception {
+        String held = createLoan("6100.00", 12, "6.0");
+        jdbc.update("""
+            update sc_ln_loan_lifecycle.outbox_event
+            set parked_at = now(), park_reason = 'operator: INC-2 head row of the loan'
+            where aggregate_id = ? and published_at is null and parked_at is null
+            """, held);
+        decisions.approve(LoanId.of(held));
+        String other = createLoan("6200.00", 12, "6.0");
+        when(kafka.send(any(ProducerRecord.class))).thenReturn(CompletableFuture.completedFuture(null));
+        OutboxRelay relay = new OutboxRelay(outbox, kafka, new TransactionTemplate(transactionManager),
+            Clock.systemUTC(), 100, Duration.ofSeconds(35), Duration.ofDays(7),
+            new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+
+        assertThat(outbox.findUnpublishedBatch(100)).extracting(OutboxEventJpaEntity::getAggregateId)
+            .containsOnly(other);
+        relay.relayOnce();
+
+        assertThat(jdbc.queryForList("""
+            select event_type from sc_ln_loan_lifecycle.outbox_event
+            where aggregate_id = ? and published_at is null order by created_seq
+            """, String.class, held)).containsExactly("Lending.Loan.Created.v1", "Lending.Loan.Approved.v1");
+        assertThat(jdbc.queryForObject("""
+            select count(*) from sc_ln_loan_lifecycle.outbox_event where aggregate_id = ? and published_at is not null
+            """, Integer.class, other)).isEqualTo(1);
+
+        // Runbook section 7 replay.
+        jdbc.update("""
+            update sc_ln_loan_lifecycle.outbox_event
+            set parked_at = null, park_reason = null, park_counted = false, attempts = 0, last_error = null
+            where aggregate_id = ? and published_at is null and parked_at is not null
+            """, held);
+        org.mockito.Mockito.clearInvocations(kafka);
+        relay.relayOnce();
+
+        ArgumentCaptor<ProducerRecord<String, String>> records = ArgumentCaptor.forClass(ProducerRecord.class);
+        org.mockito.Mockito.verify(kafka, org.mockito.Mockito.times(2)).send(records.capture());
+        assertThat(records.getAllValues()).extracting(r -> recordHeader(r, "eventType"))
+            .containsExactly("Lending.Loan.Created.v1", "Lending.Loan.Approved.v1");
+        assertThat(records.getAllValues()).extracting(ProducerRecord::key).containsOnly(held);
+    }
+
+    /** The same within one run: a payload park holds back its loan's later rows already fetched in the batch. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void aPayloadParkHoldsBackItsLoansLaterRowsInTheSameRun() throws Exception {
+        String poisoned = createLoan("6300.00", 12, "6.0");
+        decisions.approve(LoanId.of(poisoned));
+        String created = jdbc.queryForObject("""
+            select event_id::text from sc_ln_loan_lifecycle.outbox_event
+            where aggregate_id = ? and event_type = 'Lending.Loan.Created.v1'
+            """, String.class, poisoned);
+        when(kafka.send(any(ProducerRecord.class))).thenAnswer(invocation -> {
+            ProducerRecord<String, String> record = invocation.getArgument(0);
+            return created.equals(recordHeader(record, "eventId"))
+                ? CompletableFuture.failedFuture(new org.apache.kafka.common.errors.RecordTooLargeException("too large"))
+                : CompletableFuture.completedFuture(null);
+        });
+        OutboxRelay relay = new OutboxRelay(outbox, kafka, new TransactionTemplate(transactionManager),
+            Clock.systemUTC(), 100, Duration.ofSeconds(35), Duration.ofDays(7),
+            new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+
+        relay.relayOnce();
+
+        assertThat(jdbc.queryForList("""
+            select event_type || ':' || (parked_at is not null) || ':' || attempts
+            from sc_ln_loan_lifecycle.outbox_event where aggregate_id = ? and published_at is null order by created_seq
+            """, String.class, poisoned)).containsExactly("Lending.Loan.Created.v1:true:1", "Lending.Loan.Approved.v1:false:0");
+    }
+
+    /** V12: the pending query's per-loan check is backed by a partial index on the parked rows. */
+    @Test
+    void theParkedRowsOfALoanAreIndexed() {
+        assertThat(jdbc.queryForObject("""
+            select indexdef from pg_indexes
+            where schemaname = 'sc_ln_loan_lifecycle' and indexname = 'ix_outbox_parked_aggregate'
+            """, String.class)).contains("(aggregate_id)").contains("WHERE (parked_at IS NOT NULL)");
     }
 
     @Test

@@ -19,10 +19,19 @@ public interface SpringDataOutboxRepository extends JpaRepository<OutboxEventJpa
     @Query(value = "select pg_try_advisory_xact_lock(:key)", nativeQuery = true)
     boolean tryRelayLock(@Param("key") long key);
 
+    /**
+     * Unpublished rows in insertion order, skipping every row of a loan that
+     * has a parked row (relay payload park or operator park): with one topic
+     * per aggregate the loan's sagas rely on order, so its later events wait
+     * until the parked one is replayed (ADR-021 decision 4; V12 partial index
+     * ix_outbox_parked_aggregate). Rows of other loans are not held back.
+     */
     @Query(value = """
-        select * from outbox_event
-        where published_at is null and parked_at is null
-        order by created_seq
+        select * from outbox_event o
+        where o.published_at is null and o.parked_at is null
+          and not exists (select 1 from outbox_event p
+                          where p.parked_at is not null and p.aggregate_id = o.aggregate_id)
+        order by o.created_seq
         limit :batchSize
         """, nativeQuery = true)
     List<OutboxEventJpaEntity> findUnpublishedBatch(@Param("batchSize") int batchSize);
@@ -31,7 +40,7 @@ public interface SpringDataOutboxRepository extends JpaRepository<OutboxEventJpa
     @Query("delete from OutboxEventJpaEntity e where e.publishedAt < :before")
     int deletePublishedBefore(@Param("before") Instant before);
 
-    /** Backlog: rows still to be relayed (parked rows are counted separately). */
+    /** Backlog: rows still to be relayed, including rows held back behind a parked row of their loan (parked rows are counted separately). */
     long countByPublishedAtIsNullAndParkedAtIsNull();
 
     long countByParkedAtIsNotNull();
