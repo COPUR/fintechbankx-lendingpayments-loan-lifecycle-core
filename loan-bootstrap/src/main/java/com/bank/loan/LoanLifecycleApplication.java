@@ -1,5 +1,6 @@
 package com.bank.loan;
 
+import com.bank.loan.infrastructure.config.TlsEnforcementConfiguration;
 import org.springframework.boot.Banner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.WebApplicationType;
@@ -8,6 +9,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.context.annotation.Import;
 
 import java.util.Arrays;
 
@@ -51,8 +53,15 @@ public class LoanLifecycleApplication {
         }
     }
 
-    /** Not a component (no stereotype), so the service's component scan never picks it up. */
+    /**
+     * Not a component (no stereotype), so the service's component scan never
+     * picks it up. The startup TLS assertion is imported explicitly (loan #14
+     * review): the component scan does not run here, and the Job's DB_URL must
+     * carry sslmode=verify-full before Flyway connects. No Kafka client exists
+     * in this context, so only the database is checked.
+     */
     @ImportAutoConfiguration({DataSourceAutoConfiguration.class, FlywayAutoConfiguration.class})
+    @Import(TlsEnforcementConfiguration.class)
     static class DatabaseMigration {
     }
 }

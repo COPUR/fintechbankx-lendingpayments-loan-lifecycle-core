@@ -19,7 +19,7 @@ import static org.mockito.Mockito.mock;
  * application.yml. Only explicit local and test configuration switches it off:
  * the local profile (application-local.yml) and the test resources of this
  * module (application.properties). The chart never sets it, and refuses the
- * env key and the local profile (deploy/helm, loan.guardEnvKey).
+ * env key and the local profile (deploy/helm, _helpers.tpl loan.guardValues).
  */
 class TlsEnforcementConfigurationTest {
 
