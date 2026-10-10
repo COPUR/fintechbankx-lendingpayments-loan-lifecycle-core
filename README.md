@@ -70,13 +70,17 @@ DTOs) <- `loan-infrastructure` (`web`, `persistence`, `outbox`, `messaging`, `ex
 No Kafka, no customer service, no Keycloak token needed to start:
 
 ```
+SPRING_PROFILES_ACTIVE=local \
 DB_URL=jdbc:postgresql://localhost:5432/<db> DB_USERNAME=<user> SPRING_DATASOURCE_PASSWORD=<password> \
 CUSTOMER_CREDIT_ADAPTER=in-memory CUSTOMER_CREDIT_LEDGER_CURRENCY=AED \
 OUTBOX_RELAY_ENABLED=false LOAN_REPAYMENT_CONSUMER_ENABLED=false \
 ./gradlew :loan-bootstrap:bootRun
 ```
 
-Local runs keep a plain local URL. Deployed pods use the Terraform output `jdbc_url`
+Local runs keep a plain local URL, which is why the `local` profile is needed: the service refuses to start
+unless `DB_URL` has `sslmode=verify-full` and the Kafka `security.protocol` is `SASL_SSL`
+(`fintechbankx.tls.enforce`, true by default; `TlsEnforcement` names the offending setting). Only the `local`
+profile and the bootstrap test resources switch it off; the chart never does. Deployed pods use the Terraform output `jdbc_url`
 (`...?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem`): the chart mounts the platform
 ConfigMap `rds-ca-bundle` (key `global-bundle.pem`) read-only at `/etc/fintechbankx/rds-ca` and refuses a `DB_URL`
 that does not verify the Aurora certificate against it.

@@ -1,0 +1,7 @@
+# Local profile (SPRING_PROFILES_ACTIVE=local, README "Local boot"): a plain
+# local PostgreSQL and no Kafka TLS. The only shipped configuration that
+# switches the startup TLS assertion (TlsEnforcement) off; the chart refuses to
+# activate this profile (deploy/helm templates/configmap.yaml).
+fintechbankx:
+  tls:
+    enforce: false
