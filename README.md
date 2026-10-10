@@ -78,10 +78,16 @@ OUTBOX_RELAY_ENABLED=false LOAN_REPAYMENT_CONSUMER_ENABLED=false \
 ```
 
 Local runs keep a plain local URL, which is why the `local` profile is needed: the service refuses to start
-unless `DB_URL` has `sslmode=verify-full` and the Kafka `security.protocol` is `SASL_SSL` (profile `kafka-msk`) or
-`SSL` (profile `kafka-strimzi`, mutual TLS); `PLAINTEXT`, `SASL_PLAINTEXT` and unset are refused
-(`fintechbankx.tls.enforce`, true by default; `TlsEnforcement` names the offending setting). Only the `local`
-profile and the bootstrap test resources switch it off; the chart never does. Deployed pods use the Terraform output `jdbc_url`
+unless every datasource URL a pool can use (`spring.datasource.url` = `DB_URL`, `spring.datasource.hikari.jdbc-url`,
+`spring.flyway.url`), read as PgJDBC reads it (case-sensitive keys, exactly one `sslmode`, no `sslfactory`,
+`sslfactoryarg`, `sslhostnameverifier`, `sslpasswordcallback` or `service`), has `sslmode=verify-full`, and the
+effective Kafka `security.protocol` of the producer (and of the consumer when one exists), bound through
+`KafkaProperties`, is `SASL_SSL` (profile `kafka-msk`) or `SSL` (profile `kafka-strimzi`, mutual TLS);
+`PLAINTEXT`, `SASL_PLAINTEXT` and unset are refused (`fintechbankx.tls.enforce`, true by default;
+`TlsEnforcement` names the offending setting and its sslmode or protocol, never the URL). The migration Job's
+`migrate` context imports the same check for its `DB_URL`. Only the `local` profile and the bootstrap test
+resources switch it off; the chart never does and refuses every route to the `local` profile ("Chart guard" below).
+Deployed pods use the Terraform output `jdbc_url`
 (`...?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem`): the chart mounts the platform
 ConfigMap `rds-ca-bundle` (key `global-bundle.pem`) read-only at `/etc/fintechbankx/rds-ca` and refuses a `DB_URL`
 that does not verify the Aurora certificate against it.

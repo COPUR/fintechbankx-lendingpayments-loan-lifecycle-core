@@ -200,15 +200,20 @@ loan:
 
 fintechbankx:
   tls:
-    # Round 5 (governance 2b): the service refuses to start unless
-    # spring.datasource.url has sslmode=verify-full and, with a Kafka client
-    # configured, the Kafka security.protocol is SASL_SSL (kafka-msk) or SSL
+    # Round 5 (governance 2b) and round 6 (guardrail 4a): the service refuses
+    # to start unless every datasource URL a pool can use
+    # (spring.datasource.url, spring.datasource.hikari.jdbc-url,
+    # spring.flyway.url), read as PgJDBC reads it, has exactly one
+    # sslmode=verify-full and no verification-bypass key, and, with a Kafka
+    # client configured, the effective security.protocol of the producer (and
+    # consumer) built from spring.kafka is SASL_SSL (kafka-msk) or SSL
     # (kafka-strimzi, mutual TLS); PLAINTEXT, SASL_PLAINTEXT and unset stop the
     # start (TlsEnforcement, an early bean whose message names the offending
-    # setting). Only explicit
-    # local and test configuration sets this false: the local profile
+    # setting; the migrate Job context imports it too). Only explicit local and
+    # test configuration sets this false: the local profile
     # (application-local.yml) and the bootstrap test resources. The chart never
-    # sets it and refuses FINTECHBANKX_TLS_ENFORCE and the local profile.
+    # sets it and refuses fintechbankx.tls.*, every profile name and the JVM
+    # options in any spelling (deploy/helm, _helpers.tpl loan.guardValues).
     enforce: true
 
 logging:
