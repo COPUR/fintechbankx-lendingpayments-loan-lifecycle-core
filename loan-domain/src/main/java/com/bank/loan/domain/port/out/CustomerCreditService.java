@@ -24,6 +24,9 @@ import com.bank.shared.kernel.domain.Money;
  *       the customer's credit is not held in.</li>
  *   <li>{@link CreditCustomerNotFoundException}: the customer service does
  *       not know the customer.</li>
+ *   <li>{@link CreditReservationNeedsOperatorException}: the loan's
+ *       reservation is held for an operator after a refused compensating
+ *       release; not retryable until the operator has resolved it.</li>
  *   <li>{@link CustomerCreditUnavailableException}: no usable answer (down,
  *       timeout, no service token, kept reporting concurrent updates, or
  *       rejected the request).</li>

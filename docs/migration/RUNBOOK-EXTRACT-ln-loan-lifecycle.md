@@ -252,6 +252,18 @@ never reads that table: every check below is a request to the customer squad (ow
 the idempotency keys. Keys: reserve `<loanId>:reserve` at generation 0, `<loanId>:reserve:g<n>` at generation n;
 compensating release `<reserve key>:compensation`; repayment release `<loanId>:release`.
 
+### What the API answers for a held loan
+
+| Situation | `POST /api/v1/loans/{loanId}/disburse` | Retry? |
+|---|---|---|
+| Customer service did not answer (down, timeout, token refused, kept reporting concurrent updates) | 503 `CUSTOMER_SERVICE_UNAVAILABLE` | yes, nothing changed |
+| Loan's compensating release was refused with `RELEASE_EXCEEDS_RESERVATION` (row has `release_refused_code`) | 409 `CREDIT_RESERVATION_HELD_FOR_OPERATOR`; no request is sent to the customer service | no: the same answer until an operator closes the row (procedure below) |
+| Customer service refused the reserve (not enough credit) | 422 `INSUFFICIENT_CREDIT` | only after the customer's credit changes |
+
+The first disbursement that meets the refusal gets the 409 too, once the refusal is recorded. If the refusal
+could not be recorded (database error), that one answer is a 503 and the release is re-sent next time.
+Cancel and reject still answer 200: the closure commits and the held release is logged, never re-sent.
+
 ### Recovery sweep
 
 `CreditReservationSweep` runs on start-up and then `CREDIT_RESERVATION_SWEEP_INTERVAL` (default `PT1M`) after the
@@ -343,8 +355,8 @@ becomes `RESERVED`. That is safe; a release is not.
 Requires the customer service's release by reference (provider contract pending). The row has
 `pending_compensation = <n>` and `release_refused_code = 'RELEASE_EXCEEDS_RESERVATION'`: the release under
 `<reserve key of n>:compensation` asked for more than the customer service holds for reference `<loan_id>`.
-The release is never re-sent by this service, the sweep skips the row, and a new reservation for the loan
-fails until the row is closed.
+The release is never re-sent by this service, the sweep skips the row, and a disbursement of the loan answers
+409 `CREDIT_RESERVATION_HELD_FOR_OPERATOR` without calling the customer service until the row is closed.
 
 1. Ask the customer squad for every movement of customer `<customer_id>` with reference `<loan_id>`, and the
    amount it still holds for that reference (reserves minus releases).

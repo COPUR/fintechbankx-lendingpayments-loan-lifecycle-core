@@ -2,6 +2,7 @@ package com.bank.loan.infrastructure.external;
 
 import com.bank.loan.domain.port.out.CreditCurrencyMismatchException;
 import com.bank.loan.domain.port.out.CreditCustomerNotFoundException;
+import com.bank.loan.domain.port.out.CreditReservationNeedsOperatorException;
 import com.bank.loan.domain.port.out.CustomerCreditService.CreditDecision;
 import com.bank.loan.domain.port.out.CustomerCreditService.UnusedReservation;
 import com.bank.loan.domain.port.out.CustomerCreditUnavailableException;
@@ -565,7 +566,13 @@ class CustomerProfileHttpAdapterTest {
         server.verify();
     }
 
-    /** 422 RELEASE_EXCEEDS_RESERVATION is a bug signal: the row is left for an operator, nothing is re-sent. */
+    /**
+     * 422 RELEASE_EXCEEDS_RESERVATION is a bug signal: the row is left for an
+     * operator, nothing is re-sent. Review minor (sendCompensation): from then
+     * on every caller, including a disbursement of the loan, gets the
+     * non-retryable {@link CreditReservationNeedsOperatorException}, not the
+     * retryable "customer service unavailable".
+     */
     @Test
     void aReleaseExceedingTheReservationIsLeftForAnOperator() {
         Money ten = Money.aed(new BigDecimal("10.00"));
@@ -576,14 +583,54 @@ class CustomerProfileHttpAdapterTest {
 
         adapter.reserveCredit(LOAN, CUSTOMER, ten);
         assertThatThrownBy(() -> adapter.releaseUnusedReservation(LOAN, CUSTOMER, ten))
-            .isInstanceOf(CustomerCreditUnavailableException.class)
+            .isInstanceOf(CreditReservationNeedsOperatorException.class)
+            .isNotInstanceOf(CustomerCreditUnavailableException.class)
             .hasMessageContaining("RELEASE_EXCEEDS_RESERVATION");
         assertThatThrownBy(() -> adapter.releaseUnusedReservation(LOAN, CUSTOMER, ten))
-            .isInstanceOf(CustomerCreditUnavailableException.class)
+            .isInstanceOf(CreditReservationNeedsOperatorException.class)
             .hasMessageContaining("operator");
 
         assertThat(generations.pendingCompensation(LOAN)).hasValue(0);
         assertThat(generations.releaseRefusal(LOAN)).isEqualTo("RELEASE_EXCEEDS_RESERVATION");
+        server.verify();
+    }
+
+    /** The parked loan's next disbursement: no request is sent, and the answer is not "retry later". */
+    @Test
+    void aDisbursementOfALoanHeldForAnOperatorIsRefusedWithoutARequest() {
+        Money ten = Money.aed(new BigDecimal("10.00"));
+        generations.beginReservation(LOAN, 0);
+        generations.reservationAnswered(LOAN, 0, true);
+        generations.beginCompensation(LOAN, 0);
+        generations.releaseRefused(LOAN, 0, "RELEASE_EXCEEDS_RESERVATION");
+
+        assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, ten))
+            .isInstanceOf(CreditReservationNeedsOperatorException.class)
+            .isNotInstanceOf(CustomerCreditUnavailableException.class)
+            .satisfies(held -> assertThat(((CreditReservationNeedsOperatorException) held).getReason())
+                .isEqualTo("RELEASE_EXCEEDS_RESERVATION"));
+        assertThatThrownBy(() -> adapter.releaseUnusedReservation(LOAN, CUSTOMER, ten))
+            .isInstanceOf(CreditReservationNeedsOperatorException.class);
+        // the cancellation of the failed disbursement finds nothing outstanding at the new generation
+        assertThat(adapter.cancelReservation(LOAN, CUSTOMER, ten)).isEqualTo(CreditDecision.ACCEPTED);
+        server.verify();
+    }
+
+    /** If the refusal could not be recorded the row is not parked: the release is re-sent, so retryable. */
+    @Test
+    void aRefusalThatWasNotRecordedStaysRetryable() {
+        Money ten = Money.aed(new BigDecimal("10.00"));
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY).contentType(MediaType.APPLICATION_JSON)
+                .body("{\"code\":\"RELEASE_EXCEEDS_RESERVATION\",\"message\":\"more than reserved\"}"));
+
+        adapter.reserveCredit(LOAN, CUSTOMER, ten);
+        generations.failRefusalWrites = true;
+        assertThatThrownBy(() -> adapter.releaseUnusedReservation(LOAN, CUSTOMER, ten))
+            .isInstanceOf(CustomerCreditUnavailableException.class)
+            .hasMessageContaining("RELEASE_EXCEEDS_RESERVATION");
+        assertThat(generations.releaseRefusedReason(LOAN)).isEmpty();
         server.verify();
     }
 
@@ -597,6 +644,7 @@ class CustomerProfileHttpAdapterTest {
         boolean failCompensationDone;
         boolean failReservationWrites;
         boolean failAnswers;
+        boolean failRefusalWrites;
 
         @Override
         public synchronized int current(LoanId loanId) {
@@ -733,6 +781,9 @@ class CustomerProfileHttpAdapterTest {
 
         @Override
         public synchronized void releaseRefused(LoanId loanId, int generation, String reason) {
+            if (failRefusalWrites) {
+                throw new IllegalStateException("database unavailable");
+            }
             refusals.put(loanId, reason);
         }
 

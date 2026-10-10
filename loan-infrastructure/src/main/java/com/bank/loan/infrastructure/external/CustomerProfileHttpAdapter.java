@@ -3,6 +3,7 @@ package com.bank.loan.infrastructure.external;
 import com.bank.loan.domain.port.out.CreditCurrencyMismatchException;
 import com.bank.loan.domain.port.out.CreditCustomerNotFoundException;
 import com.bank.loan.domain.port.out.CreditMovementRejectedException;
+import com.bank.loan.domain.port.out.CreditReservationNeedsOperatorException;
 import com.bank.loan.domain.port.out.CustomerCreditService;
 import com.bank.loan.domain.port.out.CustomerCreditUnavailableException;
 import com.bank.loan.domain.LoanId;
@@ -65,9 +66,12 @@ import java.util.regex.Pattern;
  *       {@link CreditCurrencyMismatchException}; 404 is
  *       {@link CreditCustomerNotFoundException}; 400 is
  *       {@link CreditMovementRejectedException} on a movement (non-retryable,
- *       422 in loan); anything else (400 on the position read, 401,
- *       403, other 422, 409 IDEMPOTENCY_KEY_REUSED, 5xx, timeout, no service
- *       token) is {@link CustomerCreditUnavailableException}.</li>
+ *       422 in loan); a loan whose compensating release was refused with
+ *       RELEASE_EXCEEDS_RESERVATION is {@link CreditReservationNeedsOperatorException}
+ *       (non-retryable, 409 in loan) until an operator resolves it;
+ *       anything else (400 on the position read, 401, 403, other 422, 409
+ *       IDEMPOTENCY_KEY_REUSED, 5xx, timeout, no service token) is
+ *       {@link CustomerCreditUnavailableException}.</li>
  *   <li>Currency: the credit position's {@code currency} is used; only if the
  *       provider leaves it out is the configured ledger currency assumed. A
  *       different currency is {@link CreditCurrencyMismatchException}, never
@@ -284,14 +288,21 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
      *   <li>422 RELEASE_EXCEEDS_RESERVATION: this service asked to release
      *       more than is held, a bug signal. The compensation stays pending
      *       with the code recorded, is never re-sent, and waits for an operator
-     *       (loan_credit_reservations_operator{reason="release_exceeds_reservation"}).</li>
+     *       (loan_credit_reservations_operator{reason="release_exceeds_reservation"}).
+     *       From the moment the code is recorded every caller (a disbursement
+     *       of the loan included) gets {@link CreditReservationNeedsOperatorException},
+     *       non-retryable (409 CREDIT_RESERVATION_HELD_FOR_OPERATOR), never
+     *       the retryable "customer service unavailable". If the code could
+     *       not be recorded the refusal stays retryable: the release is re-sent
+     *       and refused again.</li>
      * </ul>
      */
     private Compensation sendCompensation(LoanId loanId, CustomerId customerId, Money amount, int generation) {
         Optional<String> refused = generations.releaseRefusedReason(loanId);
         if (refused.isPresent()) {
-            throw new CustomerCreditUnavailableException("Release " + compensationKey(loanId, generation)
-                + " was refused with " + refused.get() + " and is left for an operator; not re-sent");
+            throw new CreditReservationNeedsOperatorException(refused.get(), "Release "
+                + compensationKey(loanId, generation) + " was refused with " + refused.get()
+                + " and is left for an operator; not re-sent");
         }
         Compensation outcome;
         try {
@@ -303,10 +314,15 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
                     generations.releaseRefused(loanId, generation, refusal.code());
                 } catch (RuntimeException notRecorded) {
                     refusal.addSuppressed(notRecorded);
+                    log.error("Customer service refused release {} with {}, and the refusal could not be recorded; "
+                        + "it is re-sent", compensationKey(loanId, generation), refusal.code());
+                    throw refusal;
                 }
                 log.error("Customer service refused release {} with {}: more than the loan's reservation; "
                     + "left for an operator", compensationKey(loanId, generation), refusal.code());
-                throw refusal;
+                throw new CreditReservationNeedsOperatorException(refusal.code(), "Release "
+                    + compensationKey(loanId, generation) + " was refused with " + refusal.code()
+                    + " and is left for an operator", refusal);
             }
             unmatchedReleases.increment();
             log.warn("Customer service holds no reservation for release {} ({}); nothing to release",

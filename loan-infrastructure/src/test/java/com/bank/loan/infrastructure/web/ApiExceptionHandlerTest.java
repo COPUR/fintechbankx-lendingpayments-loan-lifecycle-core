@@ -38,6 +38,27 @@ class ApiExceptionHandlerTest {
         assertThat(rejected.getBody().code()).isEqualTo("CREDIT_MOVEMENT_REJECTED");
     }
 
+    /**
+     * Review minor (CustomerProfileHttpAdapter sendCompensation): a loan whose
+     * credit reservation is held for an operator answers a non-retryable 409
+     * with its own code, never the retryable 503 CUSTOMER_SERVICE_UNAVAILABLE.
+     * Resolved the way Spring resolves it, so the most specific handler wins.
+     */
+    @Test
+    void aReservationHeldForAnOperatorIsANonRetryable409NotA503() throws Exception {
+        var held = new com.bank.loan.domain.port.out.CreditReservationNeedsOperatorException(
+            "RELEASE_EXCEEDS_RESERVATION", "Release LOAN-1:reserve:compensation was refused");
+        java.lang.reflect.Method method = new org.springframework.web.method.annotation.ExceptionHandlerMethodResolver(
+            ApiExceptionHandler.class).resolveMethod(held);
+
+        assertThat(method).as("a handler for CreditReservationNeedsOperatorException").isNotNull();
+        @SuppressWarnings("unchecked")
+        var response = (org.springframework.http.ResponseEntity<ApiExceptionHandler.ErrorResponse>) method.invoke(handler, held);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(response.getBody().code()).isEqualTo("CREDIT_RESERVATION_HELD_FOR_OPERATOR");
+        assertThat(response.getBody().message()).doesNotContain("retry").doesNotContain("LOAN-1");
+    }
+
     @Test
     void currencyMismatchAndUnknownCustomerAre422WithTheirOwnCodes() {
         var mismatch = handler.currencyMismatch(new CreditCurrencyMismatchException(

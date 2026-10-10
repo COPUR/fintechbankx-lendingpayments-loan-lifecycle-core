@@ -3,6 +3,7 @@ package com.bank.loan.infrastructure.web;
 import com.bank.loan.domain.port.out.CreditCurrencyMismatchException;
 import com.bank.loan.domain.port.out.CreditCustomerNotFoundException;
 import com.bank.loan.domain.port.out.CreditMovementRejectedException;
+import com.bank.loan.domain.port.out.CreditReservationNeedsOperatorException;
 import com.bank.loan.domain.port.out.CustomerCreditUnavailableException;
 import com.bank.loan.application.IdempotencyKeyReusedException;
 import com.bank.loan.application.InsufficientCreditException;
@@ -47,6 +48,20 @@ public class ApiExceptionHandler {
         log.warn("Customer service unavailable: {}", ex.getMessage());
         return error(HttpStatus.SERVICE_UNAVAILABLE, "CUSTOMER_SERVICE_UNAVAILABLE",
             "Customer credit could not be checked; retry later");
+    }
+
+    /**
+     * The loan's credit reservation is held for an operator (the customer
+     * service refused its compensating release with
+     * RELEASE_EXCEEDS_RESERVATION): nothing is sent for the loan until the
+     * operator procedure in the runbook (section 8) has run, so a retry gets
+     * the same answer. A 409, not the retryable 503.
+     */
+    @ExceptionHandler(CreditReservationNeedsOperatorException.class)
+    ResponseEntity<ErrorResponse> creditReservationHeldForOperator(CreditReservationNeedsOperatorException ex) {
+        log.warn("Credit reservation held for an operator ({}): {}", ex.getReason(), ex.getMessage());
+        return error(HttpStatus.CONFLICT, "CREDIT_RESERVATION_HELD_FOR_OPERATOR",
+            "The loan's credit reservation is held for an operator; the request cannot proceed until it is resolved");
     }
 
     /** Amounts in different currencies are never compared: an invalid request, not "insufficient credit". */

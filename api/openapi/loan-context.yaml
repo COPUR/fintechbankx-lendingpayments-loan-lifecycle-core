@@ -255,11 +255,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '409':
-          description: INVALID_LOAN_STATE (the loan is not in a state that allows this) or CONCURRENT_UPDATE (retry)
+          description: INVALID_LOAN_STATE (the loan is not in a state that allows this), CONCURRENT_UPDATE (retry) or CREDIT_RESERVATION_HELD_FOR_OPERATOR (the customer service refused to release an earlier reservation of this loan with RELEASE_EXCEEDS_RESERVATION; the loan stays APPROVED and nothing is reserved until an operator resolves it, so do not retry)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                creditReservationHeldForOperator:
+                  summary: The loan's credit reservation is held for an operator
+                  value:
+                    code: CREDIT_RESERVATION_HELD_FOR_OPERATOR
+                    message: The loan's credit reservation is held for an operator; the request cannot proceed until it is resolved
+                    interactionId: 6f1c2a9e-3b4d-4e8f-9a7b-1c2d3e4f5a6b
+                    timestamp: '2026-10-10T09:00:00Z'
         '422':
           description: INSUFFICIENT_CREDIT (the customer service refused the reservation; the loan stays APPROVED), CURRENCY_MISMATCH, CUSTOMER_NOT_FOUND or CREDIT_MOVEMENT_REJECTED (the customer service rejected the reservation as invalid; the loan stays APPROVED)
           content:
@@ -559,7 +567,8 @@ components:
           description: |-
             Stable machine-readable code: INVALID_REQUEST, FORBIDDEN, LOAN_NOT_FOUND, INVALID_LOAN_STATE,
             CONCURRENT_UPDATE, DUPLICATE_REQUEST, INSUFFICIENT_CREDIT, CURRENCY_MISMATCH, CUSTOMER_NOT_FOUND,
-            CREDIT_MOVEMENT_REJECTED, IDEMPOTENCY_KEY_REUSED, CUSTOMER_SERVICE_UNAVAILABLE, INTERNAL_ERROR.
+            CREDIT_MOVEMENT_REJECTED, CREDIT_RESERVATION_HELD_FOR_OPERATOR, IDEMPOTENCY_KEY_REUSED,
+            CUSTOMER_SERVICE_UNAVAILABLE, INTERNAL_ERROR.
         message:
           type: string
         interactionId:

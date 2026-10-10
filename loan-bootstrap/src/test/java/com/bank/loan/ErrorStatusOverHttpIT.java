@@ -6,6 +6,10 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.boot.test.mock.mockito.SpyBean;
+import com.bank.loan.domain.LoanId;
+import com.bank.loan.domain.port.out.CreditReservationNeedsOperatorException;
+import com.bank.loan.domain.port.out.CustomerCreditService;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.security.oauth2.jwt.Jwt;
@@ -22,7 +26,10 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.when;
 
 /**
@@ -52,6 +59,7 @@ class ErrorStatusOverHttpIT {
     @LocalServerPort int port;
     @MockBean JwtDecoder jwtDecoder;
     @MockBean KafkaTemplate<String, String> kafka;
+    @SpyBean CustomerCreditService customerCredit;
     @Autowired org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     private final HttpClient http = HttpClient.newHttpClient();
@@ -110,6 +118,31 @@ class ErrorStatusOverHttpIT {
         assertThat(get("/api/v1/loans").statusCode()).isEqualTo(405);
         assertThat(get("/api/v1/loans/LOAN-X/events").statusCode()).isEqualTo(404);
         assertThat(get("/api/v1/loans/LOAN-X/amortization-schedule").statusCode()).isEqualTo(404);
+    }
+
+    /**
+     * Review minor (CustomerProfileHttpAdapter sendCompensation): a loan whose
+     * credit reservation is held for an operator answers 409
+     * CREDIT_RESERVATION_HELD_FOR_OPERATOR, not the retryable 503.
+     */
+    @Test
+    void aDisbursementOfALoanHeldForAnOperatorIsA409NotA503() throws Exception {
+        PostgresTestDatabase.owner().update("insert into sc_ln_loan_lifecycle.loan (loan_id, customer_id, principal_amount,"
+            + " currency, annual_interest_rate, term_months, status, application_date, outstanding_balance, created_at, updated_at)"
+            + " values ('LOAN-HELD-1', 'CUST-12345678', 12000.0000, 'AED', 6.0, 12, 'APPROVED', current_date, 12000.0000, now(), now())");
+        doThrow(new CreditReservationNeedsOperatorException("RELEASE_EXCEEDS_RESERVATION",
+                "Release LOAN-HELD-1:reserve:compensation was refused with RELEASE_EXCEEDS_RESERVATION"))
+            .when(customerCredit).reserveCredit(eq(LoanId.of("LOAN-HELD-1")), any(), any());
+        when(jwtDecoder.decode(anyString())).thenReturn(Jwt.withTokenValue("t").header("alg", "RS256")
+            .subject("0b6f2c1e-4f7a-4d0e-8c55-6a3e2d9b1f70")
+            .claim("realm_access", Map.of("roles", List.of("banker")))
+            .issuedAt(Instant.now()).expiresAt(Instant.now().plusSeconds(300)).build());
+
+        HttpResponse<String> response = post("/api/v1/loans/LOAN-HELD-1/disburse", "application/json", "");
+
+        assertThat(response.statusCode()).isEqualTo(409);
+        assertThat(response.body()).contains("\"code\":\"CREDIT_RESERVATION_HELD_FOR_OPERATOR\"")
+            .doesNotContain("retry").doesNotContain("LOAN-HELD-1:reserve");
     }
 
     private HttpResponse<String> get(String path) throws Exception {

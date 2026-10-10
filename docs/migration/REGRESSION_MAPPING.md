@@ -25,7 +25,7 @@ endpoints are listed last; the service does not provide them.
 | GET | `/api/v1/loans/{loanId}` | same | none | as above | 403 when a customer reads another customer's loan (monolith: 200); roles also LOAN_OFFICER, SERVICE |
 | POST | `/api/v1/loans/{loanId}/approve` | same | none | as above | 409 `INVALID_LOAN_STATE` (monolith: 500) |
 | POST | `/api/v1/loans/{loanId}/reject` | same | `reason` optional, max 500 | as above | 409 `INVALID_LOAN_STATE` |
-| POST | `/api/v1/loans/{loanId}/disburse` | same | none | as above | 422 `INSUFFICIENT_CREDIT` (loan stays APPROVED), 409, 503 |
+| POST | `/api/v1/loans/{loanId}/disburse` | same | none | as above | 422 `INSUFFICIENT_CREDIT` (loan stays APPROVED), 409 (`INVALID_LOAN_STATE`, `CONCURRENT_UPDATE`, `CREDIT_RESERVATION_HELD_FOR_OPERATOR`: the loan's reservation waits for an operator, do not retry), 503 |
 | POST | `/api/v1/loans/{loanId}/payments` | same | `amount` > 0 and `currency` (`^[A-Z]{3}$`, the loan's) required; optional header `x-idempotency-key` (max 128) | `outstandingBalance` falls by the amount paid, allocated interest first in installment order | 400 non-positive / over the balance / wrong currency; 403 other customer; 422 `IDEMPOTENCY_KEY_REUSED`; 409 `DUPLICATE_REQUEST` |
 | POST | `/api/v1/loans/{loanId}/cancel` | same | `reason` optional, max 500 | as above | 403 other customer; 409 `INVALID_LOAN_STATE` |
 | GET | `/api/v1/loans` (enhanced) | not provided | | | 405 (only POST on this path) |
