@@ -150,6 +150,39 @@ class CreditReservationSweepTest {
         verify(generations, never()).beginCompensationOfUnanswered(eq(LoanId.of("LOAN-SWEEP-PENDING")), org.mockito.ArgumentMatchers.anyInt(), any());
     }
 
+    /**
+     * Round 5 item B (customer CRC): a release by reference that the customer
+     * service answers 422 RESERVATION_NOT_FOUND means nothing is held under the
+     * reference, which includes a reservation that already holds 0 (released
+     * earlier, for example under an earlier generation's key). The sweep treats
+     * it as already released in both modes: the outcome is counted as
+     * nothingHeld, the row is not left for an operator and the release is not
+     * retried. Here with the default switch, so the rows are an accepted
+     * reservation and a pending compensation, the two kinds the sweep releases
+     * whatever the switch.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void aReleaseAnsweredReservationNotFoundCountsAsAlreadyReleasedWhateverTheReservationHolds() {
+        Instant before = NOW.minus(Duration.ofMinutes(10));
+        when(lock.runExclusively(any())).thenAnswer(invocation -> Optional.ofNullable(((Supplier<Object>) invocation.getArgument(0)).get()));
+        when(generations.unresolved(before, 50, false)).thenReturn(List.of(
+            row("LOAN-SWEEP-ZERO-HELD", 1, State.RESERVED, null),
+            row("LOAN-SWEEP-ZERO-PENDING", 2, null, 1)));
+        // 422 RESERVATION_NOT_FOUND: the reservation under the reference holds 0 (or never existed)
+        when(credit.releaseUnusedReservation(eq(LoanId.of("LOAN-SWEEP-ZERO-HELD")), any(), any())).thenReturn(UnusedReservation.NONE);
+        when(credit.releaseUnusedReservation(eq(LoanId.of("LOAN-SWEEP-ZERO-PENDING")), any(), any())).thenReturn(UnusedReservation.NONE);
+
+        CreditReservationSweep.Result result = skippingUnanswered.sweepOnce();
+
+        assertThat(result).isEqualTo(new CreditReservationSweep.Result(true, 0, 2, 0, 0));
+        verify(credit).releaseUnusedReservation(LoanId.of("LOAN-SWEEP-ZERO-HELD"), CUSTOMER, PRINCIPAL);
+        verify(credit).releaseUnusedReservation(LoanId.of("LOAN-SWEEP-ZERO-PENDING"), CUSTOMER, PRINCIPAL);
+        // nothing is marked for an operator and no new intent is recorded: the adapter has already cleared the row
+        verify(generations, never()).markUnconfirmed(any(), org.mockito.ArgumentMatchers.anyInt(), any());
+        verify(generations, never()).beginCompensationOfUnanswered(any(), org.mockito.ArgumentMatchers.anyInt(), any());
+    }
+
     @Test
     void doesNothingWhileAnotherReplicaSweeps() {
         when(lock.runExclusively(any())).thenReturn(Optional.empty());
