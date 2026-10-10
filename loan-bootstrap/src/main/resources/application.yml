@@ -155,20 +155,26 @@ loan:
     sweep:
       # Review 5460235552: re-drives credit reservations of never-disbursed loans
       # that a crash, a failed disbursement or an abandoned loan left behind
-      # (pending releases, accepted reservations, and reserves that were never
-      # answered), releasing each by its reference (the loan id) once the grace
-      # period has passed. Needs the customer service's 422
-      # RESERVATION_NOT_FOUND for an unknown reference (customer-profile-kyc-core
-      # PR #13 a6ebe01) to be live first. The grace must outlast max-attempts x
-      # (connect-timeout + read-timeout) or the service does not start.
-      # One replica at a time (advisory lock); runs at start-up, then after
-      # each interval. Gauges: loan_credit_reservations_pending,
-      # loan_credit_reservations_operator{reason="release_exceeds_reservation"}.
-      # The chart sets all three (values.yaml config); see runbook section 8.
+      # (pending releases and accepted reservations), releasing each by its
+      # reference (the loan id) once the grace period has passed. One replica
+      # at a time (advisory lock); runs at start-up, then after each interval.
+      # Gauges: loan_credit_reservations_pending,
+      # loan_credit_reservations_operator{reason}. The chart sets all four
+      # (values.yaml config); see runbook section 8.
       enabled: ${CREDIT_RESERVATION_SWEEP_ENABLED:true}
       interval: ${CREDIT_RESERVATION_SWEEP_INTERVAL:PT1M}
       grace: ${CREDIT_RESERVATION_SWEEP_GRACE:PT10M}
       batch-size: 50
+      # What the sweep does with a reserve that was sent but never answered
+      # (RESERVING past the grace period). false: it is marked UNCONFIRMED and
+      # left for an operator (loan_credit_reservations_operator{reason="unconfirmed"}),
+      # never released blind. true: it is released by its reference, which needs
+      # the customer service's 422 RESERVATION_NOT_FOUND for an unknown reference
+      # (customer-profile-kyc-core PR #13 a6ebe01 or later) to be live first; the
+      # grace must then outlast max-attempts x (connect-timeout + read-timeout)
+      # or the service does not start. Turned on per environment only after #13
+      # is deployed there (runbook section 8).
+      release-unanswered: ${CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED:false}
   outbox:
     retention: P7D
     relay:

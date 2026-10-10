@@ -38,6 +38,8 @@ public class JdbcReservationGenerations implements ReservationGenerations {
         .collect(Collectors.joining(", "));
 
     private static final String OUTSTANDING = "('RESERVING', 'RESERVED', 'UNCONFIRMED')";
+    /** What the sweep reads while release-unanswered is off: UNCONFIRMED rows belong to an operator. */
+    private static final String SWEPT_WITHOUT_UNCONFIRMED = "('RESERVING', 'RESERVED')";
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate newTransaction;
@@ -168,7 +170,7 @@ public class JdbcReservationGenerations implements ReservationGenerations {
     }
 
     @Override
-    public List<Unresolved> unresolved(Instant before, int limit) {
+    public List<Unresolved> unresolved(Instant before, int limit, boolean includeUnconfirmed) {
         return jdbc.query("""
             select r.loan_id, r.generation, r.reservation_state, r.pending_compensation, r.updated_at,
                    l.customer_id, l.principal_amount, l.currency
@@ -179,10 +181,27 @@ public class JdbcReservationGenerations implements ReservationGenerations {
                and r.updated_at < ?
              order by r.updated_at
              limit ?
-            """.formatted(NEVER_DISBURSED, OUTSTANDING), (rs, row) -> new Unresolved(reservation(rs, row),
+            """.formatted(NEVER_DISBURSED, includeUnconfirmed ? OUTSTANDING : SWEPT_WITHOUT_UNCONFIRMED),
+            (rs, row) -> new Unresolved(reservation(rs, row),
                 CustomerId.of(rs.getString("customer_id")),
                 Money.of(rs.getBigDecimal("principal_amount"), Currency.getInstance(rs.getString("currency")))),
             Timestamp.from(before), limit);
+    }
+
+    @Override
+    public boolean markUnconfirmed(LoanId loanId, int generation, Instant before) {
+        Integer updated = newTransaction.execute(status -> jdbc.update("""
+            update credit_reservation_generation set reservation_state = 'UNCONFIRMED', updated_at = now()
+             where loan_id = ? and generation = ? and reservation_state = 'RESERVING' and updated_at < ?
+            """, loanId.getValue(), generation, Timestamp.from(before)));
+        return updated != null && updated > 0;
+    }
+
+    @Override
+    public long countUnconfirmed() {
+        Long count = jdbc.queryForObject(
+            "select count(*) from credit_reservation_generation where reservation_state = 'UNCONFIRMED'", Long.class);
+        return count == null ? 0 : count;
     }
 
     @Override

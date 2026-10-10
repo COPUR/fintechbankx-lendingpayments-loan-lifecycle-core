@@ -37,13 +37,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>Customer CRC decision 2026-10-10 (customer PR #13 commit a6ebe01): a
  * release whose reference matches no reservation is always 422
- * RESERVATION_NOT_FOUND, so on start-up the sweep releases every one of
- * them under its compensation key with the loan id as reference: accepted
- * means released; RESERVATION_NOT_FOUND means the reserve was never applied
- * and the row is cleared (loan_credit_releases_unmatched_total);
- * RELEASE_EXCEEDS_RESERVATION leaves the row for an operator
+ * RESERVATION_NOT_FOUND, so with CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED
+ * on (the environment has #13 deployed) the sweep releases every one of them
+ * on start-up under its compensation key with the loan id as reference:
+ * accepted means released; RESERVATION_NOT_FOUND means the reserve was never
+ * applied, or holds nothing any more, and the row is cleared
+ * (loan_credit_releases_unmatched_total); RELEASE_EXCEEDS_RESERVATION leaves
+ * the row for an operator
  * (loan_credit_reservations_operator{reason="release_exceeds_reservation"}).
- * Nothing is left UNCONFIRMED, and the disbursed loan is left alone.
+ * Nothing is left UNCONFIRMED, the reason="unconfirmed" gauge is not
+ * exported, and the disbursed loan is left alone. The default (the flag off)
+ * is covered by CreditReservationSweepTest and ReservationGenerationsPostgresIT.
  */
 @SpringBootTest(properties = {
     "loan.customer-credit.adapter=http",
@@ -51,6 +55,7 @@ import static org.assertj.core.api.Assertions.assertThat;
     "loan.outbox.relay.enabled=false",
     "loan.credit-reservation.sweep.grace=PT10S",
     "loan.credit-reservation.sweep.interval=PT1S",
+    "loan.credit-reservation.sweep.release-unanswered=true",
     "spring.security.oauth2.client.registration.customer-service.client-secret=stub",
     "spring.datasource.hikari.data-source-properties.ApplicationName=loan-recovery-it"
 })

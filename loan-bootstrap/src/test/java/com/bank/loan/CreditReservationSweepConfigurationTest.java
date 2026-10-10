@@ -17,8 +17,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * The credit reservation recovery sweep (CreditReservationSweep) is driven by
  * loan.credit-reservation.sweep.*; the chart's ConfigMap sets
- * CREDIT_RESERVATION_SWEEP_ENABLED, _INTERVAL and _GRACE, so an operator can
- * switch the sweep off or retune it without a new image.
+ * CREDIT_RESERVATION_SWEEP_ENABLED, _INTERVAL, _GRACE and
+ * _RELEASE_UNANSWERED, so an operator can switch the sweep off, retune it, or
+ * turn the release of unanswered reserves on without a new image.
  */
 class CreditReservationSweepConfigurationTest {
 
@@ -29,18 +30,22 @@ class CreditReservationSweepConfigurationTest {
         assertThat(env.bind("loan.credit-reservation.sweep.enabled", Boolean.class).get()).isTrue();
         assertThat(env.bind("loan.credit-reservation.sweep.interval", Duration.class).get()).isEqualTo(Duration.ofMinutes(1));
         assertThat(env.bind("loan.credit-reservation.sweep.grace", Duration.class).get()).isEqualTo(Duration.ofMinutes(10));
+        // Off until customer-profile-kyc-core #13 (a6ebe01 or later) is deployed: unanswered reserves wait for an operator.
+        assertThat(env.bind("loan.credit-reservation.sweep.release-unanswered", Boolean.class).get()).isFalse();
     }
 
     @Test
-    void theChartOverridesEnabledIntervalAndGrace() throws Exception {
+    void theChartOverridesEnabledIntervalGraceAndReleaseUnanswered() throws Exception {
         Binder env = binder(Map.of(
             "CREDIT_RESERVATION_SWEEP_ENABLED", "false",
             "CREDIT_RESERVATION_SWEEP_INTERVAL", "PT5M",
-            "CREDIT_RESERVATION_SWEEP_GRACE", "PT30M"));
+            "CREDIT_RESERVATION_SWEEP_GRACE", "PT30M",
+            "CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED", "true"));
 
         assertThat(env.bind("loan.credit-reservation.sweep.enabled", Boolean.class).get()).isFalse();
         assertThat(env.bind("loan.credit-reservation.sweep.interval", Duration.class).get()).isEqualTo(Duration.ofMinutes(5));
         assertThat(env.bind("loan.credit-reservation.sweep.grace", Duration.class).get()).isEqualTo(Duration.ofMinutes(30));
+        assertThat(env.bind("loan.credit-reservation.sweep.release-unanswered", Boolean.class).get()).isTrue();
     }
 
     private static Binder binder(Map<String, Object> podEnv) throws Exception {

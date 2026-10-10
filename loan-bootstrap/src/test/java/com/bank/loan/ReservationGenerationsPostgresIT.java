@@ -123,12 +123,57 @@ class ReservationGenerationsPostgresIT {
         owner.update("update " + SCHEMA + ".credit_reservation_generation set pending_compensation = 0,"
             + " release_refused_code = 'RELEASE_EXCEEDS_RESERVATION' where loan_id = 'LOAN-PGR-U6'");
 
-        List<String> seen = generations.unresolved(Instant.now().minusSeconds(600), 50).stream()
+        List<String> seen = generations.unresolved(Instant.now().minusSeconds(600), 50, true).stream()
             .map(row -> row.reservation().loanId().getValue())
             .filter(id -> id.startsWith("LOAN-PGR-"))
             .toList();
 
         assertThat(seen).containsExactlyInAnyOrder("LOAN-PGR-U1", "LOAN-PGR-U2", "LOAN-PGR-U3", "LOAN-PGR-U4");
+    }
+
+    /**
+     * CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED=false (the default): the
+     * sweep does not read UNCONFIRMED rows (they belong to an operator), marks
+     * a stale RESERVING row UNCONFIRMED once and leaves a row a disbursement
+     * retry refreshed alone; the operator gauge counts the UNCONFIRMED rows,
+     * and a retried reserve takes such a row back to RESERVING.
+     */
+    @Test
+    void withoutReleaseUnansweredStaleReservesAreMarkedUnconfirmedAndLeftToAnOperator() {
+        Instant before = Instant.now().minusSeconds(600);
+        row("LOAN-PGR-M-STALE", 0, "RESERVING", "1 hour");
+        row("LOAN-PGR-M-FRESH", 0, "RESERVING", "1 second");
+        row("LOAN-PGR-M-ACCEPTED", 0, "RESERVED", "1 hour");
+        row("LOAN-PGR-M-LEGACY", 1, "UNCONFIRMED", "1 hour");
+        long unconfirmedBefore = generations.countUnconfirmed();
+
+        assertThat(unresolvedOf("LOAN-PGR-M-", before, false)).containsExactlyInAnyOrder("LOAN-PGR-M-STALE", "LOAN-PGR-M-ACCEPTED");
+        assertThat(unresolvedOf("LOAN-PGR-M-", before, true)).contains("LOAN-PGR-M-LEGACY");
+
+        assertThat(generations.markUnconfirmed(LoanId.of("LOAN-PGR-M-STALE"), 0, before)).isTrue();
+        assertThat(generations.markUnconfirmed(LoanId.of("LOAN-PGR-M-STALE"), 0, before)).isFalse();
+        assertThat(generations.markUnconfirmed(LoanId.of("LOAN-PGR-M-FRESH"), 0, before)).isFalse();
+        assertThat(generations.markUnconfirmed(LoanId.of("LOAN-PGR-M-ACCEPTED"), 0, before)).isFalse();
+        assertThat(generations.markUnconfirmed(LoanId.of("LOAN-PGR-M-LEGACY"), 1, before)).isFalse();
+
+        assertThat(generations.find(LoanId.of("LOAN-PGR-M-STALE")).orElseThrow())
+            .extracting(ReservationGenerations.Reservation::generation, ReservationGenerations.Reservation::state,
+                ReservationGenerations.Reservation::pendingCompensation)
+            .containsExactly(0, State.UNCONFIRMED, null);
+        assertThat(generations.countUnconfirmed()).isEqualTo(unconfirmedBefore + 1);
+        // the marked row has left the sweep's view; nothing else changed
+        assertThat(unresolvedOf("LOAN-PGR-M-", before, false)).containsExactly("LOAN-PGR-M-ACCEPTED");
+        assertThat(generations.find(LoanId.of("LOAN-PGR-M-FRESH")).orElseThrow().state()).isEqualTo(State.RESERVING);
+
+        generations.beginReservation(LoanId.of("LOAN-PGR-M-STALE"), 0);
+        assertThat(generations.find(LoanId.of("LOAN-PGR-M-STALE")).orElseThrow().state()).isEqualTo(State.RESERVING);
+    }
+
+    private static List<String> unresolvedOf(String prefix, Instant before, boolean includeUnconfirmed) {
+        return generations.unresolved(before, 50, includeUnconfirmed).stream()
+            .map(row -> row.reservation().loanId().getValue())
+            .filter(id -> id.startsWith(prefix))
+            .toList();
     }
 
     private static void row(String loanId, int generation, String state, String age) {

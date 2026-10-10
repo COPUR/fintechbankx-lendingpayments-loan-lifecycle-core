@@ -146,6 +146,8 @@ jobs:
           grep -q 'CREDIT_RESERVATION_SWEEP_ENABLED: "true"' <<<"$rendered"
           grep -q 'CREDIT_RESERVATION_SWEEP_INTERVAL: "PT1M"' <<<"$rendered"
           grep -q 'CREDIT_RESERVATION_SWEEP_GRACE: "PT10M"' <<<"$rendered"
+          # Unanswered reserves are left for an operator until the customer release by reference is live.
+          grep -q 'CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED: "false"' <<<"$rendered"
           # A missing required setting must stop the render.
           if helm template ci "$chart" --set image.repository=ci/x --set image.tag=ci > /dev/null 2>&1; then
             echo "chart rendered without its required settings" >&2

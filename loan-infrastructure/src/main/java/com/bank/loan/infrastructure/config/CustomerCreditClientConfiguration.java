@@ -79,16 +79,12 @@ public class CustomerCreditClientConfiguration {
 
     /**
      * Reservations left for an operator (loan_credit_reservations_operator),
-     * one reason only: reason="release_exceeds_reservation", the customer
-     * service refused a release (a compensation, or the sweep's release of a
-     * reserve that was never answered) as more than the loan's reservation
-     * holds. Alert on any value above zero.
-     *
-     * <p>The reason "unconfirmed" is gone (customer CRC decision 2026-10-10):
-     * a reserve that was never answered is no longer left for an operator;
-     * the recovery sweep releases it by its reference. A row the sweep cannot
-     * settle stays a pending release and shows in
-     * loan_credit_reservations_pending.
+     * reason="release_exceeds_reservation": the customer service refused a
+     * release (a compensation, or the sweep's release of a reserve that was
+     * never answered) as more than the loan's reservation holds. Alert on any
+     * value above zero. The other reason, "unconfirmed", is exported by
+     * {@link SweepConfiguration#creditReservationsUnconfirmedGauge} only while
+     * release-unanswered is off.
      */
     @Bean
     Gauge creditReleasesRefusedGauge(MeterRegistry registry, ReservationGenerations reservationGenerations) {
@@ -160,9 +156,12 @@ public class CustomerCreditClientConfiguration {
      * Review 5460235552: the recovery sweep. On by default
      * (CREDIT_RESERVATION_SWEEP_ENABLED); runs at start-up and then
      * loan.credit-reservation.sweep.interval after the previous run ended.
-     * It releases unanswered reserves by reference, which needs the customer
-     * service's 422 RESERVATION_NOT_FOUND for an unknown reference
-     * (customer-profile-kyc-core PR #13 commit a6ebe01) deployed first.
+     * Whether it releases unanswered reserves by reference is a separate
+     * switch, loan.credit-reservation.sweep.release-unanswered
+     * (CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED, off by default): that path
+     * needs the customer service's 422 RESERVATION_NOT_FOUND for an unknown
+     * reference (customer-profile-kyc-core PR #13 commit a6ebe01) deployed
+     * first; off, such reserves are marked UNCONFIRMED for an operator.
      */
     @Configuration
     @EnableScheduling
@@ -177,12 +176,31 @@ public class CustomerCreditClientConfiguration {
                                                       JdbcTemplate jdbc, Clock clock,
                                                       @Value("${loan.credit-reservation.sweep.grace:PT10M}") Duration grace,
                                                       @Value("${loan.credit-reservation.sweep.batch-size:50}") int batchSize,
+                                                      @Value("${loan.credit-reservation.sweep.release-unanswered:false}") boolean releaseUnanswered,
                                                       @Value("${loan.customer-credit.connect-timeout:PT1S}") Duration connectTimeout,
                                                       @Value("${loan.customer-credit.read-timeout:PT2S}") Duration readTimeout,
                                                       @Value("${loan.customer-credit.max-attempts:3}") int maxAttempts) {
             checkGrace(grace, connectTimeout, readTimeout, maxAttempts);
             return new CreditReservationSweep(reservationGenerations, customerCreditService,
-                new PostgresAdvisoryLock(jdbc, CreditReservationSweep.SWEEP_LOCK_KEY), clock, grace, batchSize);
+                new PostgresAdvisoryLock(jdbc, CreditReservationSweep.SWEEP_LOCK_KEY), clock, grace, batchSize,
+                releaseUnanswered);
+        }
+
+        /**
+         * loan_credit_reservations_operator{reason="unconfirmed"}: reserves
+         * sent but never answered that the sweep marked UNCONFIRMED instead of
+         * releasing blind (runbook section 8). Alert on any value above zero.
+         * Exported only while release-unanswered is off, whether or not the
+         * sweep itself runs; with release-unanswered on nothing is left
+         * UNCONFIRMED any more and the series goes.
+         */
+        @Bean
+        @ConditionalOnProperty(name = "loan.credit-reservation.sweep.release-unanswered", havingValue = "false", matchIfMissing = true)
+        Gauge creditReservationsUnconfirmedGauge(MeterRegistry registry, ReservationGenerations reservationGenerations) {
+            return Gauge.builder(OPERATOR_GAUGE, reservationGenerations, ReservationGenerations::countUnconfirmed)
+                .tag("reason", "unconfirmed")
+                .description("Credit reservations an operator must resolve")
+                .register(registry);
         }
 
         @Bean

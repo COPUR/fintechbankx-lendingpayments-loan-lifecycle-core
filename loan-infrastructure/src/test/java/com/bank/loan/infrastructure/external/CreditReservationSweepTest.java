@@ -44,23 +44,72 @@ class CreditReservationSweepTest {
     private final ReservationGenerations generations = mock(ReservationGenerations.class);
     private final CustomerCreditService credit = mock(CustomerCreditService.class);
     private final PostgresAdvisoryLock lock = mock(PostgresAdvisoryLock.class);
+    /** loan.credit-reservation.sweep.release-unanswered=true: the release-by-reference path. */
     private final CreditReservationSweep sweep = new CreditReservationSweep(generations, credit, lock,
-        Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofMinutes(10), 50);
+        Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofMinutes(10), 50, true);
+    /** The default: unanswered reserves are left for an operator, never released blind. */
+    private final CreditReservationSweep skippingUnanswered = new CreditReservationSweep(generations, credit, lock,
+        Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofMinutes(10), 50, false);
+
+    /**
+     * With loan.credit-reservation.sweep.release-unanswered=false (the
+     * default, CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED) the sweep keeps the
+     * behaviour from before the release by reference: a reserve that was sent
+     * but never answered is never released blind. A RESERVING row past the
+     * grace period is marked UNCONFIRMED and left for an operator (counted in
+     * loan_credit_reservations_operator{reason="unconfirmed"}); a row a
+     * disbursement retry refreshed meanwhile is neither marked nor counted.
+     * UNCONFIRMED rows are not read from the database at all, and one that
+     * turns up is left alone. Pending compensations and accepted reservations
+     * are released as before, under CREDIT_RESERVATION_SWEEP_ENABLED alone.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void withReleaseUnansweredOffAnUnansweredReserveIsLeftForAnOperatorAndTheRestIsReleased() {
+        Instant before = NOW.minus(Duration.ofMinutes(10));
+        when(lock.runExclusively(any())).thenAnswer(invocation -> Optional.ofNullable(((Supplier<Object>) invocation.getArgument(0)).get()));
+        when(generations.unresolved(before, 50, false)).thenReturn(List.of(
+            row("LOAN-SWEEP-PENDING", 1, null, 0),
+            row("LOAN-SWEEP-HELD", 0, State.RESERVED, null),
+            row("LOAN-SWEEP-UNKNOWN", 0, State.RESERVING, null),
+            row("LOAN-SWEEP-RACED", 0, State.RESERVING, null),
+            row("LOAN-SWEEP-LEGACY", 0, State.UNCONFIRMED, null)));
+        when(credit.releaseUnusedReservation(eq(LoanId.of("LOAN-SWEEP-PENDING")), any(), any())).thenReturn(UnusedReservation.RELEASED);
+        when(credit.releaseUnusedReservation(eq(LoanId.of("LOAN-SWEEP-HELD")), any(), any())).thenReturn(UnusedReservation.RELEASED);
+        when(generations.markUnconfirmed(LoanId.of("LOAN-SWEEP-UNKNOWN"), 0, before)).thenReturn(true);
+        // a disbursement retry re-sent the reserve meanwhile (the row is no longer stale)
+        when(generations.markUnconfirmed(LoanId.of("LOAN-SWEEP-RACED"), 0, before)).thenReturn(false);
+
+        CreditReservationSweep.Result result = skippingUnanswered.sweepOnce();
+
+        assertThat(result).isEqualTo(new CreditReservationSweep.Result(true, 2, 0, 2, 0));
+        verify(credit).releaseUnusedReservation(LoanId.of("LOAN-SWEEP-PENDING"), CUSTOMER, PRINCIPAL);
+        verify(credit).releaseUnusedReservation(LoanId.of("LOAN-SWEEP-HELD"), CUSTOMER, PRINCIPAL);
+        verify(credit, never()).releaseUnusedReservation(eq(LoanId.of("LOAN-SWEEP-UNKNOWN")), any(), any());
+        verify(credit, never()).releaseUnusedReservation(eq(LoanId.of("LOAN-SWEEP-RACED")), any(), any());
+        verify(credit, never()).releaseUnusedReservation(eq(LoanId.of("LOAN-SWEEP-LEGACY")), any(), any());
+        verify(generations, never()).markUnconfirmed(eq(LoanId.of("LOAN-SWEEP-LEGACY")), org.mockito.ArgumentMatchers.anyInt(), any());
+        verify(generations, never()).beginCompensationOfUnanswered(any(), org.mockito.ArgumentMatchers.anyInt(), any());
+        verify(generations, never()).unresolved(any(), org.mockito.ArgumentMatchers.anyInt(), eq(true));
+        assertThat(skippingUnanswered.releasesUnanswered()).isFalse();
+        assertThat(sweep.releasesUnanswered()).isTrue();
+    }
 
     /**
      * Customer CRC decision 2026-10-10: a release whose reference matches no
      * reservation is always 422 RESERVATION_NOT_FOUND and never touches
-     * untracked credit, so a reserve that was sent but never answered is
-     * released by its reference once the grace period has passed (no blind
-     * skip, no UNCONFIRMED for an operator). The sweep records the intent
-     * (compare-and-set on the row's age) before the release is sent.
+     * untracked credit, so with release-unanswered=true a reserve that was
+     * sent but never answered is released by its reference once the grace
+     * period has passed (no blind skip, no UNCONFIRMED for an operator). The
+     * sweep records the intent (compare-and-set on the row's age) before the
+     * release is sent.
      */
     @Test
     @SuppressWarnings("unchecked")
     void releasesRecordedAndUnansweredReservationsByReferenceAndCarriesOnAfterAFailure() {
         Instant before = NOW.minus(Duration.ofMinutes(10));
         when(lock.runExclusively(any())).thenAnswer(invocation -> Optional.ofNullable(((Supplier<Object>) invocation.getArgument(0)).get()));
-        when(generations.unresolved(before, 50)).thenReturn(List.of(
+        when(generations.unresolved(before, 50, true)).thenReturn(List.of(
             row("LOAN-SWEEP-PENDING", 1, null, 0),
             row("LOAN-SWEEP-HELD", 0, State.RESERVED, null),
             row("LOAN-SWEEP-DOWN", 0, State.RESERVED, null),
@@ -106,7 +155,7 @@ class CreditReservationSweepTest {
         when(lock.runExclusively(any())).thenReturn(Optional.empty());
 
         assertThat(sweep.sweepOnce().ran()).isFalse();
-        verify(generations, never()).unresolved(any(), eq(50));
+        verify(generations, never()).unresolved(any(), eq(50), org.mockito.ArgumentMatchers.anyBoolean());
     }
 
     @Test

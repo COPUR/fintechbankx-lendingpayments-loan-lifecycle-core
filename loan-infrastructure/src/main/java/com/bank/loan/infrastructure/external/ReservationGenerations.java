@@ -24,12 +24,17 @@ import java.util.OptionalInt;
  * <p>Review 5460235552: the reservation itself is recorded too, before it is
  * sent ({@link State}). On the request path a release is only sent for a
  * reservation known to be accepted. A reserve that was sent but never
- * answered is released by the recovery sweep only, by its reference, once the
- * grace period has passed ({@link #beginCompensationOfUnanswered}). That
- * relies on the customer service refusing a release whose reference matches
- * no reservation (422 RESERVATION_NOT_FOUND, customer CRC decision
- * 2026-10-10, customer-profile-kyc-core PR #13 commit a6ebe01, not merged
- * yet); before it, such a release could free untracked or migrated credit.
+ * answered is handled by the recovery sweep only, once the grace period has
+ * passed, in one of two ways chosen by
+ * {@code loan.credit-reservation.sweep.release-unanswered}
+ * (CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED): off (the default), the row is
+ * marked UNCONFIRMED for an operator ({@link #markUnconfirmed}) and never
+ * released blind; on, it is released by its reference
+ * ({@link #beginCompensationOfUnanswered}). The latter relies on the customer
+ * service refusing a release whose reference matches no reservation (422
+ * RESERVATION_NOT_FOUND, customer CRC decision 2026-10-10,
+ * customer-profile-kyc-core PR #13 commit a6ebe01, not merged yet); before
+ * it, such a release could free untracked or migrated credit.
  */
 public interface ReservationGenerations {
 
@@ -40,10 +45,10 @@ public interface ReservationGenerations {
         /** The customer service accepted the reserve; no disbursement uses it yet. */
         RESERVED,
         /**
-         * No longer written. Earlier releases marked a reserve that stayed
-         * RESERVING past the grace period UNCONFIRMED for an operator; such rows
-         * are now treated like RESERVING ones: a retried reserve makes them
-         * RESERVING again, and the recovery sweep releases them by reference.
+         * Was RESERVING past the grace period while release-unanswered is off:
+         * an operator must find out whether it was applied (runbook section 8).
+         * A retried reserve makes the row RESERVING again; with
+         * release-unanswered on, the recovery sweep releases it by reference.
          */
         UNCONFIRMED,
         /** The disbursement that uses the reservation committed. */
@@ -122,11 +127,24 @@ public interface ReservationGenerations {
 
     /**
      * Rows of never-disbursed loans with a pending compensation or an
-     * outstanding reservation (RESERVING, RESERVED, UNCONFIRMED), unchanged
+     * outstanding reservation (RESERVING, RESERVED, and UNCONFIRMED only when
+     * {@code includeUnconfirmed}: with release-unanswered on, the sweep
+     * settles them by reference; off, they belong to an operator), unchanged
      * since {@code before}, oldest first; rows left for an operator after a
      * refused release are not included.
      */
-    List<Unresolved> unresolved(Instant before, int limit);
+    List<Unresolved> unresolved(Instant before, int limit, boolean includeUnconfirmed);
+
+    /**
+     * Recovery sweep with release-unanswered off, in its own transaction: a
+     * RESERVING row of {@code generation} unchanged since {@code before} (the
+     * grace period) becomes UNCONFIRMED for an operator. False, and nothing
+     * changes, if the row moved on meanwhile (answered, retried, compensated).
+     */
+    boolean markUnconfirmed(LoanId loanId, int generation, Instant before);
+
+    /** Reserves left for an operator as UNCONFIRMED (gauge reason="unconfirmed"). */
+    long countUnconfirmed();
 
     /**
      * In its own transaction: the customer service refused the pending

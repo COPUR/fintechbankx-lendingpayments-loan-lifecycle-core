@@ -83,15 +83,57 @@ class CustomerCreditClientConfigurationTest {
                 .withBean(org.springframework.jdbc.core.JdbcTemplate.class,
                     () -> org.mockito.Mockito.mock(org.springframework.jdbc.core.JdbcTemplate.class))
                 .withBean(java.time.Clock.class, java.time.Clock::systemUTC)
+                .withBean(io.micrometer.core.instrument.simple.SimpleMeterRegistry.class)
                 .withInitializer(context -> context.getBeanFactory().setConversionService(
                     new org.springframework.boot.convert.ApplicationConversionService()))
                 .withPropertyValues("loan.credit-reservation.sweep.initial-delay=PT1H")
                 .withUserConfiguration(CustomerCreditClientConfiguration.SweepConfiguration.class);
 
-        runner.run(context -> assertThat(context)
-            .hasSingleBean(com.bank.loan.infrastructure.external.CreditReservationSweep.class));
+        runner.run(context -> {
+            assertThat(context).hasSingleBean(com.bank.loan.infrastructure.external.CreditReservationSweep.class);
+            // CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED is off unless set: unanswered reserves wait for an operator
+            assertThat(context.getBean(com.bank.loan.infrastructure.external.CreditReservationSweep.class).releasesUnanswered()).isFalse();
+        });
+        runner.withPropertyValues("loan.credit-reservation.sweep.release-unanswered=true").run(context ->
+            assertThat(context.getBean(com.bank.loan.infrastructure.external.CreditReservationSweep.class).releasesUnanswered()).isTrue());
         runner.withPropertyValues("loan.credit-reservation.sweep.enabled=false").run(context -> assertThat(context)
             .doesNotHaveBean(com.bank.loan.infrastructure.external.CreditReservationSweep.class));
+    }
+
+    /**
+     * loan_credit_reservations_operator{reason="unconfirmed"} counts the
+     * reserves the sweep left for an operator. It exists only while
+     * release-unanswered is off; once the sweep releases unanswered reserves
+     * by reference nothing can be left UNCONFIRMED, and the series goes.
+     */
+    @Test
+    void theUnconfirmedOperatorGaugeIsExportedOnlyWhileUnansweredReservesAreLeftForAnOperator() {
+        com.bank.loan.infrastructure.external.ReservationGenerations generations =
+            org.mockito.Mockito.mock(com.bank.loan.infrastructure.external.ReservationGenerations.class);
+        org.mockito.Mockito.when(generations.countUnconfirmed()).thenReturn(3L);
+        org.springframework.boot.test.context.runner.ApplicationContextRunner runner =
+            new org.springframework.boot.test.context.runner.ApplicationContextRunner()
+                .withBean(com.bank.loan.infrastructure.external.ReservationGenerations.class, () -> generations)
+                .withBean(com.bank.loan.domain.port.out.CustomerCreditService.class,
+                    () -> org.mockito.Mockito.mock(com.bank.loan.domain.port.out.CustomerCreditService.class))
+                .withBean(org.springframework.jdbc.core.JdbcTemplate.class,
+                    () -> org.mockito.Mockito.mock(org.springframework.jdbc.core.JdbcTemplate.class))
+                .withBean(java.time.Clock.class, java.time.Clock::systemUTC)
+                .withBean(io.micrometer.core.instrument.simple.SimpleMeterRegistry.class)
+                .withInitializer(context -> context.getBeanFactory().setConversionService(
+                    new org.springframework.boot.convert.ApplicationConversionService()))
+                .withPropertyValues("loan.credit-reservation.sweep.initial-delay=PT1H")
+                .withUserConfiguration(CustomerCreditClientConfiguration.SweepConfiguration.class);
+
+        runner.run(context -> assertThat(context.getBean(io.micrometer.core.instrument.MeterRegistry.class)
+            .get("loan.credit.reservations.operator").tag("reason", "unconfirmed").gauge().value()).isEqualTo(3.0));
+        // the gauge does not depend on the sweep itself being on
+        runner.withPropertyValues("loan.credit-reservation.sweep.enabled=false").run(context ->
+            assertThat(context.getBean(io.micrometer.core.instrument.MeterRegistry.class)
+                .find("loan.credit.reservations.operator").tag("reason", "unconfirmed").gauge()).isNotNull());
+        runner.withPropertyValues("loan.credit-reservation.sweep.release-unanswered=true").run(context ->
+            assertThat(context.getBean(io.micrometer.core.instrument.MeterRegistry.class)
+                .find("loan.credit.reservations.operator").tag("reason", "unconfirmed").gauge()).isNull());
     }
 
     @Test
@@ -105,11 +147,15 @@ class CustomerCreditClientConfigurationTest {
         configuration.creditReservationsPendingGauge(registry, generations);
         org.mockito.Mockito.when(generations.countReleaseRefused()).thenReturn(4L);
         configuration.creditReleasesRefusedGauge(registry, generations);
+        org.mockito.Mockito.when(generations.countUnconfirmed()).thenReturn(1L);
+        new CustomerCreditClientConfiguration.SweepConfiguration().creditReservationsUnconfirmedGauge(registry, generations);
 
         assertThat(registry.get("loan.credit.reservations.pending").gauge().value()).isEqualTo(2.0);
         assertThat(registry.get("loan.credit.reservations.pending").gauge().getId().getTags()).isEmpty();
         assertThat(registry.get("loan.credit.reservations.operator").tag("reason", "release_exceeds_reservation")
             .gauge().value()).isEqualTo(4.0);
+        assertThat(registry.get("loan.credit.reservations.operator").tag("reason", "unconfirmed")
+            .gauge().value()).isEqualTo(1.0);
         assertThat(registry.get("loan.credit.reservations.operator").gauges())
             .allSatisfy(gauge -> assertThat(gauge.getId().getTags()).extracting(io.micrometer.core.instrument.Tag::getKey)
                 .containsExactly("reason"));
@@ -141,10 +187,15 @@ class CustomerCreditClientConfigurationTest {
             .withBean(org.springframework.jdbc.core.JdbcTemplate.class,
                 () -> org.mockito.Mockito.mock(org.springframework.jdbc.core.JdbcTemplate.class))
             .withBean(java.time.Clock.class, java.time.Clock::systemUTC)
+            .withBean(io.micrometer.core.instrument.simple.SimpleMeterRegistry.class)
             .withInitializer(context -> context.getBeanFactory().setConversionService(
                 new org.springframework.boot.convert.ApplicationConversionService()))
             .withPropertyValues("loan.credit-reservation.sweep.initial-delay=PT1H", "loan.credit-reservation.sweep.grace=PT5S")
             .withUserConfiguration(CustomerCreditClientConfiguration.SweepConfiguration.class)
-            .run(context -> assertThat(context).hasFailed());
+            .run(context -> {
+                assertThat(context).hasFailed();
+                // for the grace, not for a missing bean
+                assertThat(context.getStartupFailure()).rootCause().hasMessageContaining("CREDIT_RESERVATION_SWEEP_GRACE");
+            });
     }
 }

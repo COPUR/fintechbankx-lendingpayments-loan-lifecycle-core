@@ -28,16 +28,27 @@ import java.time.Instant;
  *       loan this releases an abandoned reservation; a disbursement that
  *       commits later rolls back because its reservation is gone;</li>
  *   <li>a reserve that was sent but never answered (RESERVING, or
- *       UNCONFIRMED from an earlier release) is released by its reference
- *       too, no longer skipped: the intent is recorded first
- *       ({@link ReservationGenerations#beginCompensationOfUnanswered}, which
- *       loses to a disbursement retry that re-sent the reserve meanwhile),
- *       then the release is sent.</li>
+ *       UNCONFIRMED from an earlier release) follows
+ *       {@code loan.credit-reservation.sweep.release-unanswered}
+ *       (CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED):
+ *       <ul>
+ *         <li>off (the default): never released blind. A RESERVING row is
+ *             marked UNCONFIRMED ({@link ReservationGenerations#markUnconfirmed})
+ *             and left for an operator
+ *             (loan_credit_reservations_operator{reason="unconfirmed"}, runbook
+ *             section 8); UNCONFIRMED rows are not read at all. The behaviour
+ *             before the customer's release by reference;</li>
+ *         <li>on: released by its reference. The intent is recorded first
+ *             ({@link ReservationGenerations#beginCompensationOfUnanswered},
+ *             which loses to a disbursement retry that re-sent the reserve
+ *             meanwhile), then the release is sent.</li>
+ *       </ul></li>
  * </ul>
- * Outcomes: accepted means released; 422 RESERVATION_NOT_FOUND means nothing
- * was reserved under the reference, the row is cleared and the release
- * counted (loan_credit_releases_unmatched_total); 422
- * RELEASE_EXCEEDS_RESERVATION leaves the row for an operator
+ * Outcomes of a release: accepted means released; 422 RESERVATION_NOT_FOUND
+ * means nothing is held under the reference (never reserved, or the
+ * reservation already holds 0), the row is cleared and the release counted
+ * (loan_credit_releases_unmatched_total); 422 RELEASE_EXCEEDS_RESERVATION
+ * leaves the row for an operator
  * (loan_credit_reservations_operator{reason="release_exceeds_reservation"});
  * anything else keeps the release pending for the next run.
  *
@@ -45,10 +56,10 @@ import java.time.Instant;
  * service answers a release whose reference matches no reservation with 422
  * RESERVATION_NOT_FOUND and never takes it from untracked or migrated credit
  * (customer CRC decision 2026-10-10; customer-profile-kyc-core PR #13 commit
- * a6ebe01, not merged yet). It must not run against a customer service
- * without that change. It is also safe only if no reserve is still in flight
- * after the grace period, which the configuration enforces (the grace must
- * outlast max-attempts x (connect + read timeout)).
+ * a6ebe01, not merged yet). release-unanswered must stay off against a
+ * customer service without that change. It is also safe only if no reserve
+ * is still in flight after the grace period, which the configuration
+ * enforces (the grace must outlast max-attempts x (connect + read timeout)).
  */
 public class CreditReservationSweep {
 
@@ -62,25 +73,35 @@ public class CreditReservationSweep {
     private final Clock clock;
     private final Duration grace;
     private final int batchSize;
+    private final boolean releaseUnanswered;
 
     /**
      * What one run did; {@code ran} is false when another replica held the
      * lock. {@code nothingHeld}: releases that found nothing to release
      * (RESERVATION_NOT_FOUND); {@code heldForOperator}: releases refused with
-     * RELEASE_EXCEEDS_RESERVATION, or rows already waiting for an operator.
+     * RELEASE_EXCEEDS_RESERVATION, and, with release-unanswered off, reserves
+     * never answered that were marked UNCONFIRMED or already waited for an
+     * operator.
      */
     public record Result(boolean ran, int released, int nothingHeld, int heldForOperator, int failed) {
         static final Result SKIPPED = new Result(false, 0, 0, 0, 0);
     }
 
     public CreditReservationSweep(ReservationGenerations generations, CustomerCreditService customerCredit,
-                                  PostgresAdvisoryLock lock, Clock clock, Duration grace, int batchSize) {
+                                  PostgresAdvisoryLock lock, Clock clock, Duration grace, int batchSize,
+                                  boolean releaseUnanswered) {
         this.generations = generations;
         this.customerCredit = customerCredit;
         this.lock = lock;
         this.clock = clock;
         this.grace = grace;
         this.batchSize = batchSize;
+        this.releaseUnanswered = releaseUnanswered;
+    }
+
+    /** True when unanswered reserves are released by reference (CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED). */
+    public boolean releasesUnanswered() {
+        return releaseUnanswered;
     }
 
     public Result sweepOnce() {
@@ -93,11 +114,17 @@ public class CreditReservationSweep {
         int nothingHeld = 0;
         int heldForOperator = 0;
         int failed = 0;
-        for (ReservationGenerations.Unresolved row : generations.unresolved(before, batchSize)) {
+        for (ReservationGenerations.Unresolved row : generations.unresolved(before, batchSize, releaseUnanswered)) {
             ReservationGenerations.Reservation reservation = row.reservation();
             String loanId = reservation.loanId().getValue();
             try {
                 if (reservation.pendingCompensation() == null && isUnanswered(reservation.state())) {
+                    if (!releaseUnanswered) {
+                        if (leaveForOperator(reservation, before)) {
+                            heldForOperator++;
+                        }
+                        continue;
+                    }
                     if (!generations.beginCompensationOfUnanswered(reservation.loanId(), reservation.generation(), before)) {
                         log.info("Reserve of loan {} (generation {}) moved on meanwhile; not released this run",
                             loanId, reservation.generation());
@@ -125,6 +152,28 @@ public class CreditReservationSweep {
             }
         }
         return new Result(true, released, nothingHeld, heldForOperator, failed);
+    }
+
+    /**
+     * release-unanswered off: a stale RESERVING row becomes UNCONFIRMED for an
+     * operator; a row that is UNCONFIRMED already stays so. Neither is
+     * released. False when a disbursement retry refreshed the row meanwhile,
+     * so it is neither marked nor counted this run.
+     */
+    private boolean leaveForOperator(ReservationGenerations.Reservation reservation, Instant before) {
+        String loanId = reservation.loanId().getValue();
+        if (reservation.state() == ReservationGenerations.State.UNCONFIRMED) {
+            return true;
+        }
+        if (!generations.markUnconfirmed(reservation.loanId(), reservation.generation(), before)) {
+            log.info("Reserve of loan {} (generation {}) moved on meanwhile; not marked UNCONFIRMED this run",
+                loanId, reservation.generation());
+            return false;
+        }
+        log.error("Reserve of loan {} (generation {}) has had no answer since {}; not released blind "
+            + "(release-unanswered is off), marked UNCONFIRMED for an operator", loanId, reservation.generation(),
+            reservation.updatedAt());
+        return true;
     }
 
     private static boolean isUnanswered(ReservationGenerations.State state) {

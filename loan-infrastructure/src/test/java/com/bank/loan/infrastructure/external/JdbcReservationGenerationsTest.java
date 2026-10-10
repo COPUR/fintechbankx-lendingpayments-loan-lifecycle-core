@@ -114,16 +114,50 @@ class JdbcReservationGenerationsTest {
         when(jdbc.update(contains("reservation_state in ('RESERVING', 'UNCONFIRMED') and updated_at < ?"),
             eq(1), eq(0), eq("LOAN-G16"), eq(0), eq(java.sql.Timestamp.from(before)))).thenReturn(1);
 
-        generations.unresolved(java.time.Instant.parse("2026-10-08T06:00:00Z"), 50);
+        generations.unresolved(java.time.Instant.parse("2026-10-08T06:00:00Z"), 50, true);
+        generations.unresolved(java.time.Instant.parse("2026-10-08T06:00:00Z"), 50, false);
 
+        // release-unanswered on: UNCONFIRMED rows are read and released by reference
         verify(jdbc).query(argThat((String sql) -> sql.contains(
                 "l.status in ('CREATED', 'PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'CANCELLED')")
                 && sql.contains("r.reservation_state in ('RESERVING', 'RESERVED', 'UNCONFIRMED')")),
             org.mockito.ArgumentMatchers.<org.springframework.jdbc.core.RowMapper<ReservationGenerations.Unresolved>>any(),
             eq(java.sql.Timestamp.from(java.time.Instant.parse("2026-10-08T06:00:00Z"))), eq(50));
+        // release-unanswered off (the default): UNCONFIRMED rows belong to an operator and are not read
+        verify(jdbc).query(argThat((String sql) -> sql.contains(
+                "l.status in ('CREATED', 'PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'CANCELLED')")
+                && sql.contains("r.reservation_state in ('RESERVING', 'RESERVED')")
+                && !sql.contains("UNCONFIRMED")),
+            org.mockito.ArgumentMatchers.<org.springframework.jdbc.core.RowMapper<ReservationGenerations.Unresolved>>any(),
+            eq(java.sql.Timestamp.from(java.time.Instant.parse("2026-10-08T06:00:00Z"))), eq(50));
         assertThat(generations.countPending()).isEqualTo(3);
         assertThat(generations.beginCompensationOfUnanswered(LoanId.of("LOAN-G16"), 0, before)).isTrue();
         assertThat(generations.beginCompensationOfUnanswered(LoanId.of("LOAN-G17"), 0, before)).isFalse();
+    }
+
+    /**
+     * CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED=false: a RESERVING row older
+     * than the grace period becomes UNCONFIRMED for an operator, in its own
+     * transaction and only if nothing refreshed it meanwhile; the operator
+     * gauge counts the UNCONFIRMED rows.
+     */
+    @Test
+    void withoutReleaseUnansweredAStaleReserveIsMarkedUnconfirmedInItsOwnTransactionAndCounted() {
+        when(transactions.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+        java.time.Instant before = java.time.Instant.parse("2026-10-08T06:00:00Z");
+        when(jdbc.update(contains("set reservation_state = 'UNCONFIRMED'"), eq("LOAN-G18"), eq(0),
+            eq(java.sql.Timestamp.from(before)))).thenReturn(1);
+        when(jdbc.queryForObject(contains("reservation_state = 'UNCONFIRMED'"), eq(Long.class))).thenReturn(2L);
+
+        assertThat(generations.markUnconfirmed(LoanId.of("LOAN-G18"), 0, before)).isTrue();
+        assertThat(generations.markUnconfirmed(LoanId.of("LOAN-G19"), 0, before)).isFalse();
+        assertThat(generations.countUnconfirmed()).isEqualTo(2);
+
+        verify(jdbc).update(argThat((String sql) -> sql.contains("reservation_state = 'RESERVING'")
+                && sql.contains("updated_at < ?")),
+            eq("LOAN-G18"), eq(0), eq(java.sql.Timestamp.from(before)));
+        verify(transactions, org.mockito.Mockito.times(2)).getTransaction(argThat(definition ->
+            definition.getPropagationBehavior() == TransactionDefinition.PROPAGATION_REQUIRES_NEW));
     }
 
     @Test

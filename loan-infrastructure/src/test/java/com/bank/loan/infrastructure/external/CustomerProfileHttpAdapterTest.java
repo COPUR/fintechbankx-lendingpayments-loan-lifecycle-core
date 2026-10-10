@@ -799,8 +799,18 @@ class CustomerProfileHttpAdapterTest {
         }
 
         @Override
-        public java.util.List<Unresolved> unresolved(java.time.Instant before, int limit) {
+        public java.util.List<Unresolved> unresolved(java.time.Instant before, int limit, boolean includeUnconfirmed) {
             throw new UnsupportedOperationException("not used by the adapter");
+        }
+
+        @Override
+        public boolean markUnconfirmed(LoanId loanId, int generation, java.time.Instant before) {
+            throw new UnsupportedOperationException("not used by the adapter");
+        }
+
+        @Override
+        public synchronized long countUnconfirmed() {
+            return rows.values().stream().filter(row -> row.state() == State.UNCONFIRMED).count();
         }
 
         @Override
