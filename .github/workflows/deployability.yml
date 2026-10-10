@@ -108,7 +108,8 @@ jobs:
           # Spring's configuration, name a profile, bypass the DB_URL guard, switch the startup TLS assertion
           # off or change the Kafka client's transport, in any spelling (case, '.', '-', '_', indexed _0) of
           # the key, nor through a JVM option. _fbx-guard.tpl (cicd-templates 2caa48f) plus _helpers.tpl
-          # loan.guardValues. A dotted key is escaped (\.) so --set-string sets one literal key, not a nested map.
+          # loan.guardValues. A dotted key is escaped (\.) so --set-string sets one literal key, not a nested map; values
+          # stay plain (no '{' or ',') so a refusal comes from the guard, never from helm's --set parser.
           for forbidden in "config.SPRING_CONFIG_IMPORT=optional:configtree:/etc/fintechbankx/config/" \
                            "config.spring_config_location=file:/etc/other/" \
                            "config.Spring_Config_Additional_Location=file:/etc/other/" \
@@ -127,9 +128,9 @@ jobs:
                            "config.SPRING_FLYWAY_USER=other" \
                            "config.SPRING_LIQUIBASE_URL=jdbc:postgresql://other:5432/db" \
                            "config.SPRING_R2DBC_URL=r2dbc:postgresql://other:5432/db" \
-                           "config.SPRING_APPLICATION_JSON={\"spring\":{\"datasource\":{\"url\":\"x\"}}}" \
-                           "config.spring\.application\.json={}" \
-                           "config.SPRINGAPPLICATIONJSON={}" \
+                           "config.SPRING_APPLICATION_JSON=x" \
+                           "config.spring\.application\.json=x" \
+                           "config.SPRINGAPPLICATIONJSON=x" \
                            "config.MY_JDBC_URL=jdbc:postgresql://other:5432/db" \
                            "config.PG_SSLFACTORY=org.postgresql.ssl.NonValidatingFactory" \
                            "config.PG_SSLHOSTNAMEVERIFIER=x.Y" \
