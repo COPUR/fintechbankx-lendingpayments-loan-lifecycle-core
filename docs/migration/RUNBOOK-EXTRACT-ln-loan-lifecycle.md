@@ -203,8 +203,10 @@ parked row (payload park or operator park) in later runs (V12, partial index `ix
 same rule as bulk-orchestration). Rows of other loans are not held back. The held-back rows stay in
 `outbox_pending_events` and in `outbox_oldest_pending_age_seconds`, so `OutboxRelayStalled` fires for them too
 if the parked row is not replayed within 15 minutes; `outbox_parked_rows` above 0 at the same time tells the two
-causes apart. Replaying the parked row (SQL below) releases its loan: the next run sends the loan's rows in
-their order.
+causes apart. That is intended (platform decision, round 5): rows held behind a parked row keep
+`outbox_oldest_pending_age_seconds` rising, by design, until the parked row is replayed; the age gauge is not
+adjusted for them, and the alert is the prompt to replay or close the parked row. Replaying the parked row (SQL
+below) releases its loan: the next run sends the loan's rows in their order.
 
 Alerts. The squad acts on the platform alerts (observability `prometheus/rules/kafka-outbox.rules.yml`,
 PR #11 head eca7aa0, routed by the `squad` label); this chart ships no outbox alert rule:
