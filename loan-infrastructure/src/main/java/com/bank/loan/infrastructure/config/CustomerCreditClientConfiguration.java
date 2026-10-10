@@ -78,23 +78,17 @@ public class CustomerCreditClientConfiguration {
     }
 
     /**
-     * Reservations left for an operator (loan_credit_reservations_operator):
-     * reason="unconfirmed" counts reserves that were sent but never answered
-     * and that the sweep will not release blind. Alert on any value above zero.
-     */
-    @Bean
-    Gauge creditReservationsUnconfirmedGauge(MeterRegistry registry, ReservationGenerations reservationGenerations) {
-        return Gauge.builder(OPERATOR_GAUGE, reservationGenerations, ReservationGenerations::countUnconfirmed)
-            .tag("reason", "unconfirmed")
-            .description("Credit reservations an operator must resolve")
-            .register(registry);
-    }
-
-    /**
-     * reason="release_exceeds_reservation": the customer service refused a
-     * compensating release as more than the loan's reservation (release by
-     * reference, provider contract pending). A bug signal; alert on any value
-     * above zero.
+     * Reservations left for an operator (loan_credit_reservations_operator),
+     * one reason only: reason="release_exceeds_reservation", the customer
+     * service refused a release (a compensation, or the sweep's release of a
+     * reserve that was never answered) as more than the loan's reservation
+     * holds. Alert on any value above zero.
+     *
+     * <p>The reason "unconfirmed" is gone (customer CRC decision 2026-10-10):
+     * a reserve that was never answered is no longer left for an operator;
+     * the recovery sweep releases it by its reference. A row the sweep cannot
+     * settle stays a pending release and shows in
+     * loan_credit_reservations_pending.
      */
     @Bean
     Gauge creditReleasesRefusedGauge(MeterRegistry registry, ReservationGenerations reservationGenerations) {
@@ -166,6 +160,9 @@ public class CustomerCreditClientConfiguration {
      * Review 5460235552: the recovery sweep. On by default
      * (CREDIT_RESERVATION_SWEEP_ENABLED); runs at start-up and then
      * loan.credit-reservation.sweep.interval after the previous run ended.
+     * It releases unanswered reserves by reference, which needs the customer
+     * service's 422 RESERVATION_NOT_FOUND for an unknown reference
+     * (customer-profile-kyc-core PR #13 commit a6ebe01) deployed first.
      */
     @Configuration
     @EnableScheduling
@@ -179,7 +176,11 @@ public class CustomerCreditClientConfiguration {
                                                       CustomerCreditService customerCreditService,
                                                       JdbcTemplate jdbc, Clock clock,
                                                       @Value("${loan.credit-reservation.sweep.grace:PT10M}") Duration grace,
-                                                      @Value("${loan.credit-reservation.sweep.batch-size:50}") int batchSize) {
+                                                      @Value("${loan.credit-reservation.sweep.batch-size:50}") int batchSize,
+                                                      @Value("${loan.customer-credit.connect-timeout:PT1S}") Duration connectTimeout,
+                                                      @Value("${loan.customer-credit.read-timeout:PT2S}") Duration readTimeout,
+                                                      @Value("${loan.customer-credit.max-attempts:3}") int maxAttempts) {
+            checkGrace(grace, connectTimeout, readTimeout, maxAttempts);
             return new CreditReservationSweep(reservationGenerations, customerCreditService,
                 new PostgresAdvisoryLock(jdbc, CreditReservationSweep.SWEEP_LOCK_KEY), clock, grace, batchSize);
         }
@@ -188,6 +189,22 @@ public class CustomerCreditClientConfiguration {
         @ConditionalOnProperty(name = "loan.credit-reservation.sweep.enabled", havingValue = "true", matchIfMissing = true)
         SweepSchedule creditReservationSweepSchedule(CreditReservationSweep sweep) {
             return new SweepSchedule(sweep);
+        }
+    }
+
+    /**
+     * The sweep releases a reserve that was never answered once its row is
+     * older than the grace period, so the grace must outlast the longest a
+     * reserve call can still be in flight: max-attempts x (connect + read
+     * timeout). A shorter grace could release a reserve the customer service
+     * applies afterwards, leaving credit held with no record of it.
+     */
+    static void checkGrace(Duration grace, Duration connectTimeout, Duration readTimeout, int maxAttempts) {
+        Duration longestReserve = connectTimeout.plus(readTimeout).multipliedBy(Math.max(1, maxAttempts));
+        if (grace.compareTo(longestReserve) <= 0) {
+            throw new IllegalStateException("loan.credit-reservation.sweep.grace (CREDIT_RESERVATION_SWEEP_GRACE) is "
+                + grace + " but must be longer than max-attempts x (connect + read timeout) = " + longestReserve
+                + ", or the sweep could release a reserve that is still in flight");
         }
     }
 

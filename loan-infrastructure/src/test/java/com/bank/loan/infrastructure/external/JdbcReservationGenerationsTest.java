@@ -110,19 +110,20 @@ class JdbcReservationGenerationsTest {
     void theSweepReadsOnlyNeverDisbursedLoansAndCountsWithoutIdentifiers() {
         when(transactions.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
         when(jdbc.queryForObject(contains("join loan"), eq(Long.class))).thenReturn(3L);
-        when(jdbc.queryForObject(contains("reservation_state = 'UNCONFIRMED'"), eq(Long.class))).thenReturn(1L);
-        when(jdbc.update(contains("set reservation_state = 'UNCONFIRMED'"), eq("LOAN-G16"), eq(0))).thenReturn(1);
+        java.time.Instant before = java.time.Instant.parse("2026-10-08T06:00:00Z");
+        when(jdbc.update(contains("reservation_state in ('RESERVING', 'UNCONFIRMED') and updated_at < ?"),
+            eq(1), eq(0), eq("LOAN-G16"), eq(0), eq(java.sql.Timestamp.from(before)))).thenReturn(1);
 
         generations.unresolved(java.time.Instant.parse("2026-10-08T06:00:00Z"), 50);
 
         verify(jdbc).query(argThat((String sql) -> sql.contains(
-                "l.status in ('CREATED', 'PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'CANCELLED')")),
+                "l.status in ('CREATED', 'PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'CANCELLED')")
+                && sql.contains("r.reservation_state in ('RESERVING', 'RESERVED', 'UNCONFIRMED')")),
             org.mockito.ArgumentMatchers.<org.springframework.jdbc.core.RowMapper<ReservationGenerations.Unresolved>>any(),
             eq(java.sql.Timestamp.from(java.time.Instant.parse("2026-10-08T06:00:00Z"))), eq(50));
         assertThat(generations.countPending()).isEqualTo(3);
-        assertThat(generations.countUnconfirmed()).isEqualTo(1);
-        assertThat(generations.markUnconfirmed(LoanId.of("LOAN-G16"), 0)).isTrue();
-        assertThat(generations.markUnconfirmed(LoanId.of("LOAN-G17"), 0)).isFalse();
+        assertThat(generations.beginCompensationOfUnanswered(LoanId.of("LOAN-G16"), 0, before)).isTrue();
+        assertThat(generations.beginCompensationOfUnanswered(LoanId.of("LOAN-G17"), 0, before)).isFalse();
     }
 
     @Test

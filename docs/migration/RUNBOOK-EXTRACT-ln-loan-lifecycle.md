@@ -82,6 +82,7 @@ loan, second run, delta checks.
 | Precondition | Before | Why |
 |---|---|---|
 | Customer cutover (`RUNBOOK-EXTRACT-cus-profile-kyc`, customer-profile-kyc-core 8794365) through its step 5; its step 5 routes the monolith's credit writes to the customer service and switches this service to `CUSTOMER_CREDIT_ADAPTER=http` | loan step 2 | one credit ledger: otherwise the monolith and the customer service both move `used_credit` |
+| Customer release by reference live: a release whose reference matches no reservation is 422 `RESERVATION_NOT_FOUND` and never touches untracked credit (customer CRC decision 2026-10-10, customer-profile-kyc-core PR #13 `a6ebe01`, not merged), and the customer's step 3a backfilled one reservation per open monolith loan (reference = loan id) | `CUSTOMER_CREDIT_ADAPTER=http` with the sweep on | the recovery sweep releases unanswered reserves by reference (section 8); without the customer change such a release could free other loans' or migrated credit. Without step 3a, the release of a fully repaid migrated loan (`<loanId>:release`) is answered `RESERVATION_NOT_FOUND` and logged as not released |
 | Payments slice ready to cut over in the same window, publishing `Payments.Payment.LoanPaymentCompleted.v1` on `evt.pay.payment.v1` | loan step 2 | loan and payments writes move together; repayments must land in exactly one place |
 | `evt.ln.loan.v1`, `evt.ln.loan.dlq.v1`, `evt.pay.payment.v1` in the asyncapi catalog and created on the cluster (catalog PR pending; event-streaming-kafka PR #12, c4b69b0, adds `evt.ln.loan.v1` and `evt.pay.payment.v1` to the topic provisioning) | step 3 (consumer), step 4 (relay) | the service never creates topics |
 | ConfigMap `rds-ca-bundle` (key `global-bundle.pem`) published in namespace `lending` by trust-manager (mesh repo `k8s/platform/cert-manager/bundle-rds-ca.yaml`); `DB_URL` = Terraform output `jdbc_url` (`sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem`, chart `databaseCa.mountPath`) | step 1 | the pods mount the bundle to verify Aurora's certificate; without it they do not start |
@@ -269,30 +270,61 @@ Cancel and reject still answer 200: the closure commits and the held release is 
 `CreditReservationSweep` runs on start-up and then `CREDIT_RESERVATION_SWEEP_INTERVAL` (default `PT1M`) after the
 previous run ended, on one replica at a time (PostgreSQL advisory lock). It looks only at loans never disbursed
 (`CREATED`, `PENDING_APPROVAL`, `APPROVED`, `REJECTED`, `CANCELLED`) whose row has not changed for
-`CREDIT_RESERVATION_SWEEP_GRACE` (default `PT10M`), and:
+`CREDIT_RESERVATION_SWEEP_GRACE` (default `PT10M`). Every release it sends goes under the reservation's
+compensation key `<reserve key>:compensation`, with the loan id as `reference`, the reference the reserve carried.
+It:
 
-- re-sends a pending compensation under its compensation key;
-- releases a reservation recorded `RESERVED` under its compensation key (on a still `APPROVED` loan a later
-  disbursement then fails because its reservation is gone);
-- marks a reservation still `RESERVING` (sent, never answered) as `UNCONFIRMED` and leaves it for an operator;
+- re-sends a pending compensation;
+- releases a reservation recorded `RESERVED` (on a still `APPROVED` loan a later disbursement then fails because
+  its reservation is gone);
+- releases a reserve that was sent but never answered (`RESERVING`, or `UNCONFIRMED` written by an earlier
+  release) by its reference. It first records the intent (generation n+1, `pending_compensation = n`) with a
+  compare-and-set on the row's age, then sends the release. A disbursement retry that re-sent the reserve
+  meanwhile refreshes the row, so the sweep leaves it; once the sweep has recorded its intent, a retry cannot
+  re-send the old reserve and reserves at generation n+1 instead;
 - skips any row with `release_refused_code` set.
+
+What the customer service answers decides the outcome:
+
+| Answer to the release | Meaning | What happens to the row | Metric |
+|---|---|---|---|
+| 200 | the reservation held credit and it is released | cleared (`pending_compensation` NULL, state NULL, generation n+1) | none |
+| 422 `RESERVATION_NOT_FOUND` | nothing was ever reserved under the reference (for an unanswered reserve: it was never applied) | cleared, as above | `loan_credit_releases_unmatched_total` +1 |
+| 422 `RELEASE_EXCEEDS_RESERVATION` | the reference has a reservation but it holds less than the loan's principal | kept: `pending_compensation = n`, `release_refused_code` set; never re-sent | `loan_credit_reservations_operator{reason="release_exceeds_reservation"}` |
+| anything else (5xx, timeout, 409 retries exhausted, 400, 404) | no usable answer | kept as a pending compensation; re-sent under the same key once the grace period has passed again | `loan_credit_reservations_pending` stays above 0 |
+
+**Precondition (customer contract).** Releasing a reserve that was never answered is safe only because the
+customer service answers a release whose reference matches no reservation with 422 `RESERVATION_NOT_FOUND` and
+never takes it from untracked or migrated credit (customer CRC decision 2026-10-10; customer-profile-kyc-core
+PR #13, commit `a6ebe01`, branch head `4a8f468`, **not merged yet**). Before that change such a release could free
+credit held by the customer's other loans or credit migrated from the monolith. Do not deploy this service's
+sweep against a customer service without it: deploy the customer change first, or set
+`CREDIT_RESERVATION_SWEEP_ENABLED: "false"` until it is live (recovery then waits for the next reservation or
+cancellation of the same loan).
+
+The grace period is also the safety margin against a reserve still in flight: the service refuses to start
+unless `CREDIT_RESERVATION_SWEEP_GRACE` is longer than `loan.customer-credit.max-attempts` (3) times
+(`connect-timeout` + `read-timeout`, 1 s + 2 s in `application.yml`), 9 s with the shipped settings.
 
 The chart sets `CREDIT_RESERVATION_SWEEP_ENABLED` (default `"true"`), `CREDIT_RESERVATION_SWEEP_INTERVAL` and
 `CREDIT_RESERVATION_SWEEP_GRACE` in `values.yaml` `config`. Switching the sweep off stops recovery: compensations
-are then only re-sent by the next reservation or cancellation of the same loan.
+are then only re-sent by the next reservation or cancellation of the same loan, and unanswered reserves stay
+`RESERVING`.
 
 ### Metrics
 
 | Micrometer name (Prometheus name) | Type | Meaning |
 |---|---|---|
-| `loan.credit.reservations.pending` (`loan_credit_reservations_pending`) | gauge | never-disbursed loans with a pending compensation or an outstanding reservation (`RESERVING`, `RESERVED`, `UNCONFIRMED`). Short-lived during a disbursement; a value that stays above zero for longer than the grace period plus one interval means the sweep cannot clear it |
-| `loan.credit.reservations.operator{reason="unconfirmed"}` (`loan_credit_reservations_operator{reason="unconfirmed"}`) | gauge | rows in `UNCONFIRMED`; any value above zero needs the procedure below |
-| `loan.credit.reservations.operator{reason="release_exceeds_reservation"}` (same, Prometheus) | gauge | rows whose compensating release the customer service refused with `RELEASE_EXCEEDS_RESERVATION`; a bug signal, any value above zero needs the procedure below |
-| `loan.credit.releases.unmatched` (`loan_credit_releases_unmatched_total`) | counter | compensating releases answered `RESERVATION_NOT_FOUND`: nothing was held, the intent is closed automatically. A rising rate means reserves are being recorded that the customer service never applied |
+| `loan.credit.reservations.pending` (`loan_credit_reservations_pending`) | gauge | never-disbursed loans with a pending compensation or an outstanding reservation (`RESERVING`, `RESERVED`, and `UNCONFIRMED` rows left by an earlier release until the sweep settles them). Short-lived during a disbursement; a value that stays above zero for longer than the grace period plus one interval means the sweep cannot settle a row (customer service down or rejecting the release): see the sweep's warnings for the loan |
+| `loan.credit.reservations.operator{reason="release_exceeds_reservation"}` (`loan_credit_reservations_operator{reason="release_exceeds_reservation"}`) | gauge | rows whose release the customer service refused with `RELEASE_EXCEEDS_RESERVATION`: a compensation of an accepted reservation, or the sweep's release of a reserve that was never answered. Any value above zero needs the procedure below. **This is now the only `reason`** |
+| `loan.credit.reservations.operator{reason="unconfirmed"}` | removed | no longer exported. A reserve that was never answered is no longer left for an operator; the sweep releases it by its reference. The series disappears after the upgrade; an alert on it stops firing rather than reading 0 |
+| `loan.credit.releases.unmatched` (`loan_credit_releases_unmatched_total`) | counter | releases answered `RESERVATION_NOT_FOUND`: nothing was held under the reference, the row is cleared automatically. Expected now and then for reserves that timed out before the customer service applied them; a rising rate means reserves are being recorded that the customer service never applies |
 
 This service ships no alert rules. Observability (`fintechbankx-platform-observability-sre-operations`) owns any
-alert on these metrics; the squad's ask is: either `operator` gauge above 0 (warning), and
-`loan_credit_reservations_pending` above 0 for longer than the grace period plus one interval (warning).
+alert on these metrics; the squad's ask is: `loan_credit_reservations_operator` above 0 for any `reason`
+(warning; today only `release_exceeds_reservation` exists), and `loan_credit_reservations_pending` above 0 for
+longer than the grace period plus one interval (warning). Any rule or dashboard that selects
+`reason="unconfirmed"` should be removed.
 
 Find the rows:
 
@@ -301,7 +333,10 @@ SELECT r.loan_id, l.customer_id, l.status, l.principal_amount, l.currency, r.gen
        r.reservation_state, r.pending_compensation, r.release_refused_code, r.updated_at
 FROM sc_ln_loan_lifecycle.credit_reservation_generation r
 JOIN sc_ln_loan_lifecycle.loan l ON l.loan_id = r.loan_id
-WHERE r.reservation_state = 'UNCONFIRMED' OR r.release_refused_code IS NOT NULL
+WHERE r.release_refused_code IS NOT NULL
+   OR (l.status IN ('CREATED', 'PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'CANCELLED')
+       AND (r.pending_compensation IS NOT NULL OR r.reservation_state IN ('RESERVING', 'RESERVED', 'UNCONFIRMED'))
+       AND r.updated_at < now() - interval '15 minutes')
 ORDER BY r.updated_at;
 ```
 
@@ -310,51 +345,33 @@ answer is attached to the incident record.
 
 ### UNCONFIRMED: a reserve sent but never answered
 
-The reserve under key `<loanId>:reserve[:g<n>]` (n = `generation`) was sent and no answer was recorded, so this
-service does not know whether the customer service applied it. **Never release it blind.** The customer
-service's release does not check that a reservation exists for the reference (customer #13
-`CreditProfile.releaseCredit`), and the customer's `used_credit` includes credit migrated from the monolith that
-has no movement or reference behind it (customer-profile-kyc-core `db/backfill/02_transform_into_customer_service.sql`
-copies `used_credit` without movements). A release for a reserve that was never applied would therefore free
-credit held by the customer's other loans or by untracked migrated credit, and nothing would show it.
+There is no operator procedure for this case any more. The reserve under key `<loanId>:reserve[:g<n>]`
+(n = `generation`) was sent and no answer was recorded, so this service does not know whether the customer
+service applied it. The row stays `RESERVING`; once it is older than the grace period the recovery sweep
+releases it by its reference (table above): the customer service either releases what the reserve holds,
+answers `RESERVATION_NOT_FOUND` because the reserve never reached it (row cleared, counted unmatched), or answers
+`RELEASE_EXCEEDS_RESERVATION` (operator, next section).
 
-1. Ask the customer squad: for customer `<customer_id>`, is there a `credit_movement` with idempotency key
-   `<reserve key>`, and what are its type, amount, currency and reference? List every movement with reference
-   `<loan_id>` too.
-2. **The reserve was applied** (a `RESERVE` under that key, amount and currency equal to the loan's
-   `principal_amount` and `currency`, reference the loan id, and no `RELEASE` under `<reserve key>:compensation`):
-   record it as accepted. On an `APPROVED` loan a disbursement can then use it; otherwise the sweep releases it
-   under its compensation key after the grace period, and `loan_credit_reservations_pending` returns to 0.
+The state `UNCONFIRMED` is no longer written. Rows an earlier release marked `UNCONFIRMED` are settled the same
+way by the first sweep after the upgrade; until then they count in `loan_credit_reservations_pending`. A retry of
+the disbursement of an `APPROVED` loan still re-sends the reserve under the same key first (the customer service
+replays it if it was applied, or applies it now), and the row becomes `RESERVING` and then `RESERVED`.
 
-   ```sql
-   UPDATE sc_ln_loan_lifecycle.credit_reservation_generation
-   SET reservation_state = 'RESERVED', updated_at = now()
-   WHERE loan_id = '<loan id>' AND generation = <n> AND reservation_state = 'UNCONFIRMED'
-     AND pending_compensation IS NULL;
-   ```
-
-3. **The reserve was never applied** (no movement under that key): nothing is held; close the row the way a
-   refused reserve is closed. The generation stays, so a later reserve of an `APPROVED` loan reuses the key,
-   which the customer service has never seen.
-
-   ```sql
-   UPDATE sc_ln_loan_lifecycle.credit_reservation_generation
-   SET reservation_state = NULL, updated_at = now()
-   WHERE loan_id = '<loan id>' AND generation = <n> AND reservation_state = 'UNCONFIRMED';
-   ```
-
-4. **Anything else** (amount, currency or reference differ, or a movement under the key exists for another
-   customer): change nothing, escalate to the loan squad's engineers and the customer squad.
-
-A retry of the disbursement of an `APPROVED` loan also resolves an `UNCONFIRMED` row: it re-sends the reserve
-under the same key, which the customer service either replays (already applied) or applies now, and the row
-becomes `RESERVED`. That is safe; a release is not.
+Look at a row only if it stays in `loan_credit_reservations_pending` for longer than the grace period plus one
+interval: the sweep then logs, for the loan id, why the release failed (customer service down, 400, 404). Fix
+the cause; the sweep re-sends the release under the same key. Do not change the row by hand.
 
 ### RELEASE_EXCEEDS_RESERVATION: a compensating release refused
 
-Requires the customer service's release by reference (provider contract pending). The row has
-`pending_compensation = <n>` and `release_refused_code = 'RELEASE_EXCEEDS_RESERVATION'`: the release under
+Requires the customer service's release by reference (customer-profile-kyc-core PR #13, `a6ebe01`). The row
+has `pending_compensation = <n>` and `release_refused_code = 'RELEASE_EXCEEDS_RESERVATION'`: the release under
 `<reserve key of n>:compensation` asked for more than the customer service holds for reference `<loan_id>`.
+
+Two ways to get here: the compensation of a reservation this service recorded as accepted (a bug signal), or
+the sweep's release of a reserve that was never answered. In the second case, at generation n > 0, the usual
+cause is benign: the reserve of generation n was never applied, and the reference still has a reservation from
+an earlier generation that was already released (it holds 0), so the customer service answers "exceeds"
+rather than "not found". Step 2 below applies.
 The release is never re-sent by this service, the sweep skips the row, and a disbursement of the loan answers
 409 `CREDIT_RESERVATION_HELD_FOR_OPERATOR` without calling the customer service until the row is closed.
 

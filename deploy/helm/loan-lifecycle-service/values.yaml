@@ -98,10 +98,14 @@ config:
   # Off until the loan and payments writes cut over together (runbook step 3).
   LOAN_REPAYMENT_CONSUMER_ENABLED: "false"
   # Credit reservation recovery sweep (CreditReservationSweep; http adapter
-  # only): re-drives pending releases of never-disbursed loans and marks a
-  # reserve never answered within the grace period UNCONFIRMED for an operator
-  # (never released blind). One replica at a time (advisory lock). Runbook
-  # section "Credit reservations needing an operator".
+  # only): re-drives pending releases of never-disbursed loans and releases a
+  # reserve never answered within the grace period by its reference. Set it
+  # to "false" in any environment whose customer service does not yet answer
+  # an unknown reference with 422 RESERVATION_NOT_FOUND
+  # (customer-profile-kyc-core PR #13 a6ebe01). The grace
+  # must outlast 3 x (1 s + 2 s) or the pods do not start. One replica at a
+  # time (advisory lock). Runbook section "Credit reservations needing an
+  # operator".
   CREDIT_RESERVATION_SWEEP_ENABLED: "true"
   CREDIT_RESERVATION_SWEEP_INTERVAL: PT1M
   CREDIT_RESERVATION_SWEEP_GRACE: PT10M

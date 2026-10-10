@@ -42,8 +42,9 @@ public interface CustomerCreditService {
         RELEASED,
         /**
          * A reservation was requested, but whether the customer service applied
-         * it is not known. Nothing is released (a release of a reservation that
-         * does not exist would free other loans' credit); left for an operator.
+         * it is not known (its reserve may still be in flight). Nothing is
+         * released now; the infrastructure's recovery sweep releases it by its
+         * reference once that can no longer be the case.
          */
         UNCONFIRMED
     }

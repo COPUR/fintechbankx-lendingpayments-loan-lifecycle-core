@@ -22,11 +22,14 @@ import java.util.OptionalInt;
  * under the same key.
  *
  * <p>Review 5460235552: the reservation itself is recorded too, before it is
- * sent ({@link State}). A release is only ever sent for a reservation known
- * to be accepted, because the customer service's release subtracts the amount
- * without checking that a reservation for the reference exists (customer #13
- * CreditProfile.releaseCredit): releasing a reservation that never happened
- * would free credit held by the customer's other loans.
+ * sent ({@link State}). On the request path a release is only sent for a
+ * reservation known to be accepted. A reserve that was sent but never
+ * answered is released by the recovery sweep only, by its reference, once the
+ * grace period has passed ({@link #beginCompensationOfUnanswered}). That
+ * relies on the customer service refusing a release whose reference matches
+ * no reservation (422 RESERVATION_NOT_FOUND, customer CRC decision
+ * 2026-10-10, customer-profile-kyc-core PR #13 commit a6ebe01, not merged
+ * yet); before it, such a release could free untracked or migrated credit.
  */
 public interface ReservationGenerations {
 
@@ -36,7 +39,12 @@ public interface ReservationGenerations {
         RESERVING,
         /** The customer service accepted the reserve; no disbursement uses it yet. */
         RESERVED,
-        /** Was RESERVING past the grace period: an operator must find out whether it was applied. */
+        /**
+         * No longer written. Earlier releases marked a reserve that stayed
+         * RESERVING past the grace period UNCONFIRMED for an operator; such rows
+         * are now treated like RESERVING ones: a retried reserve makes them
+         * RESERVING again, and the recovery sweep releases them by reference.
+         */
         UNCONFIRMED,
         /** The disbursement that uses the reservation committed. */
         USED
@@ -56,10 +64,13 @@ public interface ReservationGenerations {
 
     /**
      * In its own transaction, before the reserve of {@code generation} is
-     * sent: the row is at {@code generation} with state RESERVING (a state
-     * already recorded for that generation is kept). Throws if that cannot be
-     * stored, or if the row moved to another generation meanwhile; then no
-     * reserve may be sent.
+     * sent: the row is at {@code generation} with state RESERVING. A RESERVING
+     * or UNCONFIRMED row of that generation (a retry of an unanswered reserve)
+     * becomes RESERVING with a fresh {@code updated_at}, so the recovery sweep
+     * does not release it while the retry is in flight; RESERVED is kept.
+     * Throws if that cannot be stored, or if the row moved to another
+     * generation meanwhile (the sweep took the reserve over); then no reserve
+     * may be sent.
      */
     void beginReservation(LoanId loanId, int generation);
 
@@ -90,6 +101,19 @@ public interface ReservationGenerations {
      */
     boolean beginCompensationOfAccepted(LoanId loanId, int generation);
 
+    /**
+     * Recovery sweep only, in its own transaction: a reserve of
+     * {@code generation} that was sent but never answered (RESERVING, or
+     * UNCONFIRMED from an earlier release) and unchanged since
+     * {@code before} (the grace period) is taken over for release: the loan
+     * moves to {@code generation + 1} and the compensation of
+     * {@code generation} is recorded as pending, to be sent by reference
+     * under the reserve's compensation key. False, and nothing changes, if
+     * the row moved on meanwhile (answered, retried, compensated). Throws if
+     * it cannot be stored; then no release may be sent.
+     */
+    boolean beginCompensationOfUnanswered(LoanId loanId, int generation, Instant before);
+
     /** The generation whose compensation was started but not confirmed, if any. */
     OptionalInt pendingCompensation(LoanId loanId);
 
@@ -97,15 +121,12 @@ public interface ReservationGenerations {
     void compensationDone(LoanId loanId, int generation);
 
     /**
-     * Rows of never-disbursed loans with a pending compensation or a
-     * RESERVING or RESERVED reservation, unchanged since {@code before},
-     * oldest first; rows left for an operator after a refused release are
-     * not included.
+     * Rows of never-disbursed loans with a pending compensation or an
+     * outstanding reservation (RESERVING, RESERVED, UNCONFIRMED), unchanged
+     * since {@code before}, oldest first; rows left for an operator after a
+     * refused release are not included.
      */
     List<Unresolved> unresolved(Instant before, int limit);
-
-    /** In its own transaction: a RESERVING row of {@code generation} becomes UNCONFIRMED. */
-    boolean markUnconfirmed(LoanId loanId, int generation);
 
     /**
      * In its own transaction: the customer service refused the pending
@@ -123,7 +144,4 @@ public interface ReservationGenerations {
 
     /** Never-disbursed loans whose credit may still be held: pending compensations and outstanding reservations. */
     long countPending();
-
-    /** Reservations left for an operator (UNCONFIRMED). */
-    long countUnconfirmed();
 }

@@ -72,8 +72,9 @@ public class JdbcReservationGenerations implements ReservationGenerations {
                 on conflict (loan_id) do update
                    set reservation_state = 'RESERVING', updated_at = now()
                  where credit_reservation_generation.generation = excluded.generation
-                   and credit_reservation_generation.reservation_state is null
                    and credit_reservation_generation.pending_compensation is null
+                   and (credit_reservation_generation.reservation_state is null
+                        or credit_reservation_generation.reservation_state in ('RESERVING', 'UNCONFIRMED'))
                 """, loanId.getValue(), generation);
             Reservation row = find(loanId).orElseThrow(() -> new IllegalStateException("reservation row not stored"));
             if (row.generation() != generation || row.pendingCompensation() != null
@@ -140,6 +141,17 @@ public class JdbcReservationGenerations implements ReservationGenerations {
     }
 
     @Override
+    public boolean beginCompensationOfUnanswered(LoanId loanId, int generation, Instant before) {
+        Integer updated = newTransaction.execute(status -> jdbc.update("""
+            update credit_reservation_generation
+               set generation = ?, pending_compensation = ?, reservation_state = null, updated_at = now()
+             where loan_id = ? and generation = ? and pending_compensation is null
+               and reservation_state in ('RESERVING', 'UNCONFIRMED') and updated_at < ?
+            """, generation + 1, generation, loanId.getValue(), generation, Timestamp.from(before)));
+        return updated != null && updated > 0;
+    }
+
+    @Override
     public OptionalInt pendingCompensation(LoanId loanId) {
         List<Integer> rows = jdbc.queryForList(
             "select pending_compensation from credit_reservation_generation where loan_id = ? and pending_compensation is not null",
@@ -162,24 +174,15 @@ public class JdbcReservationGenerations implements ReservationGenerations {
                    l.customer_id, l.principal_amount, l.currency
               from credit_reservation_generation r join loan l on l.loan_id = r.loan_id
              where l.status in (%s)
-               and (r.pending_compensation is not null or r.reservation_state in ('RESERVING', 'RESERVED'))
+               and (r.pending_compensation is not null or r.reservation_state in %s)
                and r.release_refused_code is null
                and r.updated_at < ?
              order by r.updated_at
              limit ?
-            """.formatted(NEVER_DISBURSED), (rs, row) -> new Unresolved(reservation(rs, row),
+            """.formatted(NEVER_DISBURSED, OUTSTANDING), (rs, row) -> new Unresolved(reservation(rs, row),
                 CustomerId.of(rs.getString("customer_id")),
                 Money.of(rs.getBigDecimal("principal_amount"), Currency.getInstance(rs.getString("currency")))),
             Timestamp.from(before), limit);
-    }
-
-    @Override
-    public boolean markUnconfirmed(LoanId loanId, int generation) {
-        Integer updated = newTransaction.execute(status -> jdbc.update("""
-            update credit_reservation_generation set reservation_state = 'UNCONFIRMED', updated_at = now()
-             where loan_id = ? and generation = ? and reservation_state = 'RESERVING'
-            """, loanId.getValue(), generation));
-        return updated != null && updated > 0;
     }
 
     @Override
@@ -211,13 +214,6 @@ public class JdbcReservationGenerations implements ReservationGenerations {
              where l.status in (%s)
                and (r.pending_compensation is not null or r.reservation_state in %s)
             """.formatted(NEVER_DISBURSED, OUTSTANDING), Long.class);
-        return count == null ? 0 : count;
-    }
-
-    @Override
-    public long countUnconfirmed() {
-        Long count = jdbc.queryForObject(
-            "select count(*) from credit_reservation_generation where reservation_state = 'UNCONFIRMED'", Long.class);
         return count == null ? 0 : count;
     }
 

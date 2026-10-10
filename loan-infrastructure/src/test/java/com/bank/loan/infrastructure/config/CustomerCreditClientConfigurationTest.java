@@ -100,22 +100,51 @@ class CustomerCreditClientConfigurationTest {
         com.bank.loan.infrastructure.external.ReservationGenerations generations =
             org.mockito.Mockito.mock(com.bank.loan.infrastructure.external.ReservationGenerations.class);
         org.mockito.Mockito.when(generations.countPending()).thenReturn(2L);
-        org.mockito.Mockito.when(generations.countUnconfirmed()).thenReturn(1L);
         CustomerCreditClientConfiguration configuration = new CustomerCreditClientConfiguration();
 
         configuration.creditReservationsPendingGauge(registry, generations);
-        configuration.creditReservationsUnconfirmedGauge(registry, generations);
         org.mockito.Mockito.when(generations.countReleaseRefused()).thenReturn(4L);
         configuration.creditReleasesRefusedGauge(registry, generations);
 
         assertThat(registry.get("loan.credit.reservations.pending").gauge().value()).isEqualTo(2.0);
         assertThat(registry.get("loan.credit.reservations.pending").gauge().getId().getTags()).isEmpty();
-        assertThat(registry.get("loan.credit.reservations.operator").tag("reason", "unconfirmed").gauge().value())
-            .isEqualTo(1.0);
         assertThat(registry.get("loan.credit.reservations.operator").tag("reason", "release_exceeds_reservation")
             .gauge().value()).isEqualTo(4.0);
         assertThat(registry.get("loan.credit.reservations.operator").gauges())
             .allSatisfy(gauge -> assertThat(gauge.getId().getTags()).extracting(io.micrometer.core.instrument.Tag::getKey)
                 .containsExactly("reason"));
+    }
+
+    /**
+     * The sweep releases a reserve that was never answered once the grace
+     * period has passed, so the grace must outlast the longest a reserve call
+     * can still be in flight: max-attempts x (connect + read timeout).
+     */
+    @Test
+    void theSweepGraceMustOutlastTheLongestReserveCall() {
+        java.time.Duration connect = java.time.Duration.ofSeconds(1);
+        java.time.Duration read = java.time.Duration.ofSeconds(2);
+
+        assertThatThrownBy(() -> CustomerCreditClientConfiguration.checkGrace(java.time.Duration.ofSeconds(9), connect, read, 3))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("CREDIT_RESERVATION_SWEEP_GRACE");
+        assertThatThrownBy(() -> CustomerCreditClientConfiguration.checkGrace(java.time.Duration.ZERO, connect, read, 1))
+            .isInstanceOf(IllegalStateException.class);
+        CustomerCreditClientConfiguration.checkGrace(java.time.Duration.ofSeconds(10), connect, read, 3);
+        CustomerCreditClientConfiguration.checkGrace(java.time.Duration.ofMinutes(10), connect, read, 3);
+
+        new org.springframework.boot.test.context.runner.ApplicationContextRunner()
+            .withBean(com.bank.loan.infrastructure.external.ReservationGenerations.class,
+                () -> org.mockito.Mockito.mock(com.bank.loan.infrastructure.external.ReservationGenerations.class))
+            .withBean(com.bank.loan.domain.port.out.CustomerCreditService.class,
+                () -> org.mockito.Mockito.mock(com.bank.loan.domain.port.out.CustomerCreditService.class))
+            .withBean(org.springframework.jdbc.core.JdbcTemplate.class,
+                () -> org.mockito.Mockito.mock(org.springframework.jdbc.core.JdbcTemplate.class))
+            .withBean(java.time.Clock.class, java.time.Clock::systemUTC)
+            .withInitializer(context -> context.getBeanFactory().setConversionService(
+                new org.springframework.boot.convert.ApplicationConversionService()))
+            .withPropertyValues("loan.credit-reservation.sweep.initial-delay=PT1H", "loan.credit-reservation.sweep.grace=PT5S")
+            .withUserConfiguration(CustomerCreditClientConfiguration.SweepConfiguration.class)
+            .run(context -> assertThat(context).hasFailed());
     }
 }

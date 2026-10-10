@@ -1,11 +1,12 @@
 # Copied for loan's consumer contract test (CustomerProfileHttpAdapterContractTest).
 # Source: fintechbankx-customer-profile-kyc-core, branch claude/customer-risk-compliance-deployable-ygi0zo (PR #13),
-# commit 8794365 (OpenAPI identical to 36a01e2 and cf86385), file api/openapi/customer-context.yaml, unchanged. Since 435aa83 (422 CURRENCY_MISMATCH for a
-# valid but different ISO currency, 400 for a malformed one) it adds the kyc-status endpoints, drops the DPoP
-# security alternative, and treats a credit movement as a repeat only when key, type, amount, currency and
-# reference all match (otherwise 409 IDEMPOTENCY_KEY_REUSED). Loan calls only /credit, /credit/reserve and
-# /credit/release, never identity-link (so never sees 422 IDENTITY_USER_NOT_FOUND). Replace with the
-# catalogued version once merged.
+# head 4a8f468, file api/openapi/customer-context.yaml, unchanged (identical to a6ebe01). Since 8794365 it states the
+# release-by-reference rules (customer CRC decision 2026-10-10, a6ebe01): a release whose reference matches no
+# reservation is always 422 RESERVATION_NOT_FOUND and never touches untracked or migrated credit; a tracked
+# reference released beyond what it holds is 422 RELEASE_EXCEEDS_RESERVATION; only a release without a reference
+# takes untracked used credit. changeKycStatus names the aggregate topic evt.cus.customer.v1 itself, so loan's
+# earlier local edit is gone. Loan calls only /credit, /credit/reserve and /credit/release, never identity-link.
+# PR #13 is not merged: replace with the catalogued version once it is.
 openapi: 3.0.3
 info:
   title: Customer Context Service API
@@ -209,7 +210,7 @@ paths:
       description: |-
         BANKER or ADMIN only. Records the token subject as the staff member who
         changed it and publishes Customer.Customer.KycStatusChanged.v1 on
-        evt.cus.customer.v1 (eventType header). Setting the current status
+        evt.cus.customer.v1 (the customer aggregate topic). Setting the current status
         again changes nothing and publishes nothing.
       security:
         - bearerAuth: []
@@ -402,6 +403,18 @@ paths:
         position without moving credit again; the same key with any of these
         different is 409 IDEMPOTENCY_KEY_REUSED. The answer is the credit
         position only (no personal data).
+
+        Release by reference: a reference that names one of the customer's
+        reservations (the reference sent with earlier reserves) releases at
+        most what that reservation still holds; partial releases are fine,
+        more is 422 RELEASE_EXCEEDS_RESERVATION. A release that carries a
+        reference matching no reservation is always 422 RESERVATION_NOT_FOUND,
+        whatever the amount, so an unknown loan id never touches migrated
+        credit. Only a release without a reference releases untracked used
+        credit, at most used credit minus all open reservations (for example
+        a balance migrated from the monolith); more is 422
+        RESERVATION_NOT_FOUND. Nothing is floored at zero. An idempotency-key
+        replay is answered before these rules.
       security:
         - bearerAuth: []
       parameters:
@@ -454,7 +467,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
-          description: CURRENCY_MISMATCH, a valid ISO 4217 currency other than the customer's credit currency (a malformed currency is 400)
+          description: CURRENCY_MISMATCH, a valid ISO 4217 currency other than the customer's credit currency (a malformed currency is 400); RELEASE_EXCEEDS_RESERVATION, the release is larger than what the named reservation still holds; RESERVATION_NOT_FOUND, the reference matches no reservation, or a release without a reference is larger than the untracked used credit. Nothing is released in any of these cases
           content:
             application/json:
               schema:
@@ -640,7 +653,7 @@ components:
         reference:
           type: string
           maxLength: 128
-          description: What the credit is moved for, for example the loan id. Stored with the movement for reconciliation.
+          description: What the credit is moved for, for example the loan id. Stored with the movement for reconciliation. A reserve with a reference adds to that reservation; a release with a reference takes from that reservation and is refused with RESERVATION_NOT_FOUND when none matches (see releaseCredit). Optional; without it a reserve is untracked and a release may take only untracked used credit.
 
     KycStatusResponse:
       type: object

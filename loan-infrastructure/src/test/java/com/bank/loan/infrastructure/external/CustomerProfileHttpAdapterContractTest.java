@@ -70,6 +70,25 @@ class CustomerProfileHttpAdapterContractTest {
             .as("422 CURRENCY_MISMATCH on release").containsKey("422");
     }
 
+    /**
+     * Customer CRC decision 2026-10-10 (customer PR #13 commit a6ebe01): a
+     * release whose reference matches no reservation is always 422
+     * RESERVATION_NOT_FOUND and never touches untracked or migrated credit;
+     * a tracked reference keeps RELEASE_EXCEEDS_RESERVATION. The recovery
+     * sweep's release of an unanswered reserve by its reference relies on it.
+     */
+    @Test
+    void aReleaseByAnUnknownReferenceIsRefusedNotTakenFromUntrackedCredit() {
+        Map<String, Object> release = operation(CustomerProfileHttpAdapter.Paths.DEFAULT.release(), "post");
+        String unprocessable = String.valueOf(map(responses(release).get("422")).get("description"));
+        String description = String.valueOf(release.get("description")).replaceAll("\\s+", " ");
+
+        assertThat(unprocessable).contains(CustomerProfileHttpAdapter.RESERVATION_NOT_FOUND)
+            .contains(CustomerProfileHttpAdapter.RELEASE_EXCEEDS_RESERVATION);
+        assertThat(description).contains("reference matching no reservation is always 422 RESERVATION_NOT_FOUND")
+            .contains("Only a release without a reference releases untracked used credit");
+    }
+
     @Test
     void errorsCarryTheCodeTheAdapterBranchesOn() {
         Map<String, Object> error = resolve(Map.of("$ref", "#/components/schemas/ErrorResponse"));

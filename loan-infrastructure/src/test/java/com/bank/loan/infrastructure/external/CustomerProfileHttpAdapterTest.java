@@ -447,6 +447,42 @@ class CustomerProfileHttpAdapterTest {
         server.verify();
     }
 
+    /**
+     * The sweep's release of a reserve that was never answered (customer CRC
+     * decision 2026-10-10): once the sweep has recorded the intent, the
+     * release goes under the reserve's compensation key with the loan id as
+     * reference, the same reference the reserve carried. 422
+     * RESERVATION_NOT_FOUND means the reserve was never applied: the row is
+     * cleared and the release counted as unmatched.
+     */
+    @Test
+    void anUnansweredReserveIsReleasedByItsReferenceOnceTheSweepRecordedTheIntent() {
+        Money amount = Money.aed(new BigDecimal("12000.00"));
+        server.expect(requestTo(BASE + "/credit/reserve"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve"))
+            .andExpect(content().json("{\"amount\":12000.00,\"currency\":\"AED\",\"reference\":\"LOAN-HTTP-1\"}"))
+            .andRespond(withException(new SocketTimeoutException("Read timed out")));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve:compensation"))
+            .andExpect(content().json("{\"amount\":12000.00,\"currency\":\"AED\",\"reference\":\"LOAN-HTTP-1\"}"))
+            .andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY).contentType(MediaType.APPLICATION_JSON)
+                .body("{\"code\":\"RESERVATION_NOT_FOUND\",\"message\":\"no reservation for the reference\"}"));
+        io.micrometer.core.instrument.simple.SimpleMeterRegistry meters = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        CustomerProfileHttpAdapter counted = new CustomerProfileHttpAdapter(builder.build(), () -> "service-token",
+            Currency.getInstance("AED"), generations, 3, CustomerProfileHttpAdapter.Paths.DEFAULT, meters);
+
+        assertThatThrownBy(() -> counted.reserveCredit(LOAN, CUSTOMER, amount))
+            .isInstanceOf(CustomerCreditUnavailableException.class);
+        assertThat(generations.beginCompensationOfUnanswered(LOAN, 0, java.time.Instant.parse("2026-10-10T00:00:00Z"))).isTrue();
+        assertThat(counted.releaseUnusedReservation(LOAN, CUSTOMER, amount)).isEqualTo(UnusedReservation.NONE);
+
+        assertThat(generations.current(LOAN)).isEqualTo(1);
+        assertThat(generations.pendingCompensation(LOAN)).isEmpty();
+        assertThat(generations.state(LOAN)).isNull();
+        assertThat(meters.get("loan.credit.releases.unmatched").counter().count()).isEqualTo(1.0);
+        server.verify();
+    }
+
     @Test
     void anAcceptedUnusedReservationIsReleasedOnceUnderItsCompensationKey() {
         Money amount = Money.aed(new BigDecimal("25000.00"));
@@ -719,6 +755,18 @@ class CustomerProfileHttpAdapterTest {
         }
 
         @Override
+        public synchronized boolean beginCompensationOfUnanswered(LoanId loanId, int generation, java.time.Instant before) {
+            Reservation row = rows.get(loanId);
+            if (row == null || row.generation() != generation || row.pendingCompensation() != null
+                    || (row.state() != State.RESERVING && row.state() != State.UNCONFIRMED)
+                    || !row.updatedAt().isBefore(before)) {
+                return false;
+            }
+            put(loanId, generation + 1, null, generation);
+            return true;
+        }
+
+        @Override
         public synchronized boolean beginCompensationOfAccepted(LoanId loanId, int generation) {
             if (failGenerationWrites) {
                 throw new IllegalStateException("database unavailable");
@@ -756,25 +804,10 @@ class CustomerProfileHttpAdapterTest {
         }
 
         @Override
-        public synchronized boolean markUnconfirmed(LoanId loanId, int generation) {
-            Reservation row = rows.get(loanId);
-            if (row == null || row.generation() != generation || row.state() != State.RESERVING) {
-                return false;
-            }
-            put(loanId, generation, State.UNCONFIRMED, row.pendingCompensation());
-            return true;
-        }
-
-        @Override
         public synchronized long countPending() {
             return rows.values().stream()
                 .filter(row -> row.pendingCompensation() != null || (row.state() != null && row.state() != State.USED))
                 .count();
-        }
-
-        @Override
-        public synchronized long countUnconfirmed() {
-            return rows.values().stream().filter(row -> row.state() == State.UNCONFIRMED).count();
         }
 
         private final Map<LoanId, String> refusals = new HashMap<>();

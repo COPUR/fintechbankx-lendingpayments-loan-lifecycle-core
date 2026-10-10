@@ -50,15 +50,20 @@ import java.util.regex.Pattern;
  *       one is re-sent before the next reservation, by the cancellation of
  *       the loan, or by the recovery sweep ({@link ReservationGenerations},
  *       {@link CreditReservationSweep}).</li>
- *   <li>A release is sent only for a reservation known to be accepted: the
- *       customer service subtracts a release without checking that a
- *       reservation for the reference exists (customer #13
- *       CreditProfile.releaseCredit), so a blind release would free credit
- *       held by the customer's other loans. Customer release by reference
- *       (provider contract pending, codes RESERVATION_NOT_FOUND and
- *       RELEASE_EXCEEDS_RESERVATION) is mapped in {@code sendCompensation};
- *       the release names the reservation with the same reference (the
- *       loan id) it was reserved with.</li>
+ *   <li>Every release names the reservation by the reference it was
+ *       reserved with (the loan id). Customer release by reference: a
+ *       reference that matches no reservation is always 422
+ *       RESERVATION_NOT_FOUND and never touches untracked or migrated
+ *       credit; a tracked reference released beyond what it holds is 422
+ *       RELEASE_EXCEEDS_RESERVATION (customer CRC decision 2026-10-10,
+ *       customer-profile-kyc-core PR #13 commit a6ebe01, not merged yet;
+ *       mapped in {@code sendCompensation}). On the request path a release
+ *       is sent only for a reservation known to be accepted; a reserve that
+ *       was never answered is released by the recovery sweep only, after the
+ *       grace period ({@link CreditReservationSweep}). Without the customer
+ *       change a release for a reserve that was never applied could free
+ *       credit held by the customer's other loans or migrated credit, so this
+ *       must not be deployed before it.</li>
  *   <li>409 CONCURRENT_UPDATE / DUPLICATE_REQUEST are retried with the same
  *       key, at most {@code maxAttempts} times, then unavailable.</li>
  *   <li>422 INSUFFICIENT_CREDIT is the only refusal
@@ -98,7 +103,7 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
     private final Paths paths;
     private final Counter unmatchedReleases;
 
-    /** Customer release-by-reference codes (provider contract pending, see the class comment). */
+    /** Customer release-by-reference codes (customer PR #13 commit a6ebe01, see the class comment). */
     static final String RESERVATION_NOT_FOUND = "RESERVATION_NOT_FOUND";
     static final String RELEASE_EXCEEDS_RESERVATION = "RELEASE_EXCEEDS_RESERVATION";
     static final String UNMATCHED_RELEASES = "loan.credit.releases.unmatched";
@@ -234,8 +239,11 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
     /**
      * Re-sends a pending compensation, then compensates a reservation
      * recorded as RESERVED. A reservation still RESERVING or UNCONFIRMED is
-     * left alone: it may never have been applied, and the customer service
-     * would subtract a release of it from other loans' credit.
+     * left alone here: its reserve may still be in flight, and a release that
+     * overtakes it would find nothing while the reserve then holds credit
+     * with no record. The recovery sweep takes such a row over once the grace
+     * period has passed ({@link ReservationGenerations#beginCompensationOfUnanswered})
+     * and then calls this method, which sends it as a pending compensation.
      */
     @Override
     public UnusedReservation releaseUnusedReservation(LoanId loanId, CustomerId customerId, Money amount) {
@@ -283,8 +291,10 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
      * reference (provider contract pending):
      * <ul>
      *   <li>422 RESERVATION_NOT_FOUND: nothing was reserved under the loan's
-     *       reference, so there is nothing to release; the intent is done,
-     *       logged and counted (loan_credit_releases_unmatched_total);</li>
+     *       reference (for the sweep's release of an unanswered reserve: the
+     *       reserve was never applied), so there is nothing to release; the
+     *       intent is done, the row cleared, logged and counted
+     *       (loan_credit_releases_unmatched_total);</li>
      *   <li>422 RELEASE_EXCEEDS_RESERVATION: this service asked to release
      *       more than is held, a bug signal. The compensation stays pending
      *       with the code recorded, is never re-sent, and waits for an operator

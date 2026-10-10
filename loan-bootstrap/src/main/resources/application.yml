@@ -155,13 +155,16 @@ loan:
     sweep:
       # Review 5460235552: re-drives credit reservations of never-disbursed loans
       # that a crash, a failed disbursement or an abandoned loan left behind
-      # (pending releases, accepted reservations); a reserve that was never
-      # answered is marked UNCONFIRMED for an operator, never released blind.
+      # (pending releases, accepted reservations, and reserves that were never
+      # answered), releasing each by its reference (the loan id) once the grace
+      # period has passed. Needs the customer service's 422
+      # RESERVATION_NOT_FOUND for an unknown reference (customer-profile-kyc-core
+      # PR #13 a6ebe01) to be live first. The grace must outlast max-attempts x
+      # (connect-timeout + read-timeout) or the service does not start.
       # One replica at a time (advisory lock); runs at start-up, then after
       # each interval. Gauges: loan_credit_reservations_pending,
-      # loan_credit_reservations_operator{reason}.
-      # The chart sets all three (values.yaml config); see the runbook for the
-      # operator states UNCONFIRMED and RELEASE_EXCEEDS_RESERVATION.
+      # loan_credit_reservations_operator{reason="release_exceeds_reservation"}.
+      # The chart sets all three (values.yaml config); see runbook section 8.
       enabled: ${CREDIT_RESERVATION_SWEEP_ENABLED:true}
       interval: ${CREDIT_RESERVATION_SWEEP_INTERVAL:PT1M}
       grace: ${CREDIT_RESERVATION_SWEEP_GRACE:PT10M}
