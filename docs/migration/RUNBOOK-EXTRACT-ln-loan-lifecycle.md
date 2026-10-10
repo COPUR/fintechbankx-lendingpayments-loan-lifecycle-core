@@ -9,8 +9,8 @@ Extraction of the Loan aggregate from `enterprise-loan-management-system` into
 | Context / service | `ln` / `svc-ln-loan-lifecycle` (`app.ln.loan-lifecycle`) |
 | Slice | Loan aggregate: application, approval, disbursement, repayment, schedule, repayment history |
 | Owned data | `db_ln_loan_lifecycle_<env>`, schema `sc_ln_loan_lifecycle`: `loan`, `loan_installment`, `repayment`, `repayment_allocation`, `inbox_message`, `credit_reservation_generation`, `outbox_event` |
-| Publishes | `evt.ln.loan.{created,approved,rejected,disbursed,cancelled,payment-made,fully-paid}.v1`, DLQ `evt.ln.loan.dlq.v1` (`api/asyncapi/svc-ln-loan-lifecycle.yaml`; **catalog PR pending**, relay off until it merges) |
-| Consumes | `evt.pay.payment.loan-payment-completed.v1`, group `cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1` (off until step 3) |
+| Publishes | `evt.ln.loan.v1`, one topic for the Loan aggregate (ADR-019, owner decision 2026-10-08): `Lending.Loan.{Created,Approved,Rejected,Disbursed,Cancelled,PaymentMade,FullyPaid}.v1`, named by the `eventType` header, key = loanId; DLQ `evt.ln.loan.dlq.v1` (`api/asyncapi/svc-ln-loan-lifecycle.yaml`; **catalog PR pending**, relay off until it merges) |
+| Consumes | `evt.pay.payment.v1` (payment aggregate topic), handles only `Payments.Payment.LoanPaymentCompleted.v1` by the `eventType` header and skips every other type (offset committed, never dead-lettered); group `cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1` (off until step 3) |
 | Depends on | `svc-cus-profile-kyc`: `GET /api/v1/customers/{id}/credit`, `POST .../credit/reserve`, `POST .../credit/release` |
 
 ## 1. Data ownership split
@@ -82,8 +82,8 @@ loan, second run, delta checks.
 | Precondition | Before | Why |
 |---|---|---|
 | Customer cutover (`RUNBOOK-EXTRACT-cus-profile-kyc`, customer-profile-kyc-core 8794365) through its step 5; its step 5 routes the monolith's credit writes to the customer service and switches this service to `CUSTOMER_CREDIT_ADAPTER=http` | loan step 2 | one credit ledger: otherwise the monolith and the customer service both move `used_credit` |
-| Payments slice ready to cut over in the same window, publishing `evt.pay.payment.loan-payment-completed.v1` | loan step 2 | loan and payments writes move together; repayments must land in exactly one place |
-| `evt.ln.loan.*`, `evt.ln.loan.dlq.v1`, `evt.pay.payment.loan-payment-completed.v1` in the asyncapi catalog and created on the cluster (catalog PR pending) | step 3 (consumer), step 4 (relay) | the service never creates topics |
+| Payments slice ready to cut over in the same window, publishing `Payments.Payment.LoanPaymentCompleted.v1` on `evt.pay.payment.v1` | loan step 2 | loan and payments writes move together; repayments must land in exactly one place |
+| `evt.ln.loan.v1`, `evt.ln.loan.dlq.v1`, `evt.pay.payment.v1` in the asyncapi catalog and created on the cluster (catalog PR pending; event-streaming-kafka PR #12, c4b69b0, adds `evt.ln.loan.v1` and `evt.pay.payment.v1` to the topic provisioning) | step 3 (consumer), step 4 (relay) | the service never creates topics |
 | ConfigMap `rds-ca-bundle` (key `global-bundle.pem`) published in namespace `lending` by trust-manager (mesh repo `k8s/platform/cert-manager/bundle-rds-ca.yaml`); `DB_URL` = Terraform output `jdbc_url` (`sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem`, chart `databaseCa.mountPath`) | step 1 | the pods mount the bundle to verify Aurora's certificate; without it they do not start |
 | Install order: cert-manager, trust-manager and the `rds-ca-bundle` Bundle (mesh 5e756f0, `k8s/platform/cert-manager/bundle-rds-ca.yaml`) are installed before any service chart. Note: `scripts/istio/install-mesh.sh` at mesh 4bf3906 installs Istio and the kustomize policies only; the cert-manager and trust-manager step is the mesh team's to confirm | step 1 | the `database-ca` volume is not optional: a pod scheduled earlier stays `ContainerCreating` until the ConfigMap appears. That includes the pre-install migration Job, so `helm install` waits and then fails on its hook timeout |
 | Mesh team has applied the requests in "Requests to the mesh team" below (A: gateway route, B: Aurora and MSK egress, C: callee ALLOW rules, plus the README "Callers" ALLOW rules) | step 1 (B), step 2 (A, C) | namespace `lending` is default-deny and outbound traffic is `REGISTRY_ONLY`: without B the readiness check (`db`) fails and the pods never become ready |
@@ -142,7 +142,7 @@ Inbound ALLOW rules for this service's own callers are listed in README "Callers
 | 1 | Deploy with `OUTBOX_RELAY_ENABLED=false`, `LOAN_REPAYMENT_CONSUMER_ENABLED=false`; run the backfill; reconcile. Repeat any time before step 2 (delta-safe) | drop `sc_ln_loan_lifecycle`; nothing else changed |
 | 2 | One window, loan and payments together: (a) **write freeze**: monolith loan and payment writes off (maintenance flag), wait until no payment is INITIATED or PROCESSING; (b) **final delta**: run the backfill; (c) **reconcile**: must pass; (d) **flip**: the monolith's anti-corruption client sends loan writes to this API, payments to `svc-pay-initiation-settlement` | before (d): lift the freeze, nothing moved. After (d): see section 5 |
 | 3 | Enable the repayment consumer (`LOAN_REPAYMENT_CONSUMER_ENABLED=true`) in the same window as step 2 (d) | consumer off; unprocessed events wait on the topic (committed offsets) |
-| 4 | Enable the outbox relay; consumers move to `evt.ln.loan.*.v1` | relay off; events stay in the outbox |
+| 4 | Enable the outbox relay; consumers read `evt.ln.loan.v1` and route on the `eventType` header | relay off; events stay in the outbox |
 | 5 | Monolith stops writing `loans` / `loan_installments` / `payments` for good | flag back; monolith tables are intact but stale since step 2 (section 5) |
 | 6 | After the payment cutover is final and one full month-end cycle passed: drop the monolith FKs first (`fk_payments_loan` on `payments`, `fk_payment_installments_installment`, then `fk_loans_customer`), then `payment_installments`, `loan_installments`, `loans` | restore from snapshot |
 
@@ -150,7 +150,7 @@ Inbound ALLOW rules for this service's own callers are listed in README "Callers
 
 The service is the system of record from step 2 (d). Rollback is a **forward fix** by default. If the
 service has to be abandoned, it is a **reverse replay**: rebuild the monolith rows from
-`evt.ln.loan.*.v1` (loan state and `payment-made` with `paymentId`) and `repayment` /
+`evt.ln.loan.v1` (loan state and `Lending.Loan.PaymentMade.v1` with `paymentId`) and `repayment` /
 `repayment_allocation`, under a new write freeze; the outbox keeps every event since step 1 even
 while the relay is off. Never simply flip the flag back: writes made in the service after the flip
 would be lost.

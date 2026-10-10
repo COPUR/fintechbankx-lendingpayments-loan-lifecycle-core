@@ -93,7 +93,7 @@ config:
   # REQUIRED ISO 4217 currency the customer service holds credit in. No
   # default: the book's currency is a business decision, never assumed.
   CUSTOMER_CREDIT_LEDGER_CURRENCY: ""
-  # Off until evt.ln.loan.* are in the platform catalog (runbook step 1).
+  # Off until evt.ln.loan.v1 is in the platform catalog (runbook step 1).
   OUTBOX_RELAY_ENABLED: "false"
   # Off until the loan and payments writes cut over together (runbook step 3).
   LOAN_REPAYMENT_CONSUMER_ENABLED: "false"

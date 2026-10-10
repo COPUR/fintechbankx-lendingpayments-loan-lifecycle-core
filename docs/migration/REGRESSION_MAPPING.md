@@ -12,7 +12,7 @@ Status: **Proposed**. For the regression parity suite (enterprise-loan-managemen
 | Branch | `claude/project-thread-ty79y4` (PR #14) |
 | Service id / app | `svc-ln-loan-lifecycle` / `app.ln.loan-lifecycle` |
 | Base path | `/api/v1/loans` on port 8080 (actuator on 8081) |
-| Customer service it was built against | `fintechbankx-customer-profile-kyc-core` branch `claude/customer-risk-compliance-deployable-ygi0zo` (PR #13), commit `c3596f2`: reserve, release and `GET .../credit` all return `CustomerCreditResponse`; the vendored contract copy (`loan-infrastructure/src/test/resources/contracts/customer-context.yaml`) is refreshed from commit `8794365` |
+| Customer service it was built against | `fintechbankx-customer-profile-kyc-core` branch `claude/customer-risk-compliance-deployable-ygi0zo` (PR #13), commit `c3596f2`: reserve, release and `GET .../credit` all return `CustomerCreditResponse`; the vendored contract copy (`loan-infrastructure/src/test/resources/contracts/customer-context.yaml`) is refreshed from commit `8794365`; one local edit since: the `changeKycStatus` description names the aggregate topic `evt.cus.customer.v1` (ADR-019, one topic per aggregate) instead of the per-event topic, until the customer provider's spec says so. This service does not consume `Customer.Customer.KycStatusChanged.v1` |
 
 ## 2. Endpoints
 

@@ -90,23 +90,54 @@ identified by the token's `customer_id` claim.
 ## Events
 
 ```yaml
-published_events:   # api/asyncapi/svc-ln-loan-lifecycle.yaml, key = loanId, via the transactional outbox
-  - evt.ln.loan.created.v1        # Lending.Loan.Created.v1
-  - evt.ln.loan.approved.v1       # Lending.Loan.Approved.v1
-  - evt.ln.loan.rejected.v1       # Lending.Loan.Rejected.v1
-  - evt.ln.loan.disbursed.v1      # Lending.Loan.Disbursed.v1
-  - evt.ln.loan.cancelled.v1      # Lending.Loan.Cancelled.v1
-  - evt.ln.loan.payment-made.v1   # Lending.Loan.PaymentMade.v1
-  - evt.ln.loan.fully-paid.v1     # Lending.Loan.FullyPaid.v1
-  - evt.ln.loan.dlq.v1            # this service's DLQ (records the repayment consumer gave up on)
+published_events:   # api/asyncapi/svc-ln-loan-lifecycle.yaml, via the transactional outbox
+  - topic: evt.ln.loan.v1        # one topic per aggregate (ADR-019); key = loanId; eventType header
+    event_types:
+      - Lending.Loan.Created.v1
+      - Lending.Loan.Approved.v1
+      - Lending.Loan.Rejected.v1
+      - Lending.Loan.Disbursed.v1
+      - Lending.Loan.Cancelled.v1
+      - Lending.Loan.PaymentMade.v1
+      - Lending.Loan.FullyPaid.v1
+  - topic: evt.ln.loan.dlq.v1    # this service's DLQ (records the repayment consumer gave up on)
 consumed_events:
-  - topic: evt.pay.payment.loan-payment-completed.v1   # Payments.Payment.LoanPaymentCompleted.v1
+  - topic: evt.pay.payment.v1    # payment aggregate topic; every other event type is skipped
+    event_types:
+      - Payments.Payment.LoanPaymentCompleted.v1
     group: cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1
     enabled_by: LOAN_REPAYMENT_CONSUMER_ENABLED (default false)
 ```
 
+Every record carries the UTF-8 headers `eventType`, `eventId` and `correlationId` (equal to the envelope's),
+`x-fapi-interaction-id` when the flow started at the loan API, and `traceparent` when the request was traced.
+The repayment consumer reads the `eventType` header first: any type other than
+`Payments.Payment.LoanPaymentCompleted.v1` is skipped (offset committed, never failed, never dead-lettered).
+
 The topics are not yet in the platform asyncapi catalog (catalog PR pending); the relay stays off
 (`OUTBOX_RELAY_ENABLED=false`) until they are.
+
+History: until 2026-10-08 the contract used one topic per event type; the owner decided on one topic per
+aggregate (ADR-019 section 8). Nothing was ever published to the per-event topics, and migration V11 points
+outbox rows written before it at `evt.ln.loan.v1`.
+
+### AsyncAPI gate
+
+`ci/test` validates `api/asyncapi/*.yaml` with `@asyncapi/cli@2.13.0` and runs the catalog's breaking-change
+check against `origin/main` (`ASYNCAPI_DIR=api/asyncapi`, ADR-019 section 5). The check's scripts and the
+shared envelope are copies of the asyncapi catalog (`fintechbankx-governance-api-contracts-asyncapi-catalog`)
+at commit `44837cc`, unchanged; the step "AsyncAPI gate scripts match the catalog copy" fails when a copy's
+sha256 differs:
+
+| Copy | sha256 |
+|---|---|
+| `scripts/ci/asyncapi-breaking.mjs` | `de255737fe6b54ffbadce8e030e18eec48d0137e0abd43c790fe201a10015eb1` |
+| `scripts/ci/asyncapi-breaking.sh` | `5b39d588673c5f7ab55fcfa548fffd70b96ab9b11ea82bd2b61468dadb430c77` |
+| `scripts/ci/lib/asyncapi-model.mjs` | `212df6ca092e1ed5519664d7848c9de5fdb5d137f34faa3d31a25e3fe29b3847` |
+
+`api/asyncapi/common/event-envelope.yaml` is the catalog's `asyncapi/common/event-envelope.yaml` at the same
+commit. Waivers go in `api/asyncapi/<spec-name>.accepted-breaking.txt` and need the API owner's review
+(CODEOWNERS); the spec is not on `origin/main` yet, so the gate skips it as a new file and none is needed.
 
 ## Callers (mesh ALLOW rules)
 

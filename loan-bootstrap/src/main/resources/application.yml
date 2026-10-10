@@ -169,7 +169,8 @@ loan:
   outbox:
     retention: P7D
     relay:
-      # Off until the evt.ln.loan.* topics are in the platform catalog.
+      # Off until the aggregate topic evt.ln.loan.v1 (every Loan event type,
+      # eventType header; ADR-019) is in the platform catalog and on the cluster.
       enabled: ${OUTBOX_RELAY_ENABLED:false}
       interval: PT1S
       batch-size: 100
@@ -181,8 +182,10 @@ loan:
       # Alert on outbox_oldest_pending_age_seconds; failures count in
       # outbox_send_failures_total{exception}.
   repayment-consumer:
-    # evt.pay.payment.loan-payment-completed.v1; off until the topic and this
-    # service's DLQ evt.ln.loan.dlq.v1 exist and the payments cutover window opens.
+    # Reads the payment aggregate topic evt.pay.payment.v1, handles only
+    # Payments.Payment.LoanPaymentCompleted.v1 (eventType header) and skips the
+    # other types; off until the topic and this service's DLQ evt.ln.loan.dlq.v1
+    # exist and the payments cutover window opens.
     enabled: ${LOAN_REPAYMENT_CONSUMER_ENABLED:false}
     concurrency: 1
 

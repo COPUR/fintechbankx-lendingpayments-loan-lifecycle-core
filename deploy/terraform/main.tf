@@ -249,25 +249,29 @@ data "aws_iam_policy_document" "msk" {
     resources = [var.msk_cluster_arn]
   }
 
+  # One topic per aggregate (ADR-019): the Loan aggregate topic, and this
+  # service's DLQ, where the repayment consumer writes records it gives up on.
   statement {
     sid = "ProduceOwnTopics"
     actions = [
       "kafka-cluster:DescribeTopic",
       "kafka-cluster:WriteData",
     ]
-    resources = ["${local.msk_topic_arn_prefix}/evt.ln.loan.*"]
+    resources = [
+      "${local.msk_topic_arn_prefix}/evt.ln.loan.v1",
+      "${local.msk_topic_arn_prefix}/evt.ln.loan.dlq.v1",
+    ]
   }
 
-  # evt.ln.loan.* includes this service's DLQ evt.ln.loan.dlq.v1, where the
-  # repayment consumer writes records it gives up on.
-
+  # The payment aggregate topic; the consumer handles only
+  # Payments.Payment.LoanPaymentCompleted.v1 and skips the other event types.
   statement {
-    sid = "ConsumeLoanPaymentCompleted"
+    sid = "ConsumePaymentEvents"
     actions = [
       "kafka-cluster:DescribeTopic",
       "kafka-cluster:ReadData",
     ]
-    resources = ["${local.msk_topic_arn_prefix}/evt.pay.payment.loan-payment-completed.v1"]
+    resources = ["${local.msk_topic_arn_prefix}/evt.pay.payment.v1"]
   }
 
   # Consumer groups of the repayment consumer only.
