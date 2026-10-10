@@ -160,9 +160,11 @@ loan:
       # One replica at a time (advisory lock); runs at start-up, then after
       # each interval. Gauges: loan_credit_reservations_pending,
       # loan_credit_reservations_operator{reason}.
+      # The chart sets all three (values.yaml config); see the runbook for the
+      # operator states UNCONFIRMED and RELEASE_EXCEEDS_RESERVATION.
       enabled: ${CREDIT_RESERVATION_SWEEP_ENABLED:true}
-      interval: PT1M
-      grace: PT10M
+      interval: ${CREDIT_RESERVATION_SWEEP_INTERVAL:PT1M}
+      grace: ${CREDIT_RESERVATION_SWEEP_GRACE:PT10M}
       batch-size: 50
   outbox:
     retention: P7D

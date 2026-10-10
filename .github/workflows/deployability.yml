@@ -125,6 +125,10 @@ jobs:
           grep -q 'fintechbankx.io/service-id: svc-ln-loan-lifecycle' <<<"$deployment"
           grep -q 'prometheus.io/port: "8081"' <<<"$deployment"
           test "$(grep -c 'fintechbankx.io/squad: lending' <<<"$rendered")" -ge 5
+          # Credit reservation recovery sweep settings reach the pods (runbook: operator states).
+          grep -q 'CREDIT_RESERVATION_SWEEP_ENABLED: "true"' <<<"$rendered"
+          grep -q 'CREDIT_RESERVATION_SWEEP_INTERVAL: "PT1M"' <<<"$rendered"
+          grep -q 'CREDIT_RESERVATION_SWEEP_GRACE: "PT10M"' <<<"$rendered"
           # A missing required setting must stop the render.
           if helm template ci "$chart" --set image.repository=ci/x --set image.tag=ci > /dev/null 2>&1; then
             echo "chart rendered without its required settings" >&2

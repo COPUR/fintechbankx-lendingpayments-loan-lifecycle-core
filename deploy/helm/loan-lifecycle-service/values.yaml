@@ -97,6 +97,14 @@ config:
   OUTBOX_RELAY_ENABLED: "false"
   # Off until the loan and payments writes cut over together (runbook step 3).
   LOAN_REPAYMENT_CONSUMER_ENABLED: "false"
+  # Credit reservation recovery sweep (CreditReservationSweep; http adapter
+  # only): re-drives pending releases of never-disbursed loans and marks a
+  # reserve never answered within the grace period UNCONFIRMED for an operator
+  # (never released blind). One replica at a time (advisory lock). Runbook
+  # section "Credit reservations needing an operator".
+  CREDIT_RESERVATION_SWEEP_ENABLED: "true"
+  CREDIT_RESERVATION_SWEEP_INTERVAL: PT1M
+  CREDIT_RESERVATION_SWEEP_GRACE: PT10M
 
 # Flyway migration step: a Helm pre-install/pre-upgrade Job running the image
 # with "migrate" as the schema owner. Only this Job mounts the owner

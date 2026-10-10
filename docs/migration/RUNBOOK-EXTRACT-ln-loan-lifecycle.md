@@ -237,3 +237,131 @@ UPDATE sc_ln_loan_lifecycle.outbox_event
 SET parked_at = NULL, park_reason = NULL, park_counted = false, attempts = 0, last_error = NULL
 WHERE event_id = '<event id>' AND published_at IS NULL AND parked_at IS NOT NULL;
 ```
+
+## 8. Credit reservations needing an operator
+
+Status: **Proposed** (merged from loan-review-r4: V9 `reservation_state`, V10 `release_refused_code`,
+`CreditReservationSweep`). Applies only with `CUSTOMER_CREDIT_ADAPTER=http`.
+
+Every credit reservation is recorded in `sc_ln_loan_lifecycle.credit_reservation_generation` (one row per loan)
+before it is sent to `svc-cus-profile-kyc`. The customer service records each movement in its own table
+(`credit_movement`: customer, idempotency key, `RESERVE` or `RELEASE`, amount, currency, reference). This service
+never reads that table: every check below is a request to the customer squad (owner of
+`fintechbankx-customer-profile-kyc-core`), quoting the customer id, the loan id (the movement's `reference`) and
+the idempotency keys. Keys: reserve `<loanId>:reserve` at generation 0, `<loanId>:reserve:g<n>` at generation n;
+compensating release `<reserve key>:compensation`; repayment release `<loanId>:release`.
+
+### Recovery sweep
+
+`CreditReservationSweep` runs on start-up and then `CREDIT_RESERVATION_SWEEP_INTERVAL` (default `PT1M`) after the
+previous run ended, on one replica at a time (PostgreSQL advisory lock). It looks only at loans never disbursed
+(`CREATED`, `PENDING_APPROVAL`, `APPROVED`, `REJECTED`, `CANCELLED`) whose row has not changed for
+`CREDIT_RESERVATION_SWEEP_GRACE` (default `PT10M`), and:
+
+- re-sends a pending compensation under its compensation key;
+- releases a reservation recorded `RESERVED` under its compensation key (on a still `APPROVED` loan a later
+  disbursement then fails because its reservation is gone);
+- marks a reservation still `RESERVING` (sent, never answered) as `UNCONFIRMED` and leaves it for an operator;
+- skips any row with `release_refused_code` set.
+
+The chart sets `CREDIT_RESERVATION_SWEEP_ENABLED` (default `"true"`), `CREDIT_RESERVATION_SWEEP_INTERVAL` and
+`CREDIT_RESERVATION_SWEEP_GRACE` in `values.yaml` `config`. Switching the sweep off stops recovery: compensations
+are then only re-sent by the next reservation or cancellation of the same loan.
+
+### Metrics
+
+| Micrometer name (Prometheus name) | Type | Meaning |
+|---|---|---|
+| `loan.credit.reservations.pending` (`loan_credit_reservations_pending`) | gauge | never-disbursed loans with a pending compensation or an outstanding reservation (`RESERVING`, `RESERVED`, `UNCONFIRMED`). Short-lived during a disbursement; a value that stays above zero for longer than the grace period plus one interval means the sweep cannot clear it |
+| `loan.credit.reservations.operator{reason="unconfirmed"}` (`loan_credit_reservations_operator{reason="unconfirmed"}`) | gauge | rows in `UNCONFIRMED`; any value above zero needs the procedure below |
+| `loan.credit.reservations.operator{reason="release_exceeds_reservation"}` (same, Prometheus) | gauge | rows whose compensating release the customer service refused with `RELEASE_EXCEEDS_RESERVATION`; a bug signal, any value above zero needs the procedure below |
+| `loan.credit.releases.unmatched` (`loan_credit_releases_unmatched_total`) | counter | compensating releases answered `RESERVATION_NOT_FOUND`: nothing was held, the intent is closed automatically. A rising rate means reserves are being recorded that the customer service never applied |
+
+This service ships no alert rules. Observability (`fintechbankx-platform-observability-sre-operations`) owns any
+alert on these metrics; the squad's ask is: either `operator` gauge above 0 (warning), and
+`loan_credit_reservations_pending` above 0 for longer than the grace period plus one interval (warning).
+
+Find the rows:
+
+```sql
+SELECT r.loan_id, l.customer_id, l.status, l.principal_amount, l.currency, r.generation,
+       r.reservation_state, r.pending_compensation, r.release_refused_code, r.updated_at
+FROM sc_ln_loan_lifecycle.credit_reservation_generation r
+JOIN sc_ln_loan_lifecycle.loan l ON l.loan_id = r.loan_id
+WHERE r.reservation_state = 'UNCONFIRMED' OR r.release_refused_code IS NOT NULL
+ORDER BY r.updated_at;
+```
+
+Every change below runs under an incident id, with the incident lead's agreement, and the customer squad's
+answer is attached to the incident record.
+
+### UNCONFIRMED: a reserve sent but never answered
+
+The reserve under key `<loanId>:reserve[:g<n>]` (n = `generation`) was sent and no answer was recorded, so this
+service does not know whether the customer service applied it. **Never release it blind.** The customer
+service's release does not check that a reservation exists for the reference (customer #13
+`CreditProfile.releaseCredit`), and the customer's `used_credit` includes credit migrated from the monolith that
+has no movement or reference behind it (customer-profile-kyc-core `db/backfill/02_transform_into_customer_service.sql`
+copies `used_credit` without movements). A release for a reserve that was never applied would therefore free
+credit held by the customer's other loans or by untracked migrated credit, and nothing would show it.
+
+1. Ask the customer squad: for customer `<customer_id>`, is there a `credit_movement` with idempotency key
+   `<reserve key>`, and what are its type, amount, currency and reference? List every movement with reference
+   `<loan_id>` too.
+2. **The reserve was applied** (a `RESERVE` under that key, amount and currency equal to the loan's
+   `principal_amount` and `currency`, reference the loan id, and no `RELEASE` under `<reserve key>:compensation`):
+   record it as accepted. On an `APPROVED` loan a disbursement can then use it; otherwise the sweep releases it
+   under its compensation key after the grace period, and `loan_credit_reservations_pending` returns to 0.
+
+   ```sql
+   UPDATE sc_ln_loan_lifecycle.credit_reservation_generation
+   SET reservation_state = 'RESERVED', updated_at = now()
+   WHERE loan_id = '<loan id>' AND generation = <n> AND reservation_state = 'UNCONFIRMED'
+     AND pending_compensation IS NULL;
+   ```
+
+3. **The reserve was never applied** (no movement under that key): nothing is held; close the row the way a
+   refused reserve is closed. The generation stays, so a later reserve of an `APPROVED` loan reuses the key,
+   which the customer service has never seen.
+
+   ```sql
+   UPDATE sc_ln_loan_lifecycle.credit_reservation_generation
+   SET reservation_state = NULL, updated_at = now()
+   WHERE loan_id = '<loan id>' AND generation = <n> AND reservation_state = 'UNCONFIRMED';
+   ```
+
+4. **Anything else** (amount, currency or reference differ, or a movement under the key exists for another
+   customer): change nothing, escalate to the loan squad's engineers and the customer squad.
+
+A retry of the disbursement of an `APPROVED` loan also resolves an `UNCONFIRMED` row: it re-sends the reserve
+under the same key, which the customer service either replays (already applied) or applies now, and the row
+becomes `RESERVED`. That is safe; a release is not.
+
+### RELEASE_EXCEEDS_RESERVATION: a compensating release refused
+
+Requires the customer service's release by reference (provider contract pending). The row has
+`pending_compensation = <n>` and `release_refused_code = 'RELEASE_EXCEEDS_RESERVATION'`: the release under
+`<reserve key of n>:compensation` asked for more than the customer service holds for reference `<loan_id>`.
+The release is never re-sent by this service, the sweep skips the row, and a new reservation for the loan
+fails until the row is closed.
+
+1. Ask the customer squad for every movement of customer `<customer_id>` with reference `<loan_id>`, and the
+   amount it still holds for that reference (reserves minus releases).
+2. **Nothing is held** for the reference (it was already released, for example under an earlier key): close the
+   intent.
+
+   ```sql
+   UPDATE sc_ln_loan_lifecycle.credit_reservation_generation
+   SET pending_compensation = NULL, release_refused_code = NULL, updated_at = now()
+   WHERE loan_id = '<loan id>' AND pending_compensation = <n> AND release_refused_code = 'RELEASE_EXCEEDS_RESERVATION';
+   ```
+
+3. **Part of the amount is held** (more than 0, less than the loan's `principal_amount`): the customer squad
+   releases exactly the held amount for reference `<loan_id>` as a staff movement under a new key,
+   `<reserve key of n>:compensation:operator`, recorded in the incident; then close the intent with the SQL of
+   step 2. Raise a bug for the loan squad: the amounts disagree.
+4. **The full amount or more is held**: the refusal contradicts the customer's own records. Change nothing and
+   escalate to the customer squad as a provider defect.
+
+Never clear `release_refused_code` while leaving `pending_compensation` set: that re-arms the same refused
+release, which the sweep and the next reservation re-send.
