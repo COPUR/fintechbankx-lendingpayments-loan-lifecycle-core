@@ -144,6 +144,27 @@ sha256 differs:
 commit. Waivers go in `api/asyncapi/<spec-name>.accepted-breaking.txt` and need the API owner's review
 (CODEOWNERS); the spec is not on `origin/main` yet, so the gate skips it as a new file and none is needed.
 
+### Chart guard
+
+`deploy/helm/loan-lifecycle-service/templates/_fbx-guard.tpl` is the shared chart's datasource TLS guard
+(`fbx.datasourceOverrideName`, `fbx.isJvmOptionsName`, `fbx.validateJvmOptions`, `fbx.validateDatabaseTls`,
+`fbx.validateJdbcUrl`), copied verbatim from `fintechbankx-platform-delivery-iac-cicd-templates` at commit
+`2caa48f`, `charts/fintechbankx-service/templates/_helpers.tpl` lines 70-239, under a header that names the
+source. The `deploy/helm` job fails when its sha256 differs:
+
+| Copy | sha256 |
+|---|---|
+| `deploy/helm/loan-lifecycle-service/templates/_fbx-guard.tpl` | `ec8e55eae8606f4a7180f25e4246d176a26f66b5742872824b6909c4241ec552` |
+
+Do not edit it: copy the reference again and update the commit and the sum here and in
+`.github/workflows/deployability.yml`. This chart's own additions (`templates/_helpers.tpl`, `loan.guardValues`)
+call the copy through an adapter dict shaped like the shared chart's values and add on top: the indexed and
+dotted spellings of `spring.config.*`, `spring.profiles.active|include|default|group`, `fintechbankx.tls.*`,
+`spring.kafka.*security.protocol` and `spring.kafka.properties.*`, `fintechbankx` and `kafka` in a JVM option,
+`kafka.profile` (the only `SPRING_PROFILES_ACTIVE` the pods get: `kafka-msk` or `kafka-strimzi`, never
+`local`) and `KAFKA_SECURITY_PROTOCOL` (`SASL_SSL` or `SSL`). The job's refusal loop lists every spelling the
+loan #14 review probed (`values.yaml` `config` comment).
+
 ## Callers (mesh ALLOW rules)
 
 The chart ships no PeerAuthentication or AuthorizationPolicy (platform contract). The mesh repo needs

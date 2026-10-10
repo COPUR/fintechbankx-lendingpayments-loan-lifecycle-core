@@ -68,16 +68,32 @@ podDisruptionBudget:
   minAvailable: 2
 
 # Non-secret runtime settings, rendered into a ConfigMap. Values marked
-# REQUIRED have no default; the chart fails to render without them. The chart
-# also refuses to render (templates/_helpers.tpl loan.guardEnvKey), whatever
-# the case of the key: SPRING_CONFIG_IMPORT, SPRING_CONFIG_LOCATION and
-# SPRING_CONFIG_ADDITIONAL_LOCATION (Spring configuration is never redirected
-# from values; a configtree exists only as a chart-rendered value on
-# optional:configtree:/etc/fintechbankx/config/, and this chart renders none);
-# SPRING_DATASOURCE_URL and SPRING_FLYWAY_URL (DB_URL is the guarded way in);
-# FINTECHBANKX_TLS_ENFORCE and a SPRING_PROFILES_ACTIVE that includes "local"
-# (the startup TLS assertion is never switched off by the chart). There is no
-# extraEnv: every pod setting goes through config.
+# REQUIRED have no default; the chart fails to render without them. There is
+# no extraEnv: every pod setting goes through config, and the ExternalSecret
+# keys are fixed in the templates. The chart refuses to render (round 6,
+# guardrail 4a: templates/_fbx-guard.tpl, the reference guard vendored from
+# cicd-templates 2caa48f, plus this chart's additions in templates/_helpers.tpl
+# loan.guardValues), whatever the case or spelling ('.', '-', '_', indexed _0)
+# of the key:
+#   - DB_URL that is not a PostgreSQL JDBC URL with exactly one sslmode=verify-full
+#     and exactly one sslrootcert=<databaseCa bundle>, or that carries
+#     sslfactory, sslfactoryarg, sslhostnameverifier, sslpasswordcallback,
+#     service, a percent-encoded '=' or '&', an upper-case SSLMODE or a TLS key
+#     before the '?'; any other value that is a PostgreSQL JDBC URL gets the
+#     same parse;
+#   - spring.datasource.*, spring.flyway.*, spring.liquibase.*, spring.r2dbc.*
+#     (except SPRING_DATASOURCE_USERNAME and SPRING_DATASOURCE_PASSWORD),
+#     spring.application.json, *jdbc_url*, *sslfactory*, *sslhostnameverifier*;
+#   - spring.config.import|location|additional-location|name (Spring
+#     configuration is never redirected from values);
+#   - spring.profiles.active|include|default|group (the profile is kafka.profile);
+#   - fintechbankx.tls.* (the startup TLS assertion is never switched off);
+#   - spring.kafka.*security.protocol and spring.kafka.properties.*;
+#   - JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS or _JAVA_OPTIONS whose value mentions
+#     datasource, flyway, liquibase, r2dbc, jdbc, ssl, application.json,
+#     spring.config, spring.profiles, fintechbankx or kafka, or reads options
+#     from a file ('@' argument file, -XX:VMOptionsFile, -XX:Flags);
+#   - KAFKA_SECURITY_PROTOCOL other than SASL_SSL or SSL.
 config:
   # REQUIRED (deploy/terraform output jdbc_url). Must verify the server
   # certificate against the mounted RDS CA bundle (databaseCa below), e.g.
@@ -89,7 +105,6 @@ config:
   DB_POOL_MAX: "10"
   KAFKA_BOOTSTRAP_SERVERS: ""     # REQUIRED MSK bootstrap brokers (IAM, port 9098)
   KAFKA_SECURITY_PROTOCOL: SASL_SSL  # MSK IAM auth, see application-kafka-msk.yml
-  SPRING_PROFILES_ACTIVE: kafka-msk
   OIDC_ISSUER_URI: ""             # REQUIRED Keycloak realm issuer
   OIDC_JWK_SET_URI: ""            # REQUIRED Keycloak realm JWKS
   OIDC_TOKEN_URI: ""              # REQUIRED client-credentials token endpoint for service-to-service calls
@@ -122,6 +137,14 @@ config:
   # 422 RESERVATION_NOT_FOUND (customer-profile-kyc-core #13, a6ebe01 or
   # later), after CREDIT_RESERVATION_SWEEP_ENABLED (runbook section 8).
   CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED: "false"
+
+# The Spring profile the pods run (rendered as SPRING_PROFILES_ACTIVE; config may
+# not name one): kafka-msk (MSK, IAM over SASL_SSL, application-kafka-msk.yml) or
+# kafka-strimzi (in-cluster Strimzi, mutual TLS, application-kafka-strimzi.yml).
+# Nothing else renders: the local profile (application-local.yml) switches the
+# startup TLS assertion off and exists for local runs only.
+kafka:
+  profile: kafka-msk
 
 # Flyway migration step: a Helm pre-install/pre-upgrade Job running the image
 # with "migrate" as the schema owner. Only this Job mounts the owner

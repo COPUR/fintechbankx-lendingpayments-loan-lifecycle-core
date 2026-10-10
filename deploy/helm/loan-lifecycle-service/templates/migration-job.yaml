@@ -1,4 +1,5 @@
 {{- if .Values.migration.enabled }}
+{{- include "loan.guardValues" . }}
 {{- /*
 Flyway as a separate step (platform contract "Database roles"): runs before
 every install and upgrade, as the schema owner, with the db-migration secret.

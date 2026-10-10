@@ -2,24 +2,11 @@
 {{- range $key := $required }}
 {{- $_ := required (printf "config.%s is required (no default)" $key) (index $.Values.config $key) }}
 {{- end }}
-{{- /* Aurora: verify the server certificate against the mounted RDS CA bundle. */ -}}
-{{- $rootcert := printf "sslrootcert=%s/%s" .Values.databaseCa.mountPath .Values.databaseCa.key }}
-{{- if not (and (contains "sslmode=verify-full" .Values.config.DB_URL) (contains $rootcert .Values.config.DB_URL)) }}
-{{- fail (printf "config.DB_URL must use sslmode=verify-full&%s (mounted ConfigMap %s)" $rootcert .Values.databaseCa.configMapName) }}
-{{- end }}
 {{- if not (has .Values.config.CUSTOMER_CREDIT_ADAPTER (list "http" "in-memory")) }}
 {{- fail "config.CUSTOMER_CREDIT_ADAPTER must be http or in-memory" }}
 {{- end }}
-{{- /* Round 5: no Spring configuration redirection, no datasource URL bypass, TLS assertion never off (loan.guardEnvKey). */ -}}
-{{- range $key, $_ := .Values.config }}
-{{- include "loan.guardEnvKey" (list "config" $key) }}
-{{- end }}
-{{- /* The local profile (application-local.yml) switches the TLS assertion off, so the chart never activates it. */ -}}
-{{- range $profile := splitList "," (toString (.Values.config.SPRING_PROFILES_ACTIVE | default "")) }}
-{{- if eq (trim $profile) "local" }}
-{{- fail "config.SPRING_PROFILES_ACTIVE must not activate the local profile: it switches the startup TLS assertion off" }}
-{{- end }}
-{{- end }}
+{{- /* Round 6 (guardrail 4a): the vendored reference guard plus this chart's additions, _helpers.tpl loan.guardValues. */ -}}
+{{- include "loan.guardValues" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -27,6 +14,8 @@ metadata:
   labels:
     {{- include "loan.labels" . | nindent 4 }}
 data:
+  # The only profile the pods activate (kafka-msk or kafka-strimzi); config may not name one.
+  SPRING_PROFILES_ACTIVE: {{ .Values.kafka.profile | quote }}
   {{- range $key, $value := .Values.config }}
   {{ $key }}: {{ $value | quote }}
   {{- end }}
