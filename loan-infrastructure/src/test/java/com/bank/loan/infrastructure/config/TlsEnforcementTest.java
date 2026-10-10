@@ -10,8 +10,9 @@ import static org.mockito.Mockito.mock;
 /**
  * Round 5 common item 2: the service fails fast at start-up unless the
  * datasource URL verifies the server certificate (sslmode=verify-full) and,
- * when a Kafka client is configured, the Kafka security protocol is SASL_SSL.
- * fintechbankx.tls.enforce is true unless local or test configuration says
+ * when a Kafka client is configured, the Kafka security protocol is SASL_SSL
+ * (MSK IAM) or SSL (Strimzi mutual TLS); PLAINTEXT, SASL_PLAINTEXT and unset
+ * are refused. fintechbankx.tls.enforce is true unless local or test configuration says
  * otherwise; the failure names the offending setting and never its value
  * when that value could carry a credential (the datasource URL).
  */
@@ -50,6 +51,7 @@ class TlsEnforcementTest {
                 .hasMessageContaining("spring.kafka.security.protocol")
                 .hasMessageContaining("KAFKA_SECURITY_PROTOCOL")
                 .hasMessageContaining("SASL_SSL")
+                .hasMessageContaining("SSL (Strimzi mutual TLS)")
                 .hasMessageContaining("PLAINTEXT");
         });
     }
@@ -60,17 +62,50 @@ class TlsEnforcementTest {
             .run(context -> assertThat(context).hasNotFailed());
     }
 
-    /** Only the mTLS of the strimzi profile is SSL; the governance answer asks for SASL_SSL, so it is refused too. */
+    /**
+     * SSL is Strimzi mutual TLS (profile kafka-strimzi, KafkaUser certificate): the
+     * connection is encrypted and both sides verified, so it passes like SASL_SSL
+     * does (the same set the payments, mandates, bulk and RtP services accept).
+     */
     @Test
-    void anyProtocolOtherThanSaslSslIsRefusedWhenAKafkaClientIsConfigured() {
+    void verifyFullAndSslMutualTlsStart() {
         service.withPropertyValues(VERIFY_FULL, "spring.kafka.security.protocol=SSL")
-            .run(context -> assertThat(context).hasFailed());
+            .run(context -> assertThat(context).hasNotFailed());
+        // spring.kafka.properties.security.protocol is what KafkaProperties applies last
+        service.withPropertyValues(VERIFY_FULL, "spring.kafka.properties.security.protocol=SSL")
+            .run(context -> assertThat(context).hasNotFailed());
+    }
+
+    /** SASL without TLS authenticates in the clear; it is refused like PLAINTEXT. */
+    @Test
+    void aSaslPlaintextKafkaClientStopsTheStart() {
+        service.withPropertyValues(VERIFY_FULL, "spring.kafka.security.protocol=SASL_PLAINTEXT").run(context -> {
+            assertThat(context).hasFailed();
+            assertThat(root(context.getStartupFailure())).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("spring.kafka.security.protocol")
+                .hasMessageContaining("SASL_PLAINTEXT")
+                .hasMessageContaining("SASL_SSL")
+                .hasMessageContaining("SSL");
+        });
+    }
+
+    /** Anything that is not SASL_SSL or SSL is refused, wherever the protocol comes from. */
+    @Test
+    void aProtocolWithoutTlsIsRefusedWhenAKafkaClientIsConfigured() {
         // spring.kafka.properties.security.protocol is what KafkaProperties applies last
         service.withPropertyValues(VERIFY_FULL, "spring.kafka.security.protocol=SASL_SSL",
                 "spring.kafka.properties.security.protocol=PLAINTEXT")
             .run(context -> assertThat(context).hasFailed());
+        service.withPropertyValues(VERIFY_FULL, "spring.kafka.security.protocol=SSL",
+                "spring.kafka.properties.security.protocol=SASL_PLAINTEXT")
+            .run(context -> assertThat(context).hasFailed());
         // no protocol at all means Kafka's default, PLAINTEXT
-        service.withPropertyValues(VERIFY_FULL).run(context -> assertThat(context).hasFailed());
+        service.withPropertyValues(VERIFY_FULL).run(context -> {
+            assertThat(context).hasFailed();
+            assertThat(root(context.getStartupFailure())).hasMessageContaining("PLAINTEXT");
+        });
+        // a blank value is unset too
+        service.withPropertyValues(VERIFY_FULL, "spring.kafka.security.protocol=").run(context -> assertThat(context).hasFailed());
     }
 
     @Test

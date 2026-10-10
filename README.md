@@ -78,7 +78,8 @@ OUTBOX_RELAY_ENABLED=false LOAN_REPAYMENT_CONSUMER_ENABLED=false \
 ```
 
 Local runs keep a plain local URL, which is why the `local` profile is needed: the service refuses to start
-unless `DB_URL` has `sslmode=verify-full` and the Kafka `security.protocol` is `SASL_SSL`
+unless `DB_URL` has `sslmode=verify-full` and the Kafka `security.protocol` is `SASL_SSL` (profile `kafka-msk`) or
+`SSL` (profile `kafka-strimzi`, mutual TLS); `PLAINTEXT`, `SASL_PLAINTEXT` and unset are refused
 (`fintechbankx.tls.enforce`, true by default; `TlsEnforcement` names the offending setting). Only the `local`
 profile and the bootstrap test resources switch it off; the chart never does. Deployed pods use the Terraform output `jdbc_url`
 (`...?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem`): the chart mounts the platform

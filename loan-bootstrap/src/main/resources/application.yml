@@ -202,8 +202,10 @@ fintechbankx:
   tls:
     # Round 5 (governance 2b): the service refuses to start unless
     # spring.datasource.url has sslmode=verify-full and, with a Kafka client
-    # configured, the Kafka security.protocol is SASL_SSL (TlsEnforcement, an
-    # early bean whose message names the offending setting). Only explicit
+    # configured, the Kafka security.protocol is SASL_SSL (kafka-msk) or SSL
+    # (kafka-strimzi, mutual TLS); PLAINTEXT, SASL_PLAINTEXT and unset stop the
+    # start (TlsEnforcement, an early bean whose message names the offending
+    # setting). Only explicit
     # local and test configuration sets this false: the local profile
     # (application-local.yml) and the bootstrap test resources. The chart never
     # sets it and refuses FINTECHBANKX_TLS_ENFORCE and the local profile.

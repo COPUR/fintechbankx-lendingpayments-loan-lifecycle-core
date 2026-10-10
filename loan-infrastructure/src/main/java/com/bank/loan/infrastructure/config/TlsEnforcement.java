@@ -9,6 +9,8 @@ import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.core.ProducerFactory;
 
+import java.util.Set;
+
 /**
  * Round 5 common item 2 (governance answer 2b): the service refuses to start
  * unless its connections are encrypted and verified. Runs as a
@@ -18,10 +20,14 @@ import org.springframework.kafka.core.ProducerFactory;
  *   <li>{@code spring.datasource.url} (DB_URL) must carry {@code sslmode=verify-full};</li>
  *   <li>when a Kafka client is configured (a {@link KafkaTemplate},
  *       {@link ProducerFactory} or {@link ConsumerFactory} bean definition
- *       exists), the effective {@code security.protocol} must be SASL_SSL:
- *       {@code spring.kafka.properties.security.protocol} if set, else
- *       {@code spring.kafka.security.protocol} (KAFKA_SECURITY_PROTOCOL),
- *       else Kafka's default PLAINTEXT.</li>
+ *       exists), the effective {@code security.protocol} must be one of the
+ *       TLS protocols: SASL_SSL (MSK IAM, profile kafka-msk) or SSL (Strimzi
+ *       mutual TLS with the KafkaUser certificate, profile kafka-strimzi);
+ *       PLAINTEXT, SASL_PLAINTEXT and unset are refused. This is the set the
+ *       payments, mandates, bulk and request-to-pay services accept. The
+ *       effective value is {@code spring.kafka.properties.security.protocol}
+ *       if set, else {@code spring.kafka.security.protocol}
+ *       (KAFKA_SECURITY_PROTOCOL), else Kafka's default PLAINTEXT.</li>
  * </ul>
  * {@code fintechbankx.tls.enforce} is true in application.yml. Only explicit
  * local and test configuration sets it false (profile {@code local}, the
@@ -36,6 +42,9 @@ public final class TlsEnforcement implements BeanFactoryPostProcessor {
     static final String KAFKA_PROTOCOL = "spring.kafka.security.protocol";
     static final String KAFKA_PROTOCOL_PROPERTY = "spring.kafka.properties.security.protocol";
     static final String SASL_SSL = "SASL_SSL";
+    static final String SSL = "SSL";
+    /** The Kafka security protocols that encrypt and verify the connection; anything else stops the start. */
+    static final Set<String> TLS_PROTOCOLS = Set.of(SASL_SSL, SSL);
     private static final String KAFKA_DEFAULT_PROTOCOL = "PLAINTEXT";
     private static final String HOW_TO_RELAX = " Only local runs and tests set " + ENFORCE
         + "=false (profile local, test resources); the chart never does.";
@@ -60,10 +69,10 @@ public final class TlsEnforcement implements BeanFactoryPostProcessor {
         }
         if (hasKafkaClient(beanFactory)) {
             String protocol = kafkaSecurityProtocol();
-            if (!SASL_SSL.equals(protocol)) {
+            if (!TLS_PROTOCOLS.contains(protocol)) {
                 throw new IllegalStateException(ENFORCE + " is true but " + KAFKA_PROTOCOL
-                    + " (KAFKA_SECURITY_PROTOCOL) is '" + protocol + "', not " + SASL_SSL
-                    + ", while a Kafka client is configured." + HOW_TO_RELAX);
+                    + " (KAFKA_SECURITY_PROTOCOL) is '" + protocol + "', not " + SASL_SSL + " or " + SSL
+                    + " (Strimzi mutual TLS), while a Kafka client is configured." + HOW_TO_RELAX);
             }
             log.info("TLS assertion passed: datasource sslmode=verify-full, Kafka security.protocol {}", protocol);
             return;
