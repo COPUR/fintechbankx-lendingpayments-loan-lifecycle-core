@@ -34,6 +34,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
@@ -361,9 +362,9 @@ class LoanLifecycleServiceIT {
         LoanPaymentCompletedListener listener = new LoanPaymentCompletedListener(json, new JdbcInbox(jdbc), repayments,
             new TransactionTemplate(transactionManager));
 
-        listener.onLoanPaymentCompleted(record("6f1c3a3e-1a52-4f7e-9d43-0b8a3d9f0c11", "PAY-EVT-1", loanId));
-        listener.onLoanPaymentCompleted(record("6f1c3a3e-1a52-4f7e-9d43-0b8a3d9f0c11", "PAY-EVT-1", loanId));
-        listener.onLoanPaymentCompleted(record("0a3c6a43-7d1e-4b8a-9c1e-5b7f9f2d4e10", "PAY-EVT-1", loanId));
+        listener.onPaymentEvent(record("6f1c3a3e-1a52-4f7e-9d43-0b8a3d9f0c11", "PAY-EVT-1", loanId));
+        listener.onPaymentEvent(record("6f1c3a3e-1a52-4f7e-9d43-0b8a3d9f0c11", "PAY-EVT-1", loanId));
+        listener.onPaymentEvent(record("0a3c6a43-7d1e-4b8a-9c1e-5b7f9f2d4e10", "PAY-EVT-1", loanId));
 
         assertThat(jdbc.queryForList("select payment_id from sc_ln_loan_lifecycle.repayment where loan_id = ?", String.class, loanId))
             .containsExactly("PAY-EVT-1");
@@ -383,8 +384,9 @@ class LoanLifecycleServiceIT {
             ;
         ConsumerRecord<String, String> overpaid = new ConsumerRecord<>(tooMuch.topic(), 0, 1L, tooMuch.key(),
             tooMuch.value().replace("\"250.00\"", "\"99999.00\""));
+        tooMuch.headers().forEach(header -> overpaid.headers().add(header));
 
-        assertThatThrownBy(() -> listener.onLoanPaymentCompleted(overpaid)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> listener.onPaymentEvent(overpaid)).isInstanceOf(IllegalArgumentException.class);
         assertThat(jdbc.queryForObject("select count(*) from sc_ln_loan_lifecycle.inbox_message", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("select count(*) from sc_ln_loan_lifecycle.repayment", Integer.class)).isZero();
     }
@@ -442,9 +444,21 @@ class LoanLifecycleServiceIT {
         assertThat(outbox.countByPublishedAtIsNullAndParkedAtIsNull()).isZero();
         org.mockito.ArgumentCaptor<ProducerRecord<String, String>> records = org.mockito.ArgumentCaptor.forClass(ProducerRecord.class);
         org.mockito.Mockito.verify(kafka, org.mockito.Mockito.times(2)).send(records.capture());
+        // One topic per aggregate (ADR-019): both events on evt.ln.loan.v1, in order, keyed by loanId,
+        // named by the eventType header; the flow started at the API, so the interaction id travels too.
         assertThat(records.getAllValues()).extracting(ProducerRecord::topic)
-            .containsExactly("evt.ln.loan.created.v1", "evt.ln.loan.approved.v1");
+            .containsExactly("evt.ln.loan.v1", "evt.ln.loan.v1");
         assertThat(records.getAllValues()).extracting(ProducerRecord::key).containsOnly(loanId);
+        assertThat(records.getAllValues()).extracting(r -> recordHeader(r, "eventType"))
+            .containsExactly("Lending.Loan.Created.v1", "Lending.Loan.Approved.v1");
+        for (ProducerRecord<String, String> sent : records.getAllValues()) {
+            var envelope = json.readTree(sent.value());
+            assertThat(envelope.get("aggregateId").asText()).isEqualTo(sent.key());
+            assertThat(recordHeader(sent, "eventType")).isEqualTo(envelope.get("eventType").asText());
+            assertThat(recordHeader(sent, "eventId")).isEqualTo(envelope.get("eventId").asText());
+            assertThat(recordHeader(sent, "correlationId")).isEqualTo(envelope.get("correlationId").asText());
+        }
+        assertThat(recordHeader(records.getAllValues().getFirst(), "x-fapi-interaction-id")).isEqualTo("it-interaction-1");
     }
 
     @Test
@@ -547,7 +561,17 @@ class LoanLifecycleServiceIT {
                      "actualAmount":{"amount":"250.00","currency":"AED"},"transactionReference":"SETTLE-IT",
                      "completedAt":"2026-10-08T05:59:59Z"}}
             """.formatted(eventId, paymentId, paymentId, CUSTOMER, loanId);
-        return new ConsumerRecord<>("evt.pay.payment.loan-payment-completed.v1", 0, 0L, paymentId, value);
+        // Read from the payment aggregate topic (ADR-019); the eventType header routes it.
+        ConsumerRecord<String, String> record = new ConsumerRecord<>("evt.pay.payment.v1", 0, 0L, paymentId, value);
+        record.headers().add("eventType", "Payments.Payment.LoanPaymentCompleted.v1".getBytes(StandardCharsets.UTF_8));
+        record.headers().add("eventId", eventId.getBytes(StandardCharsets.UTF_8));
+        record.headers().add("correlationId", "corr-it".getBytes(StandardCharsets.UTF_8));
+        return record;
+    }
+
+    private static String recordHeader(ProducerRecord<String, String> record, String name) {
+        var header = record.headers().lastHeader(name);
+        return header == null ? null : new String(header.value(), StandardCharsets.UTF_8);
     }
 
     private static MockHttpServletRequestBuilder asCustomer(MockHttpServletRequestBuilder request) {

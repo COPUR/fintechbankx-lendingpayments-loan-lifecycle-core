@@ -24,12 +24,12 @@ class LoanEventEnvelopeFactoryTest {
     private final LoanEventEnvelopeFactory factory = new LoanEventEnvelopeFactory(json);
 
     @Test
-    void everyLoanEventMapsToItsContractTopicAndType() {
+    void everyLoanEventMapsToItsContractTypeOnTheAggregateTopic() {
         List<DomainEvent> events = fullLifecycleEvents();
 
-        assertThat(events).extracting(e -> LoanEventEnvelopeFactory.map(e).topic()).containsExactly(
-            "evt.ln.loan.created.v1", "evt.ln.loan.approved.v1", "evt.ln.loan.disbursed.v1",
-            "evt.ln.loan.payment-made.v1", "evt.ln.loan.fully-paid.v1");
+        assertThat(LoanEventEnvelopeFactory.TOPIC).isEqualTo("evt.ln.loan.v1");
+        assertThat(events).extracting(e -> factory.toOutboxRow(loanOf(e), e, "corr").getTopic())
+            .containsOnly("evt.ln.loan.v1");
         assertThat(events).extracting(e -> LoanEventEnvelopeFactory.map(e).eventType()).containsExactly(
             "Lending.Loan.Created.v1", "Lending.Loan.Approved.v1", "Lending.Loan.Disbursed.v1",
             "Lending.Loan.PaymentMade.v1", "Lending.Loan.FullyPaid.v1");
@@ -54,8 +54,10 @@ class LoanEventEnvelopeFactoryTest {
 
         assertThat(LoanEventEnvelopeFactory.map(rejected.getDomainEvents().get(1)).data())
             .containsEntry("reason", "affordability");
-        assertThat(LoanEventEnvelopeFactory.map(cancelled.getDomainEvents().get(1)).topic())
-            .isEqualTo("evt.ln.loan.cancelled.v1");
+        assertThat(LoanEventEnvelopeFactory.map(cancelled.getDomainEvents().get(1)).data())
+            .containsEntry("reason", "withdrawn");
+        assertThat(LoanEventEnvelopeFactory.map(cancelled.getDomainEvents().get(1)).eventType())
+            .isEqualTo("Lending.Loan.Cancelled.v1");
     }
 
     @Test
@@ -67,7 +69,8 @@ class LoanEventEnvelopeFactoryTest {
         OutboxEventJpaEntity row = factory.toOutboxRow(loan, created, "corr-1");
         JsonNode envelope = json.readTree(row.getPayload());
 
-        assertThat(row.getTopic()).isEqualTo("evt.ln.loan.created.v1");
+        assertThat(row.getTopic()).isEqualTo("evt.ln.loan.v1");
+        assertThat(row.getEventType()).isEqualTo(envelope.get("eventType").asText());
         assertThat(row.getAggregateId()).isEqualTo("LOAN-ENV-1");
         assertThat(row.getEventId().toString()).isEqualTo(created.getEventId());
         assertThat(envelope.get("eventId").asText()).isEqualTo(created.getEventId());
@@ -89,6 +92,10 @@ class LoanEventEnvelopeFactoryTest {
         assertThatThrownBy(() -> LoanEventEnvelopeFactory.map(unknown))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("No public contract");
+    }
+
+    private static Loan loanOf(DomainEvent event) {
+        return newLoan("LOAN-ENV-2");
     }
 
     private static List<DomainEvent> fullLifecycleEvents() {

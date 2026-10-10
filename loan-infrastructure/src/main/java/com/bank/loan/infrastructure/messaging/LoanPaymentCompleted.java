@@ -10,13 +10,14 @@ import java.util.UUID;
 
 /**
  * The fields this service reads from Payments.Payment.LoanPaymentCompleted.v1
- * (provider svc-pay-initiation-settlement, topic
- * evt.pay.payment.loan-payment-completed.v1). Unknown fields are ignored so
- * additive changes on the provider side do not break the consumer.
+ * (provider svc-pay-initiation-settlement), one of the event types on the
+ * payment aggregate topic evt.pay.payment.v1 (ADR-019, one topic per
+ * aggregate). Unknown fields are ignored so additive changes on the provider
+ * side do not break the consumer.
  */
 record LoanPaymentCompleted(UUID eventId, String paymentId, String loanId, Money actualAmount) {
 
-    static final String TOPIC = "evt.pay.payment.loan-payment-completed.v1";
+    static final String TOPIC = "evt.pay.payment.v1";
     static final String EVENT_TYPE = "Payments.Payment.LoanPaymentCompleted.v1";
 
     static LoanPaymentCompleted parse(ObjectMapper json, String value) {

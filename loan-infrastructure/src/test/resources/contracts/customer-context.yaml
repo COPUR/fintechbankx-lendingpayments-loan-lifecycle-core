@@ -209,7 +209,7 @@ paths:
       description: |-
         BANKER or ADMIN only. Records the token subject as the staff member who
         changed it and publishes Customer.Customer.KycStatusChanged.v1 on
-        evt.cus.customer.kyc-status-changed.v1. Setting the current status
+        evt.cus.customer.v1 (eventType header). Setting the current status
         again changes nothing and publishes nothing.
       security:
         - bearerAuth: []

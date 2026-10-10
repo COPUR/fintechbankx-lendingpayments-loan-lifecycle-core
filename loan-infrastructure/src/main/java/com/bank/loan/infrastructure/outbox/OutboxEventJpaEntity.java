@@ -34,6 +34,7 @@ public class OutboxEventJpaEntity {
     @Column(name = "event_type", nullable = false, length = 128, updatable = false)
     private String eventType;
 
+    /** The aggregate topic evt.ln.loan.v1 (V11); the relay computes it and does not read this column. */
     @Column(name = "topic", nullable = false, length = 249, updatable = false)
     private String topic;
 
@@ -70,6 +71,14 @@ public class OutboxEventJpaEntity {
     @Column(name = "traceparent", length = 55, updatable = false)
     private String traceparent;
 
+    /**
+     * x-fapi-interaction-id of the API request that raised the event (V11);
+     * NULL when the flow did not start at the loan API (repayment consumer,
+     * credit reservation sweep), so the relay sends no such header then.
+     */
+    @Column(name = "fapi_interaction_id", length = 128, updatable = false)
+    private String fapiInteractionId;
+
     protected OutboxEventJpaEntity() {
     }
 
@@ -92,6 +101,12 @@ public class OutboxEventJpaEntity {
         return this;
     }
 
+    public OutboxEventJpaEntity withFapiInteractionId(String fapiInteractionId) {
+        this.fapiInteractionId = fapiInteractionId;
+        return this;
+    }
+
+    public String getFapiInteractionId() { return fapiInteractionId; }
     public UUID getEventId() { return eventId; }
     public String getAggregateType() { return aggregateType; }
     public String getAggregateId() { return aggregateId; }

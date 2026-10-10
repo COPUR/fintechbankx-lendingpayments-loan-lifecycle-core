@@ -34,7 +34,9 @@ import java.time.Clock;
 import java.util.Map;
 
 /**
- * The loan-payment-completed consumer (platform Kafka client conventions):
+ * The repayment consumer of the payment aggregate topic evt.pay.payment.v1
+ * (platform Kafka client conventions); it handles
+ * Payments.Payment.LoanPaymentCompleted.v1 and skips the other event types:
  * group cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1, read_committed,
  * no auto-commit, offsets acknowledged per record after the DB commit, earliest
  * for a new group. Three retries (1 s, 2 s, 4 s), then the record goes to the

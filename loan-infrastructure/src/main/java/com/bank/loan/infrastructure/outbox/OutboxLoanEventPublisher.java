@@ -31,10 +31,13 @@ public class OutboxLoanEventPublisher implements LoanEventPublisher {
     @Override
     @Transactional(propagation = Propagation.MANDATORY)
     public void publish(Loan loan, List<DomainEvent> events) {
-        String correlationId = currentCorrelationId();
+        String interactionId = currentInteractionId();
+        String correlationId = interactionId != null ? interactionId : UUID.randomUUID().toString();
         String traceparent = currentTraceparent();
         outbox.saveAll(events.stream()
-            .map(event -> envelopes.toOutboxRow(loan, event, correlationId).withTraceparent(traceparent))
+            .map(event -> envelopes.toOutboxRow(loan, event, correlationId)
+                .withTraceparent(traceparent)
+                .withFapiInteractionId(interactionId))
             .toList());
     }
 
@@ -51,8 +54,12 @@ public class OutboxLoanEventPublisher implements LoanEventPublisher {
         return "00-" + traceId + "-" + spanId + "-01";
     }
 
-    private static String currentCorrelationId() {
-        String fromRequest = MDC.get(CorrelationIdFilter.MDC_KEY);
-        return fromRequest != null ? fromRequest : UUID.randomUUID().toString();
+    /**
+     * The x-fapi-interaction-id of the current loan API request (CorrelationIdFilter
+     * puts it in the MDC, generating one when the client sent none), or null when
+     * the flow did not start at the API (consumer, sweep).
+     */
+    private static String currentInteractionId() {
+        return MDC.get(CorrelationIdFilter.MDC_KEY);
     }
 }

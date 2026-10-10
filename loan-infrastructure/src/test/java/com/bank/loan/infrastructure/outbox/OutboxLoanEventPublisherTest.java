@@ -45,6 +45,7 @@ class OutboxLoanEventPublisherTest {
         verify(outbox).saveAll(rows.capture());
         assertThat(rows.getValue()).singleElement().satisfies(row -> {
             assertThat(row.getCorrelationId()).isEqualTo("corr-pub");
+            assertThat(row.getFapiInteractionId()).isEqualTo("corr-pub");
             assertThat(row.getTraceparent()).isEqualTo("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01");
         });
     }
@@ -60,6 +61,8 @@ class OutboxLoanEventPublisherTest {
         ArgumentCaptor<List<OutboxEventJpaEntity>> rows = ArgumentCaptor.forClass(List.class);
         verify(outbox).saveAll(rows.capture());
         assertThat(rows.getValue().getFirst().getCorrelationId()).hasSize(36);
+        // Not started at the FAPI API (consumer, sweep): no interaction id is invented.
+        assertThat(rows.getValue().getFirst().getFapiInteractionId()).isNull();
         assertThat(rows.getValue().getFirst().getTraceparent()).isNull();
         assertThat(OutboxLoanEventPublisher.currentTraceparent()).isNull();
     }

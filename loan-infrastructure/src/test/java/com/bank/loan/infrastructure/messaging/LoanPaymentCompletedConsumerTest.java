@@ -17,6 +17,7 @@ import org.apache.kafka.common.header.Headers;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -115,12 +116,84 @@ class LoanPaymentCompletedConsumerTest {
         });
 
         new LoanPaymentCompletedListener(json, new JdbcInbox(jdbc), repayments, transactions)
-            .onLoanPaymentCompleted(new ConsumerRecord<>(LoanPaymentCompleted.TOPIC, 0, 42L, "PAY-1", EVENT));
+            .onPaymentEvent(paymentRecord("Payments.Payment.LoanPaymentCompleted.v1", EVENT));
 
         verify(repayments).recordCompletedLoanPayment(new RecordCompletedLoanPaymentCommand(PaymentId.of("PAY-1"),
             LoanId.of("LOAN-1"), Money.aed(new BigDecimal("1100.00"))));
         verify(jdbc).update(anyString(), eq(EVENT_ID), eq(RepaymentConsumerConfiguration.CONSUMER_GROUP),
-            eq("Payments.Payment.LoanPaymentCompleted.v1"), eq(LoanPaymentCompleted.TOPIC));
+            eq("Payments.Payment.LoanPaymentCompleted.v1"), eq("evt.pay.payment.v1"));
+    }
+
+    /** One topic per aggregate (ADR-019): the payment aggregate's topic, not a per-event topic. */
+    @Test
+    void theConsumerReadsThePaymentAggregateTopic() throws Exception {
+        assertThat(LoanPaymentCompleted.TOPIC).isEqualTo("evt.pay.payment.v1");
+        KafkaListener listener = LoanPaymentCompletedListener.class.getMethod("onPaymentEvent", ConsumerRecord.class)
+            .getAnnotation(KafkaListener.class);
+        assertThat(listener.topics()).containsExactly("evt.pay.payment.v1");
+        assertThat(listener.groupId()).isEqualTo("cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1");
+    }
+
+    /**
+     * ADR-019 section 3: the consumer reads the eventType header first and handles only
+     * Payments.Payment.LoanPaymentCompleted.v1. Every other type on evt.pay.payment.v1, known or not,
+     * is skipped: the listener returns normally (the RECORD ack mode commits the offset), nothing is
+     * parsed, no inbox row, no repayment, no exception, so the error handler never dead-letters it.
+     */
+    @Test
+    void otherPaymentEventTypesAreSkippedWithoutFailingOrDeadLettering() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        LoanRepaymentUseCase repayments = mock(LoanRepaymentUseCase.class);
+        LoanPaymentCompletedListener listener = new LoanPaymentCompletedListener(json, new JdbcInbox(jdbc), repayments,
+            TransactionOperations.withoutTransaction());
+
+        for (String other : java.util.List.of("Payments.Payment.Created.v1", "Payments.Payment.ProcessingStarted.v1",
+                "Payments.Payment.Completed.v1", "Payments.Payment.Failed.v1", "Payments.Payment.Cancelled.v1",
+                "Payments.Payment.Refunded.v1", "Payments.Payment.LoanPaymentCreated.v1",
+                "Payments.Payment.LoanPaymentFailed.v1", "Payments.Payment.LoanPaymentCompleted.v2",
+                "Payments.Payment.SomethingAddedLater.v1")) {
+            // The value is not even parsed: a type this consumer does not handle cannot fail it.
+            listener.onPaymentEvent(paymentRecord(other, "{\"eventType\":\"" + other + "\",\"data\":{}}"));
+            listener.onPaymentEvent(paymentRecord(other, "not json"));
+        }
+
+        verify(jdbc, never()).update(anyString(), any(), any(), any(), any());
+        verify(repayments, never()).recordCompletedLoanPayment(any());
+    }
+
+    @Test
+    void theOffsetOfASkippedRecordIsCommittedPerRecord() {
+        ConcurrentKafkaListenerContainerFactory<String, String> factory = new RepaymentConsumerConfiguration()
+            .repaymentListenerContainerFactory(new KafkaProperties(), mock(KafkaTemplate.class), new SimpleMeterRegistry(),
+                CLOCK, 1);
+
+        assertThat(factory.getContainerProperties().getAckMode())
+            .isEqualTo(org.springframework.kafka.listener.ContainerProperties.AckMode.RECORD);
+    }
+
+    /** The header is required (EventHeaders): without it the record breaks the contract and is dead-lettered once. */
+    @Test
+    void aRecordWithoutTheEventTypeHeaderBreaksTheContract() {
+        LoanPaymentCompletedListener listener = new LoanPaymentCompletedListener(json,
+            new JdbcInbox(mock(JdbcTemplate.class)), mock(LoanRepaymentUseCase.class),
+            TransactionOperations.withoutTransaction());
+
+        assertThatThrownBy(() -> listener.onPaymentEvent(new ConsumerRecord<>("evt.pay.payment.v1", 0, 3L, "PAY-1", EVENT)))
+            .isInstanceOf(ContractViolationException.class).hasMessageContaining("eventType header");
+    }
+
+    /** The eventType header must equal the envelope's eventType. */
+    @Test
+    void aHeaderThatDisagreesWithTheEnvelopeBreaksTheContract() {
+        LoanRepaymentUseCase repayments = mock(LoanRepaymentUseCase.class);
+        LoanPaymentCompletedListener listener = new LoanPaymentCompletedListener(json,
+            new JdbcInbox(mock(JdbcTemplate.class)), repayments, TransactionOperations.withoutTransaction());
+        String completedPayment = EVENT.replace("Payments.Payment.LoanPaymentCompleted.v1", "Payments.Payment.Completed.v1");
+
+        assertThatThrownBy(() -> listener.onPaymentEvent(
+                paymentRecord("Payments.Payment.LoanPaymentCompleted.v1", completedPayment)))
+            .isInstanceOf(ContractViolationException.class).hasMessageContaining("eventType");
+        verify(repayments, never()).recordCompletedLoanPayment(any());
     }
 
     @Test
@@ -170,7 +243,7 @@ class LoanPaymentCompletedConsumerTest {
         assertThat(dead.key()).isEqualTo("PAY-1");
         assertThat(dead.value()).isEqualTo("not json");
         Headers headers = dead.headers();
-        assertThat(text(headers, "dlq-original-topic")).isEqualTo(LoanPaymentCompleted.TOPIC);
+        assertThat(text(headers, "dlq-original-topic")).isEqualTo("evt.pay.payment.v1");
         assertThat(text(headers, "dlq-original-partition")).isEqualTo("2");
         assertThat(text(headers, "dlq-original-offset")).isEqualTo("77");
         assertThat(text(headers, "dlq-consumer-group")).isEqualTo("cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1");
@@ -226,6 +299,14 @@ class LoanPaymentCompletedConsumerTest {
             new IllegalStateException("bad bytes"));
 
         assertThat(text(RepaymentConsumerConfiguration.dlqHeaders(record, bad, CLOCK), "dlq-attempts")).isEqualTo("1");
+    }
+
+    private static ConsumerRecord<String, String> paymentRecord(String eventType, String value) {
+        ConsumerRecord<String, String> record = new ConsumerRecord<>("evt.pay.payment.v1", 0, 42L, "PAY-1", value);
+        record.headers().add("eventType", eventType.getBytes(StandardCharsets.UTF_8));
+        record.headers().add("eventId", EVENT_ID.toString().getBytes(StandardCharsets.UTF_8));
+        record.headers().add("correlationId", "corr-1".getBytes(StandardCharsets.UTF_8));
+        return record;
     }
 
     private static String text(Headers headers, String name) {

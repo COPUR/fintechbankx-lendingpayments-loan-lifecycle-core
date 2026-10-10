@@ -2,8 +2,11 @@ package com.bank.loan;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
+import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
+
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -68,5 +71,42 @@ class DatabaseMigrationIT {
             "--spring.flyway.default-schema=" + SCHEMA);
 
         assertThat(exitCode).isNotZero();
+    }
+
+    /**
+     * V11 (ADR-019 section 8, one topic per aggregate): rows written before it,
+     * with whatever topic the old per-event mapping stored, now name the
+     * aggregate topic evt.ln.loan.v1 that the relay sends them to, and the
+     * new fapi_interaction_id column is empty for them (no header invented).
+     */
+    @Test
+    void v11PointsEveryStoredRowAtTheAggregateTopic() {
+        PostgresTestDatabase.owner().execute("drop schema if exists " + SCHEMA + " cascade");
+        Flyway upToV10 = flyway("10");
+        upToV10.migrate();
+        JdbcTemplate owner = PostgresTestDatabase.owner();
+        owner.update("insert into " + SCHEMA + ".outbox_event (event_id, aggregate_type, aggregate_id, aggregate_version,"
+            + " event_type, topic, payload, correlation_id, occurred_at)"
+            + " values ('5c1e2c4a-6a7b-4c1d-9e8f-0a1b2c3d4e5f', 'Loan', 'LOAN-V11', 0, 'Lending.Loan.Created.v1',"
+            + " 'evt.ln.loan.written-before-v11', '{}'::jsonb, 'corr-v11', now())");
+
+        flyway("latest").migrate();
+
+        Map<String, Object> row = owner.queryForMap("select topic, fapi_interaction_id from " + SCHEMA
+            + ".outbox_event where aggregate_id = 'LOAN-V11'");
+        assertThat(row.get("topic")).isEqualTo("evt.ln.loan.v1");
+        assertThat(row.get("fapi_interaction_id")).isNull();
+    }
+
+    private static Flyway flyway(String target) {
+        return Flyway.configure()
+            .dataSource(PostgresTestDatabase.url(), PostgresTestDatabase.ownerUser(), PostgresTestDatabase.ownerPassword())
+            .schemas(SCHEMA)
+            .defaultSchema(SCHEMA)
+            .createSchemas(true)
+            .locations("classpath:db/migration")
+            .placeholders(Map.of("runtime_role", PostgresTestDatabase.ownerUser()))
+            .target(target)
+            .load();
     }
 }

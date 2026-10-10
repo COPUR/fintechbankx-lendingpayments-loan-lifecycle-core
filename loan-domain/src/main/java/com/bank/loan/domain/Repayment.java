@@ -23,7 +23,7 @@ public record Repayment(PaymentId paymentId, LoanId loanId, Money amount, List<I
     public enum Source {
         /** POST /api/v1/loans/{id}/payments on this service */
         API,
-        /** evt.pay.payment.loan-payment-completed.v1 from the payment service */
+        /** Payments.Payment.LoanPaymentCompleted.v1 on evt.pay.payment.v1 from the payment service */
         PAYMENT_EVENT,
         /** monolith history, loaded by db/backfill */
         MONOLITH

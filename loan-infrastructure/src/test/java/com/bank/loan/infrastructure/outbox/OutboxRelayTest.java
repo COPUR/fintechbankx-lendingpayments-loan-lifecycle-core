@@ -88,18 +88,50 @@ class OutboxRelayTest {
         verify(kafka, times(2)).send(any(ProducerRecord.class));
     }
 
+    /**
+     * ADR-019 sections 1 and 3 (one topic per aggregate): every loan event goes to
+     * evt.ln.loan.v1, keyed by the aggregateId as UTF-8 text, with the required
+     * eventType, eventId and correlationId headers equal to the envelope.
+     */
     @Test
-    void recordIsKeyedByAggregateAndCarriesTracingHeaders() {
-        OutboxEventJpaEntity row = row("LOAN-9");
+    void everyLoanEventGoesToTheAggregateTopicKeyedByLoanIdWithTheRequiredHeaders() {
+        for (String eventType : List.of("Lending.Loan.Created.v1", "Lending.Loan.Approved.v1",
+                "Lending.Loan.Rejected.v1", "Lending.Loan.Disbursed.v1", "Lending.Loan.Cancelled.v1",
+                "Lending.Loan.PaymentMade.v1", "Lending.Loan.FullyPaid.v1")) {
+            OutboxEventJpaEntity row = new OutboxEventJpaEntity(UUID.randomUUID(), "Loan", "LOAN-9", 3L,
+                eventType, "evt.ln.loan.v1", "{}", "corr-9", NOW);
 
-        ProducerRecord<String, String> record = OutboxRelay.toRecord(row);
+            ProducerRecord<String, String> record = OutboxRelay.toRecord(row);
 
-        assertThat(record.topic()).isEqualTo("evt.ln.loan.created.v1");
-        assertThat(record.key()).isEqualTo("LOAN-9");
-        assertThat(record.value()).isEqualTo("{}");
-        assertThat(header(record, "eventType")).isEqualTo("Lending.Loan.Created.v1");
-        assertThat(header(record, "eventId")).isEqualTo(row.getEventId().toString());
-        assertThat(header(record, "x-fapi-interaction-id")).isEqualTo("corr-9");
+            assertThat(record.topic()).as(eventType).isEqualTo("evt.ln.loan.v1");
+            assertThat(record.key()).as(eventType).isEqualTo("LOAN-9");
+            assertThat(record.value()).isEqualTo("{}");
+            assertThat(header(record, "eventType")).isEqualTo(eventType);
+            assertThat(header(record, "eventId")).isEqualTo(row.getEventId().toString());
+            assertThat(header(record, "correlationId")).isEqualTo("corr-9");
+        }
+    }
+
+    /** The relay computes the topic from the aggregate; it does not trust the stored per-row topic. */
+    @Test
+    void theTopicIsComputedFromTheAggregateNotReadFromTheRow() {
+        OutboxEventJpaEntity row = new OutboxEventJpaEntity(UUID.randomUUID(), "Loan", "LOAN-10", 1L,
+            "Lending.Loan.Approved.v1", "stored-topic-is-ignored", "{}", "corr-10", NOW);
+
+        assertThat(OutboxRelay.toRecord(row).topic()).isEqualTo("evt.ln.loan.v1");
+    }
+
+    /**
+     * x-fapi-interaction-id is optional (ADR-019 section 3): only when the flow started
+     * at the loan API (FAPI); a repayment applied from evt.pay.payment.v1 does not invent one.
+     */
+    @Test
+    void theFapiInteractionIdIsSentOnlyWhenTheFlowStartedAtTheApi() {
+        OutboxEventJpaEntity fromApi = row("LOAN-11").withFapiInteractionId("ix-11");
+        OutboxEventJpaEntity fromConsumer = row("LOAN-12");
+
+        assertThat(header(OutboxRelay.toRecord(fromApi), "x-fapi-interaction-id")).isEqualTo("ix-11");
+        assertThat(OutboxRelay.toRecord(fromConsumer).headers().lastHeader("x-fapi-interaction-id")).isNull();
     }
 
     /**
@@ -141,7 +173,7 @@ class OutboxRelayTest {
             Arguments.of(new NetworkException("disconnected"), "NetworkException"),
             Arguments.of(new KafkaProducerException(null, "send failed", new NotLeaderOrFollowerException("leader moved")),
                 "NotLeaderOrFollowerException"),
-            Arguments.of(new TopicAuthorizationException(Set.of("evt.ln.loan.created.v1")), "TopicAuthorizationException"),
+            Arguments.of(new TopicAuthorizationException(Set.of("evt.ln.loan.v1")), "TopicAuthorizationException"),
             Arguments.of(new SaslAuthenticationException("Access denied"), "SaslAuthenticationException"),
             Arguments.of(new KafkaException("Failed to construct kafka producer"), "KafkaException"),
             Arguments.of(new IllegalStateException("something nobody classified"), "IllegalStateException"));
@@ -310,7 +342,7 @@ class OutboxRelayTest {
 
     private static OutboxEventJpaEntity row(String aggregateId) {
         return new OutboxEventJpaEntity(UUID.randomUUID(), "Loan", aggregateId, 0L,
-            "Lending.Loan.Created.v1", "evt.ln.loan.created.v1", "{}", "corr-9", NOW);
+            "Lending.Loan.Created.v1", "evt.ln.loan.v1", "{}", "corr-9", NOW);
     }
 
     /** A clock the test moves forward (the relay takes the injected Clock). */

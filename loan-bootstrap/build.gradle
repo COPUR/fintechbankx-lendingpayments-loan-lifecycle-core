@@ -32,6 +32,8 @@ dependencies {
     testImplementation 'org.springframework.security:spring-security-test'
     testImplementation 'org.testcontainers:junit-jupiter'
     testImplementation 'org.testcontainers:postgresql'
+    // DatabaseMigrationIT migrates step by step (target) to test a data migration.
+    testImplementation 'org.flywaydb:flyway-core'
 }
 
 springBoot {

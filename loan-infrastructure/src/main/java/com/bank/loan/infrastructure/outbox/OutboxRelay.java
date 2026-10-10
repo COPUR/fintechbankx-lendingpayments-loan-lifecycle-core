@@ -203,17 +203,32 @@ public class OutboxRelay {
         return cause;
     }
 
+    /** This outbox holds the Loan aggregate only (aggregate_type Loan), whose topic is evt.ln.loan.v1. */
+    static String topicFor(OutboxEventJpaEntity row) {
+        return LoanEventEnvelopeFactory.TOPIC;
+    }
+
     public int purgePublished() {
         Integer deleted = transactions.execute(status -> outbox.deletePublishedBefore(clock.instant().minus(retention)));
         return deleted == null ? 0 : deleted;
     }
 
+    /**
+     * ADR-019 sections 1 and 3: every event of the Loan aggregate goes to its one
+     * topic evt.ln.loan.v1, computed here rather than read from the row; the key is
+     * the aggregateId as UTF-8 text (the envelope's aggregateId, so one loan's events
+     * stay in order in one partition); the eventType, eventId and correlationId
+     * headers equal the envelope's. x-fapi-interaction-id only when the flow started
+     * at the loan API; traceparent only when the request was traced.
+     */
     static ProducerRecord<String, String> toRecord(OutboxEventJpaEntity row) {
-        ProducerRecord<String, String> record = new ProducerRecord<>(row.getTopic(), row.getAggregateId(), row.getPayload());
+        ProducerRecord<String, String> record = new ProducerRecord<>(topicFor(row), row.getAggregateId(), row.getPayload());
         record.headers().add("eventType", row.getEventType().getBytes(StandardCharsets.UTF_8));
         record.headers().add("eventId", row.getEventId().toString().getBytes(StandardCharsets.UTF_8));
         record.headers().add("correlationId", row.getCorrelationId().getBytes(StandardCharsets.UTF_8));
-        record.headers().add("x-fapi-interaction-id", row.getCorrelationId().getBytes(StandardCharsets.UTF_8));
+        if (row.getFapiInteractionId() != null) {
+            record.headers().add("x-fapi-interaction-id", row.getFapiInteractionId().getBytes(StandardCharsets.UTF_8));
+        }
         if (row.getTraceparent() != null) {
             record.headers().add("traceparent", row.getTraceparent().getBytes(StandardCharsets.UTF_8));
         }

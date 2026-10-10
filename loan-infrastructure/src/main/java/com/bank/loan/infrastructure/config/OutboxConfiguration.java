@@ -79,8 +79,8 @@ public class OutboxConfiguration {
     /**
      * The relay runs in every replica; the advisory lock lets only one of
      * them publish at a time. Off unless loan.outbox.relay.enabled=true
-     * (OUTBOX_RELAY_ENABLED): it stays off until the evt.ln.loan.* topics
-     * exist in the platform catalog (runbook step 4).
+     * (OUTBOX_RELAY_ENABLED): it stays off until the aggregate topic evt.ln.loan.v1
+     * exists in the platform catalog and on the cluster (runbook step 4).
      */
     @Configuration
     @EnableScheduling

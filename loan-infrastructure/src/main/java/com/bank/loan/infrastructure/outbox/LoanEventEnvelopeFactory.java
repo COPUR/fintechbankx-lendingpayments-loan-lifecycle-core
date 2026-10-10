@@ -19,14 +19,17 @@ import java.util.UUID;
 
 /**
  * Turns Loan domain events into the public envelope of the provider contract
- * api/asyncapi/svc-ln-loan-lifecycle.yaml (to be published to the asyncapi
- * catalog): topic evt.ln.loan.&lt;event&gt;.v1, eventType
- * Lending.Loan.&lt;Event&gt;.v1, money as decimal strings, ids only.
+ * api/asyncapi/svc-ln-loan-lifecycle.yaml (mirrored by the asyncapi catalog):
+ * every event of the Loan aggregate goes to the one aggregate topic
+ * evt.ln.loan.v1 (ADR-019, one topic per aggregate) and is named by its
+ * eventType Lending.Loan.&lt;Event&gt;.v1; money as decimal strings, ids only.
  */
 public class LoanEventEnvelopeFactory {
 
     public static final String PRODUCER = "svc-ln-loan-lifecycle";
     public static final String AGGREGATE_TYPE = "Loan";
+    /** The Loan aggregate's topic; the relay sends every row of this outbox to it. */
+    public static final String TOPIC = "evt.ln.loan.v1";
 
     private final ObjectMapper objectMapper;
 
@@ -52,40 +55,40 @@ public class LoanEventEnvelopeFactory {
         envelope.put("data", mapped.data());
 
         return new OutboxEventJpaEntity(eventId, AGGREGATE_TYPE, aggregateId, aggregateVersion,
-            mapped.eventType(), mapped.topic(), toJson(envelope), correlationId, event.getOccurredOn());
+            mapped.eventType(), TOPIC, toJson(envelope), correlationId, event.getOccurredOn());
     }
 
     static PublicEvent map(DomainEvent event) {
         return switch (event) {
-            case LoanCreatedEvent e -> new PublicEvent("created", "Created", data(
+            case LoanCreatedEvent e -> new PublicEvent("Created", data(
                 "loanId", e.getLoanId().getValue(),
                 "customerId", e.getCustomerId().getValue(),
                 "principalAmount", money(e.getPrincipalAmount())));
-            case LoanApprovedEvent e -> new PublicEvent("approved", "Approved", data(
+            case LoanApprovedEvent e -> new PublicEvent("Approved", data(
                 "loanId", e.getLoanId().getValue(),
                 "customerId", e.getCustomerId().getValue(),
                 "principalAmount", money(e.getPrincipalAmount())));
-            case LoanRejectedEvent e -> new PublicEvent("rejected", "Rejected", data(
+            case LoanRejectedEvent e -> new PublicEvent("Rejected", data(
                 "loanId", e.getLoanId().getValue(),
                 "customerId", e.getCustomerId().getValue(),
                 "reason", e.getReason()));
-            case LoanDisbursedEvent e -> new PublicEvent("disbursed", "Disbursed", data(
+            case LoanDisbursedEvent e -> new PublicEvent("Disbursed", data(
                 "loanId", e.getLoanId().getValue(),
                 "customerId", e.getCustomerId().getValue(),
                 "principalAmount", money(e.getPrincipalAmount()),
                 "disbursementDate", e.getDisbursementDate().toString()));
-            case LoanCancelledEvent e -> new PublicEvent("cancelled", "Cancelled", data(
+            case LoanCancelledEvent e -> new PublicEvent("Cancelled", data(
                 "loanId", e.getLoanId().getValue(),
                 "customerId", e.getCustomerId().getValue(),
                 "reason", e.getReason()));
-            case LoanPaymentMadeEvent e -> new PublicEvent("payment-made", "PaymentMade", data(
+            case LoanPaymentMadeEvent e -> new PublicEvent("PaymentMade", data(
                 "loanId", e.getLoanId().getValue(),
                 "customerId", e.getCustomerId().getValue(),
                 "paymentId", e.getPaymentId() == null ? null : e.getPaymentId().getValue(),
                 "paymentAmount", money(e.getPaymentAmount()),
                 "previousBalance", money(e.getPreviousBalance()),
                 "newBalance", money(e.getNewBalance())));
-            case LoanFullyPaidEvent e -> new PublicEvent("fully-paid", "FullyPaid", data(
+            case LoanFullyPaidEvent e -> new PublicEvent("FullyPaid", data(
                 "loanId", e.getLoanId().getValue(),
                 "customerId", e.getCustomerId().getValue()));
             default -> throw new IllegalArgumentException(
@@ -113,11 +116,7 @@ public class LoanEventEnvelopeFactory {
         }
     }
 
-    record PublicEvent(String topicSuffix, String eventName, Map<String, Object> data) {
-        String topic() {
-            return "evt.ln.loan." + topicSuffix + ".v1";
-        }
-
+    record PublicEvent(String eventName, Map<String, Object> data) {
         String eventType() {
             return "Lending.Loan." + eventName + ".v1";
         }
