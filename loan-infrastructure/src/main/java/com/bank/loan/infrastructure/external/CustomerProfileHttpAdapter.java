@@ -290,11 +290,13 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
      * and clears it once it is done. Under the customer's release by
      * reference (provider contract pending):
      * <ul>
-     *   <li>422 RESERVATION_NOT_FOUND: nothing was reserved under the loan's
-     *       reference (for the sweep's release of an unanswered reserve: the
-     *       reserve was never applied), so there is nothing to release; the
-     *       intent is done, the row cleared, logged and counted
-     *       (loan_credit_releases_unmatched_total);</li>
+     *   <li>422 RESERVATION_NOT_FOUND: nothing is held under the loan's
+     *       reference: nothing was reserved (for the sweep's release of an
+     *       unanswered reserve: the reserve was never applied), or the
+     *       reservation already holds 0 (customer CRC, round 5: a zero-holding
+     *       reservation answers RESERVATION_NOT_FOUND). Either way the
+     *       reservation counts as already released: the intent is done, the
+     *       row cleared, logged and counted (loan_credit_releases_unmatched_total);</li>
      *   <li>422 RELEASE_EXCEEDS_RESERVATION: this service asked to release
      *       more than is held, a bug signal. The compensation stays pending
      *       with the code recorded, is never re-sent, and waits for an operator

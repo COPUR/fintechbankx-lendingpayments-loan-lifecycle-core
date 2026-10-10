@@ -578,7 +578,16 @@ class CustomerProfileHttpAdapterTest {
 
     // --- customer release-by-reference (provider contract pending) -----------------------------------
 
-    /** 422 RESERVATION_NOT_FOUND: nothing was reserved under the loan's reference, so the release intent is done. */
+    /**
+     * 422 RESERVATION_NOT_FOUND: nothing is held under the loan's reference,
+     * because nothing was reserved or because the reservation already holds 0
+     * (customer CRC, round 5: a zero-holding reservation answers
+     * RESERVATION_NOT_FOUND, not RELEASE_EXCEEDS_RESERVATION). Either way the
+     * reservation counts as already released: the intent is done, the row is
+     * cleared, the release counted as unmatched, and nothing waits for an
+     * operator. The sweep's release-by-reference goes through this same path
+     * (CreditReservationSweep counts the outcome as nothingHeld).
+     */
     @Test
     void aReleaseOfAReservationTheCustomerServiceDoesNotHoldCompletesTheIntent() {
         Money ten = Money.aed(new BigDecimal("10.00"));

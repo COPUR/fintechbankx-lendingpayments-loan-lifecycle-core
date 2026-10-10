@@ -438,10 +438,10 @@ has `pending_compensation = <n>` and `release_refused_code = 'RELEASE_EXCEEDS_RE
 `<reserve key of n>:compensation` asked for more than the customer service holds for reference `<loan_id>`.
 
 Two ways to get here: the compensation of a reservation this service recorded as accepted (a bug signal), or
-the sweep's release of a reserve that was never answered. In the second case, at generation n > 0, the usual
-cause is benign: the reserve of generation n was never applied, and the reference still has a reservation from
-an earlier generation that was already released (it holds 0), so the customer service answers "exceeds"
-rather than "not found". Step 2 below applies.
+the sweep's release of a reserve that was never answered. Either way the reference holds more than 0 and less
+than the loan's principal: a reservation that holds 0 (already released, for example under an earlier
+generation's key) answers `RESERVATION_NOT_FOUND`, not "exceeds" (customer CRC, round 5), and the sweep clears
+such a row itself as already released (`CustomerProfileHttpAdapterTest.aReleaseOfAReservationTheCustomerServiceDoesNotHoldCompletesTheIntent`).
 The release is never re-sent by this service, the sweep skips the row, and a disbursement of the loan answers
 409 `CREDIT_RESERVATION_HELD_FOR_OPERATOR` without calling the customer service until the row is closed.
 
