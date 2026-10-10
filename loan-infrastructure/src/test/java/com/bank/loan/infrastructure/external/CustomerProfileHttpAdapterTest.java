@@ -3,6 +3,7 @@ package com.bank.loan.infrastructure.external;
 import com.bank.loan.domain.port.out.CreditCurrencyMismatchException;
 import com.bank.loan.domain.port.out.CreditCustomerNotFoundException;
 import com.bank.loan.domain.port.out.CustomerCreditService.CreditDecision;
+import com.bank.loan.domain.port.out.CustomerCreditService.UnusedReservation;
 import com.bank.loan.domain.port.out.CustomerCreditUnavailableException;
 import com.bank.loan.domain.LoanId;
 import com.bank.loan.infrastructure.web.CorrelationIdFilter;
@@ -375,37 +376,389 @@ class CustomerProfileHttpAdapterTest {
         assertThatThrownBy(() -> adapter.getAvailableCredit(CUSTOMER)).isInstanceOf(CustomerCreditUnavailableException.class);
     }
 
-    /** In-memory generations with switchable store failures. */
+    // --- review 5460235552: reservations are recorded; only accepted ones are released ---------------
+
+    @Test
+    void aReservationIsRecordedBeforeItIsSentAndMarkedReservedOnceAccepted() {
+        server.expect(requestTo(BASE + "/credit/reserve"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve"))
+            .andRespond(request -> {
+                assertThat(generations.state(LOAN)).isEqualTo(ReservationGenerations.State.RESERVING);
+                return withSuccess(POSITION_AED, MediaType.APPLICATION_JSON).createResponse(request);
+            });
+
+        assertThat(adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(new BigDecimal("10.00")))).isEqualTo(CreditDecision.ACCEPTED);
+
+        assertThat(generations.state(LOAN)).isEqualTo(ReservationGenerations.State.RESERVED);
+        server.verify();
+    }
+
+    @Test
+    void whenTheReservationCannotBeRecordedNothingIsReserved() {
+        generations.failReservationWrites = true;
+
+        assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(new BigDecimal("10.00"))))
+            .isInstanceOf(CustomerCreditUnavailableException.class)
+            .hasMessageContaining("nothing reserved");
+        server.verify();
+    }
+
+    @Test
+    void anAnswerThatIsNotRecordedStillCountsAndLeavesTheRowReserving() {
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        generations.failAnswers = true;
+
+        assertThat(adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(new BigDecimal("10.00")))).isEqualTo(CreditDecision.ACCEPTED);
+
+        assertThat(generations.state(LOAN)).isEqualTo(ReservationGenerations.State.RESERVING);
+    }
+
+    @Test
+    void aRefusedReservationLeavesNothingToRelease() {
+        server.expect(requestTo(BASE + "/credit/reserve"))
+            .andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY).contentType(MediaType.APPLICATION_JSON)
+                .body("{\"code\":\"INSUFFICIENT_CREDIT\",\"message\":\"no\"}"));
+        Money ten = Money.aed(new BigDecimal("10.00"));
+
+        assertThat(adapter.reserveCredit(LOAN, CUSTOMER, ten)).isEqualTo(CreditDecision.REFUSED);
+
+        assertThat(generations.state(LOAN)).isNull();
+        assertThat(adapter.releaseUnusedReservation(LOAN, CUSTOMER, ten)).isEqualTo(UnusedReservation.NONE);
+        server.verify();
+    }
+
+    /**
+     * The reserve timed out: the customer service may or may not have applied
+     * it, and its release subtracts without checking (customer #13
+     * CreditProfile.releaseCredit). Nothing is released.
+     */
+    @Test
+    void aReservationWithoutAnAnswerIsNeverReleasedBlind() {
+        server.expect(requestTo(BASE + "/credit/reserve"))
+            .andRespond(withException(new SocketTimeoutException("Read timed out")));
+        Money ten = Money.aed(new BigDecimal("10.00"));
+
+        assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, ten))
+            .isInstanceOf(CustomerCreditUnavailableException.class);
+
+        assertThat(generations.state(LOAN)).isEqualTo(ReservationGenerations.State.RESERVING);
+        assertThat(adapter.releaseUnusedReservation(LOAN, CUSTOMER, ten)).isEqualTo(UnusedReservation.UNCONFIRMED);
+        server.verify();
+    }
+
+    @Test
+    void anAcceptedUnusedReservationIsReleasedOnceUnderItsCompensationKey() {
+        Money amount = Money.aed(new BigDecimal("25000.00"));
+        server.expect(requestTo(BASE + "/credit/reserve"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve"))
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve:compensation"))
+            .andExpect(content().json("{\"amount\":25000.00,\"currency\":\"AED\",\"reference\":\"LOAN-HTTP-1\"}"))
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+
+        adapter.reserveCredit(LOAN, CUSTOMER, amount);
+        assertThat(adapter.releaseUnusedReservation(LOAN, CUSTOMER, amount)).isEqualTo(UnusedReservation.RELEASED);
+        assertThat(adapter.releaseUnusedReservation(LOAN, CUSTOMER, amount)).isEqualTo(UnusedReservation.NONE);
+
+        assertThat(generations.current(LOAN)).isEqualTo(1);
+        assertThat(generations.countPending()).isZero();
+        server.verify();
+    }
+
+    @Test
+    void anUnconfirmedReleaseStaysPendingAndIsResentUnderTheSameKey() {
+        Money ten = Money.aed(new BigDecimal("10.00"));
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve:compensation"))
+            .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve:compensation"))
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+
+        adapter.reserveCredit(LOAN, CUSTOMER, ten);
+        assertThatThrownBy(() -> adapter.releaseUnusedReservation(LOAN, CUSTOMER, ten))
+            .isInstanceOf(CustomerCreditUnavailableException.class);
+        assertThat(generations.pendingCompensation(LOAN)).hasValue(0);
+        assertThat(adapter.releaseUnusedReservation(LOAN, CUSTOMER, ten)).isEqualTo(UnusedReservation.RELEASED);
+
+        assertThat(generations.pendingCompensation(LOAN)).isEmpty();
+        server.verify();
+    }
+
+    @Test
+    void aRefusedReleaseOfAnUnusedReservationIsUnavailable() {
+        Money ten = Money.aed(new BigDecimal("10.00"));
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        server.expect(ExpectedCount.times(2), requestTo(BASE + "/credit/release"))
+            .andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY).contentType(MediaType.APPLICATION_JSON)
+                .body("{\"code\":\"INSUFFICIENT_CREDIT\",\"message\":\"no\"}"));
+
+        adapter.reserveCredit(LOAN, CUSTOMER, ten);
+        assertThatThrownBy(() -> adapter.releaseUnusedReservation(LOAN, CUSTOMER, ten))
+            .isInstanceOf(CustomerCreditUnavailableException.class);
+        assertThatThrownBy(() -> adapter.releaseUnusedReservation(LOAN, CUSTOMER, ten))
+            .isInstanceOf(CustomerCreditUnavailableException.class);
+        server.verify();
+    }
+
+    @Test
+    void theDisbursementCanUseAReservationOnlyWhileItIsOutstanding() {
+        Money ten = Money.aed(new BigDecimal("10.00"));
+        server.expect(ExpectedCount.times(2), requestTo(BASE + "/credit/reserve"))
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/credit/release")).andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        LoanId other = LoanId.of("LOAN-HTTP-2");
+
+        adapter.reserveCredit(LOAN, CUSTOMER, ten);
+        adapter.markReservationUsed(LOAN);
+        assertThat(generations.state(LOAN)).isEqualTo(ReservationGenerations.State.USED);
+        assertThat(adapter.releaseUnusedReservation(LOAN, CUSTOMER, ten)).isEqualTo(UnusedReservation.NONE);
+
+        adapter.reserveCredit(other, CUSTOMER, ten);
+        adapter.releaseUnusedReservation(other, CUSTOMER, ten);
+        assertThatThrownBy(() -> adapter.markReservationUsed(other))
+            .isInstanceOf(CustomerCreditUnavailableException.class)
+            .hasMessageContaining("released meanwhile");
+    }
+
+    @Test
+    void aReservationAlreadyReleasedByTheCancellationIsNotCancelledAgain() {
+        Money ten = Money.aed(new BigDecimal("10.00"));
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve:compensation"))
+            .andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+
+        adapter.reserveCredit(LOAN, CUSTOMER, ten);
+        adapter.releaseUnusedReservation(LOAN, CUSTOMER, ten);
+        // the failed disbursement's own compensation comes second: generation 1 was never reserved
+        assertThat(adapter.cancelReservation(LOAN, CUSTOMER, ten)).isEqualTo(CreditDecision.ACCEPTED);
+
+        server.verify();
+    }
+
+    // --- customer release-by-reference (provider contract pending) -----------------------------------
+
+    /** 422 RESERVATION_NOT_FOUND: nothing was reserved under the loan's reference, so the release intent is done. */
+    @Test
+    void aReleaseOfAReservationTheCustomerServiceDoesNotHoldCompletesTheIntent() {
+        Money ten = Money.aed(new BigDecimal("10.00"));
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:reserve:compensation"))
+            .andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY).contentType(MediaType.APPLICATION_JSON)
+                .body("{\"code\":\"RESERVATION_NOT_FOUND\",\"message\":\"no reservation for the reference\"}"));
+
+        io.micrometer.core.instrument.simple.SimpleMeterRegistry meters = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        CustomerProfileHttpAdapter counted = new CustomerProfileHttpAdapter(builder.build(), () -> "service-token",
+            Currency.getInstance("AED"), generations, 3, CustomerProfileHttpAdapter.Paths.DEFAULT, meters);
+
+        counted.reserveCredit(LOAN, CUSTOMER, ten);
+        assertThat(counted.releaseUnusedReservation(LOAN, CUSTOMER, ten)).isEqualTo(UnusedReservation.NONE);
+        assertThat(counted.releaseUnusedReservation(LOAN, CUSTOMER, ten)).isEqualTo(UnusedReservation.NONE);
+
+        assertThat(generations.pendingCompensation(LOAN)).isEmpty();
+        assertThat(meters.get("loan.credit.releases.unmatched").counter().count()).isEqualTo(1.0);
+        assertThat(meters.get("loan.credit.releases.unmatched").counter().getId().getTags()).isEmpty();
+        server.verify();
+    }
+
+    /** 422 RELEASE_EXCEEDS_RESERVATION is a bug signal: the row is left for an operator, nothing is re-sent. */
+    @Test
+    void aReleaseExceedingTheReservationIsLeftForAnOperator() {
+        Money ten = Money.aed(new BigDecimal("10.00"));
+        server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withSuccess(POSITION_AED, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY).contentType(MediaType.APPLICATION_JSON)
+                .body("{\"code\":\"RELEASE_EXCEEDS_RESERVATION\",\"message\":\"more than reserved\"}"));
+
+        adapter.reserveCredit(LOAN, CUSTOMER, ten);
+        assertThatThrownBy(() -> adapter.releaseUnusedReservation(LOAN, CUSTOMER, ten))
+            .isInstanceOf(CustomerCreditUnavailableException.class)
+            .hasMessageContaining("RELEASE_EXCEEDS_RESERVATION");
+        assertThatThrownBy(() -> adapter.releaseUnusedReservation(LOAN, CUSTOMER, ten))
+            .isInstanceOf(CustomerCreditUnavailableException.class)
+            .hasMessageContaining("operator");
+
+        assertThat(generations.pendingCompensation(LOAN)).hasValue(0);
+        assertThat(generations.releaseRefusal(LOAN)).isEqualTo("RELEASE_EXCEEDS_RESERVATION");
+        server.verify();
+    }
+
+    /**
+     * In-memory {@link ReservationGenerations} with the compare-and-set rules
+     * of JdbcReservationGenerations, and switchable store failures.
+     */
     static final class Generations implements ReservationGenerations {
-        private final Map<LoanId, Integer> values = new HashMap<>();
-        private final Map<LoanId, Integer> pending = new HashMap<>();
+        private final Map<LoanId, Reservation> rows = new HashMap<>();
         boolean failGenerationWrites;
         boolean failCompensationDone;
+        boolean failReservationWrites;
+        boolean failAnswers;
 
         @Override
-        public int current(LoanId loanId) {
-            return values.getOrDefault(loanId, 0);
+        public synchronized int current(LoanId loanId) {
+            Reservation row = rows.get(loanId);
+            return row == null ? 0 : row.generation();
         }
 
+        @Override
+        public synchronized java.util.Optional<Reservation> find(LoanId loanId) {
+            return java.util.Optional.ofNullable(rows.get(loanId));
+        }
 
-        public void beginCompensation(LoanId loanId, int generation) {
+        @Override
+        public synchronized void beginReservation(LoanId loanId, int generation) {
+            if (failReservationWrites) {
+                throw new IllegalStateException("database unavailable");
+            }
+            Reservation row = rows.get(loanId);
+            if (row == null) {
+                row = put(loanId, generation, State.RESERVING, null);
+            } else if (row.generation() == generation && row.state() == null && row.pendingCompensation() == null) {
+                row = put(loanId, generation, State.RESERVING, null);
+            }
+            if (row.generation() != generation || row.pendingCompensation() != null
+                    || row.state() == null || row.state() == State.USED) {
+                throw new IllegalStateException("row moved to generation " + row.generation());
+            }
+        }
+
+        @Override
+        public synchronized void reservationAnswered(LoanId loanId, int generation, boolean accepted) {
+            if (failAnswers) {
+                throw new IllegalStateException("database unavailable");
+            }
+            Reservation row = rows.get(loanId);
+            if (row == null || row.generation() != generation) {
+                return;
+            }
+            if (accepted && row.pendingCompensation() == null
+                    && (row.state() == null || row.state() == State.RESERVING || row.state() == State.UNCONFIRMED)) {
+                put(loanId, generation, State.RESERVED, null);
+            } else if (!accepted && (row.state() == State.RESERVING || row.state() == State.UNCONFIRMED)) {
+                put(loanId, generation, null, row.pendingCompensation());
+            }
+        }
+
+        @Override
+        public synchronized boolean markUsed(LoanId loanId) {
+            Reservation row = rows.get(loanId);
+            if (row == null) {
+                return true;
+            }
+            if (row.state() == null || row.state() == State.USED) {
+                return false;
+            }
+            put(loanId, row.generation(), State.USED, row.pendingCompensation());
+            return true;
+        }
+
+        @Override
+        public synchronized boolean beginCompensation(LoanId loanId, int generation) {
             if (failGenerationWrites) {
                 throw new IllegalStateException("database unavailable");
             }
-            values.put(loanId, generation + 1);
-            pending.put(loanId, generation);
+            Reservation row = rows.get(loanId);
+            if (row != null && (row.generation() != generation || row.pendingCompensation() != null
+                    || row.state() == null || row.state() == State.USED)) {
+                return false;
+            }
+            put(loanId, generation + 1, null, generation);
+            return true;
         }
 
-        public java.util.OptionalInt pendingCompensation(LoanId loanId) {
-            Integer generation = pending.get(loanId);
-            return generation == null ? java.util.OptionalInt.empty() : java.util.OptionalInt.of(generation);
+        @Override
+        public synchronized boolean beginCompensationOfAccepted(LoanId loanId, int generation) {
+            if (failGenerationWrites) {
+                throw new IllegalStateException("database unavailable");
+            }
+            Reservation row = rows.get(loanId);
+            if (row == null || row.generation() != generation || row.pendingCompensation() != null
+                    || row.state() != State.RESERVED) {
+                return false;
+            }
+            put(loanId, generation + 1, null, generation);
+            return true;
         }
 
-        public void compensationDone(LoanId loanId, int generation) {
+        @Override
+        public synchronized java.util.OptionalInt pendingCompensation(LoanId loanId) {
+            Reservation row = rows.get(loanId);
+            return row == null || row.pendingCompensation() == null
+                ? java.util.OptionalInt.empty() : java.util.OptionalInt.of(row.pendingCompensation());
+        }
+
+        @Override
+        public synchronized void compensationDone(LoanId loanId, int generation) {
             if (failCompensationDone) {
                 throw new IllegalStateException("database unavailable");
             }
-            pending.remove(loanId, generation);
+            Reservation row = rows.get(loanId);
+            if (row != null && Integer.valueOf(generation).equals(row.pendingCompensation())) {
+                put(loanId, row.generation(), row.state(), null);
+            }
+        }
+
+        @Override
+        public java.util.List<Unresolved> unresolved(java.time.Instant before, int limit) {
+            throw new UnsupportedOperationException("not used by the adapter");
+        }
+
+        @Override
+        public synchronized boolean markUnconfirmed(LoanId loanId, int generation) {
+            Reservation row = rows.get(loanId);
+            if (row == null || row.generation() != generation || row.state() != State.RESERVING) {
+                return false;
+            }
+            put(loanId, generation, State.UNCONFIRMED, row.pendingCompensation());
+            return true;
+        }
+
+        @Override
+        public synchronized long countPending() {
+            return rows.values().stream()
+                .filter(row -> row.pendingCompensation() != null || (row.state() != null && row.state() != State.USED))
+                .count();
+        }
+
+        @Override
+        public synchronized long countUnconfirmed() {
+            return rows.values().stream().filter(row -> row.state() == State.UNCONFIRMED).count();
+        }
+
+        private final Map<LoanId, String> refusals = new HashMap<>();
+
+        @Override
+        public synchronized void releaseRefused(LoanId loanId, int generation, String reason) {
+            refusals.put(loanId, reason);
+        }
+
+        @Override
+        public synchronized java.util.Optional<String> releaseRefusedReason(LoanId loanId) {
+            return java.util.Optional.ofNullable(refusals.get(loanId));
+        }
+
+        @Override
+        public synchronized long countReleaseRefused() {
+            return refusals.size();
+        }
+
+        synchronized String releaseRefusal(LoanId loanId) {
+            return refusals.get(loanId);
+        }
+
+        synchronized State state(LoanId loanId) {
+            Reservation row = rows.get(loanId);
+            return row == null ? null : row.state();
+        }
+
+        private Reservation put(LoanId loanId, int generation, State state, Integer pending) {
+            Reservation row = new Reservation(loanId, generation, state, pending, java.time.Instant.EPOCH);
+            rows.put(loanId, row);
+            return row;
         }
     }
 }

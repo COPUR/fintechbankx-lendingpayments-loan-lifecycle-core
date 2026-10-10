@@ -17,6 +17,7 @@ import org.springframework.stereotype.Component;
 import java.math.BigDecimal;
 import java.util.Currency;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -40,6 +41,8 @@ public class InMemoryCustomerCreditAdapter implements CustomerCreditService {
 
     private final Currency currency;
     private final Map<String, Credit> credit = new ConcurrentHashMap<>();
+    /** Loans with a reservation no disbursement has used yet. */
+    private final Set<LoanId> unused = ConcurrentHashMap.newKeySet();
 
     @Autowired
     public InMemoryCustomerCreditAdapter(@Value("${loan.customer-credit.ledger-currency:}") String ledgerCurrency) {
@@ -73,13 +76,30 @@ public class InMemoryCustomerCreditAdapter implements CustomerCreditService {
             return CreditDecision.REFUSED;
         }
         credit.put(customerId.getValue(), new Credit(current.limit(), current.used().add(amount.getAmount())));
+        unused.add(loanId);
         log.debug("Reserved {} for loan {}", amount, loanId.getValue());
         return CreditDecision.ACCEPTED;
     }
 
     @Override
-    public CreditDecision cancelReservation(LoanId loanId, CustomerId customerId, Money amount) {
+    public synchronized CreditDecision cancelReservation(LoanId loanId, CustomerId customerId, Money amount) {
+        unused.remove(loanId);
         return releaseCredit(loanId, customerId, amount);
+    }
+
+    /** Releases only a reservation made here and not used by a disbursement. */
+    @Override
+    public synchronized UnusedReservation releaseUnusedReservation(LoanId loanId, CustomerId customerId, Money amount) {
+        if (!unused.remove(loanId)) {
+            return UnusedReservation.NONE;
+        }
+        releaseCredit(loanId, customerId, amount);
+        return UnusedReservation.RELEASED;
+    }
+
+    @Override
+    public synchronized void markReservationUsed(LoanId loanId) {
+        unused.remove(loanId);
     }
 
     @Override

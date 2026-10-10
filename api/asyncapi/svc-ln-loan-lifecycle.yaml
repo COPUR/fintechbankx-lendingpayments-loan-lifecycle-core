@@ -18,17 +18,31 @@ info:
     stays off (OUTBOX_RELAY_ENABLED=false) until the topics are catalogued.
   contact:
     name: Loan Lifecycle Squad
+  x-service-id: svc-ln-loan-lifecycle
+  x-event-namespace: evt.ln.loan
 defaultContentType: application/json
 
 servers:
   msk:
-    host: 'kafka.{environment}.internal:9098'
+    host: '{bootstrapServers}'
     protocol: kafka-secure
-    description: Amazon MSK, IAM client auth through the pod's IRSA role (profile kafka-msk).
+    description: Amazon MSK cluster of the FinTechBankX event platform (svc-evt-streaming) on AWS. TLS in transit,
+      SASL_SSL with mechanism AWS_MSK_IAM using the service's IRSA role (ADR-024, profile kafka-msk).
     variables:
-      environment:
-        default: dev
-        enum: [dev, staging, prod]
+      bootstrapServers:
+        description: MSK IAM bootstrap brokers (port 9098), injected per environment by the platform.
+    security:
+    - $ref: '#/components/securitySchemes/mskIam'
+  local:
+    host: '{bootstrapServers}'
+    protocol: kafka-secure
+    description: Strimzi cluster in namespace kafka, for local and non-AWS environments only (ADR-024, profile
+      kafka-strimzi). Mutual TLS with Strimzi-issued client certificates.
+    variables:
+      bootstrapServers:
+        description: Strimzi TLS bootstrap service, injected per environment.
+    security:
+    - $ref: '#/components/securitySchemes/mtls'
 
 channels:
   loanCreated:
@@ -155,6 +169,16 @@ operations:
           const: cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1
 
 components:
+  securitySchemes:
+    mskIam:
+      type: userPassword
+      description: SASL_SSL with SASL mechanism AWS_MSK_IAM. There is no user or password; the client signs with the
+        AWS credentials of its IRSA role, and a topic-scoped IAM policy (terraform module msk-client-access) grants
+        produce or consume rights. AsyncAPI has no IAM scheme type, so userPassword stands for the SASL family.
+      x-sasl-mechanism: AWS_MSK_IAM
+    mtls:
+      type: X509
+      description: Mutual TLS with Strimzi-issued client certificates (local and non-AWS clusters only).
   messages:
     LoanCreated:
       name: Lending.Loan.Created.v1

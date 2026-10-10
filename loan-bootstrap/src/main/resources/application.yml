@@ -151,6 +151,19 @@ loan:
       credit-position: /api/v1/customers/{customerId}/credit
       reserve: /api/v1/customers/{customerId}/credit/reserve
       release: /api/v1/customers/{customerId}/credit/release
+  credit-reservation:
+    sweep:
+      # Review 5460235552: re-drives credit reservations of never-disbursed loans
+      # that a crash, a failed disbursement or an abandoned loan left behind
+      # (pending releases, accepted reservations); a reserve that was never
+      # answered is marked UNCONFIRMED for an operator, never released blind.
+      # One replica at a time (advisory lock); runs at start-up, then after
+      # each interval. Gauges: loan_credit_reservations_pending,
+      # loan_credit_reservations_operator{reason}.
+      enabled: ${CREDIT_RESERVATION_SWEEP_ENABLED:true}
+      interval: PT1M
+      grace: PT10M
+      batch-size: 50
   outbox:
     retention: P7D
     relay:
