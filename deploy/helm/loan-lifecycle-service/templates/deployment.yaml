@@ -1,3 +1,5 @@
+{{- /* Round 6 (guardrail 4a): the vendored reference guard (fbx.guard, _fbx_helpers.tpl) plus this chart's own rules, _helpers.tpl loan.guardValues. */ -}}
+{{- include "loan.guardValues" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,7 +8,7 @@ metadata:
     {{- include "loan.labels" . | nindent 4 }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ .Values.replicaCount | int }}
   {{- end }}
   revisionHistoryLimit: 5
   strategy:
@@ -21,10 +23,10 @@ spec:
     metadata:
       labels:
         {{- include "loan.selectorLabels" . | nindent 8 }}
-        app: {{ .Values.serviceAccount.name }}
+        app: {{ .Values.serviceAccount.name | quote }}
         version: {{ .Values.image.tag | quote }}
         sidecar.istio.io/inject: "true"
-        fintechbankx.io/squad: {{ .Values.squad }}
+        fintechbankx.io/squad: {{ .Values.squad | quote }}
         {{- toYaml .Values.podLabels | nindent 8 }}
       annotations:
         sidecar.istio.io/inject: "true"
@@ -36,7 +38,7 @@ spec:
         prometheus.io/port: {{ .Values.service.managementPort | quote }}
         prometheus.io/path: /actuator/prometheus
     spec:
-      serviceAccountName: {{ .Values.serviceAccount.name }}
+      serviceAccountName: {{ .Values.serviceAccount.name | quote }}
       # Above the sidecar drain (55 s) so neither is killed mid-drain.
       terminationGracePeriodSeconds: 65
       securityContext:
@@ -47,13 +49,13 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       topologySpreadConstraints:
-        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+        - maxSkew: {{ .Values.topologySpread.maxSkew | int }}
           topologyKey: topology.kubernetes.io/zone
           whenUnsatisfiable: DoNotSchedule
           labelSelector:
             matchLabels:
               {{- include "loan.selectorLabels" . | nindent 14 }}
-        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+        - maxSkew: {{ .Values.topologySpread.maxSkew | int }}
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
@@ -62,12 +64,12 @@ spec:
       containers:
         - name: loan-lifecycle-service
           image: "{{ required "image.repository is required" .Values.image.repository }}:{{ required "image.tag is required" .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
           ports:
             - name: http
-              containerPort: {{ .Values.service.port }}
+              containerPort: {{ .Values.service.port | int }}
             - name: management
-              containerPort: {{ .Values.service.managementPort }}
+              containerPort: {{ .Values.service.managementPort | int }}
           env:
             # Path of the mounted RDS CA bundle (cicd-templates 4f0f266).
             - name: DB_SSL_ROOT_CERT
@@ -116,14 +118,14 @@ spec:
             - name: tmp
               mountPath: /tmp
             - name: database-ca
-              mountPath: {{ .Values.databaseCa.mountPath }}
+              mountPath: {{ .Values.databaseCa.mountPath | quote }}
               readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
         - name: database-ca
           configMap:
-            name: {{ .Values.databaseCa.configMapName }}
+            name: {{ .Values.databaseCa.configMapName | quote }}
             items:
-              - key: {{ .Values.databaseCa.key }}
-                path: {{ .Values.databaseCa.key }}
+              - key: {{ .Values.databaseCa.key | quote }}
+                path: {{ .Values.databaseCa.key | quote }}

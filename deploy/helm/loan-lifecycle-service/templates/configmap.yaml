@@ -5,8 +5,6 @@
 {{- if not (has .Values.config.CUSTOMER_CREDIT_ADAPTER (list "http" "in-memory")) }}
 {{- fail "config.CUSTOMER_CREDIT_ADAPTER must be http or in-memory" }}
 {{- end }}
-{{- /* Round 6 (guardrail 4a): the vendored reference guard plus this chart's additions, _helpers.tpl loan.guardValues. */ -}}
-{{- include "loan.guardValues" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -14,8 +12,9 @@ metadata:
   labels:
     {{- include "loan.labels" . | nindent 4 }}
 data:
-  # The only profile the pods activate (kafka-msk or kafka-strimzi); config may not name one.
-  SPRING_PROFILES_ACTIVE: {{ .Values.kafka.profile | quote }}
+  # The only profile the pods activate (fbx.kafkaProfile from kafka.profile: kafka-msk or kafka-strimzi);
+  # config may not name one (loan.guardValues, called from deployment.yaml and migration-job.yaml).
+  SPRING_PROFILES_ACTIVE: {{ include "loan.springProfile" . | quote }}
   {{- range $key, $value := .Values.config }}
-  {{ $key }}: {{ $value | quote }}
+  {{ $key | quote }}: {{ $value | quote }}
   {{- end }}

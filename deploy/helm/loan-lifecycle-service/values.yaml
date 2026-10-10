@@ -69,31 +69,41 @@ podDisruptionBudget:
 
 # Non-secret runtime settings, rendered into a ConfigMap. Values marked
 # REQUIRED have no default; the chart fails to render without them. There is
-# no extraEnv: every pod setting goes through config, and the ExternalSecret
-# keys are fixed in the templates. The chart refuses to render (round 6,
-# guardrail 4a: templates/_fbx-guard.tpl, the reference guard vendored from
-# cicd-templates 2caa48f, plus this chart's additions in templates/_helpers.tpl
-# loan.guardValues), whatever the case or spelling ('.', '-', '_', indexed _0)
-# of the key:
+# no extraEnv, envFrom or javaToolOptions: every pod setting goes through
+# config, and the ExternalSecret keys are fixed in the templates. The chart
+# refuses to render (round 6, guardrail 4a) through the reference guard
+# vendored unchanged from cicd-templates a4f0072 (templates/_fbx_helpers.tpl,
+# fbx.guard; README "Chart guard") plus this chart's own rules
+# (templates/_helpers.tpl loan.guardValues), whatever the case or spelling of
+# a key (Spring's relaxed binding: '.', '-', '_', '[]', indexed _0):
 #   - DB_URL that is not a PostgreSQL JDBC URL with exactly one sslmode=verify-full
 #     and exactly one sslrootcert=<databaseCa bundle>, or that carries
 #     sslfactory, sslfactoryarg, sslhostnameverifier, sslpasswordcallback,
-#     service, a percent-encoded '=' or '&', an upper-case SSLMODE or a TLS key
-#     before the '?'; any other value that is a PostgreSQL JDBC URL gets the
+#     service, a percent-encoded '=' or '&', an upper-case SSLMODE, a TLS key
+#     before the '?', or a '${' / '$(' reference; DB_URL in another spelling
+#     (db.url, dbUrl); any other value that is a PostgreSQL JDBC URL gets the
 #     same parse;
 #   - spring.datasource.*, spring.flyway.*, spring.liquibase.*, spring.r2dbc.*
 #     (except SPRING_DATASOURCE_USERNAME and SPRING_DATASOURCE_PASSWORD),
-#     spring.application.json, *jdbc_url*, *sslfactory*, *sslhostnameverifier*;
-#   - spring.config.import|location|additional-location|name (Spring
-#     configuration is never redirected from values);
-#   - spring.profiles.active|include|default|group (the profile is kafka.profile);
+#     spring.application.json, *jdbc_url*, *ssl_factory*, *ssl_hostname_verifier*,
+#     *ssl_password_callback*, *ssl_root_cert*, *ssl_mode* (DB_SSL_ROOT_CERT is
+#     rendered by the chart);
+#   - spring.config.* (Spring configuration is never redirected from values);
+#   - spring.profiles.* (the profile is kafka.profile);
+#   - spring.ssl.* and *ssl_bundle* (trust anchors come from the mounted bundles);
 #   - fintechbankx.tls.* (the startup TLS assertion is never switched off);
-#   - spring.kafka.*security.protocol and spring.kafka.properties.*;
+#   - spring.kafka.properties.* (this chart's rule); a *security_protocol key
+#     must hold SASL_SSL with kafka.profile kafka-msk or SSL with kafka-strimzi,
+#     an *endpoint_identification_algorithm key must hold https;
 #   - JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS or _JAVA_OPTIONS whose value mentions
 #     datasource, flyway, liquibase, r2dbc, jdbc, ssl, application.json,
-#     spring.config, spring.profiles, fintechbankx or kafka, or reads options
-#     from a file ('@' argument file, -XX:VMOptionsFile, -XX:Flags);
-#   - KAFKA_SECURITY_PROTOCOL other than SASL_SSL or SSL.
+#     spring.config, spring.profiles, fintechbankx.tls, security.protocol,
+#     endpoint.identification, java.security.properties, jdk.tls, hostname
+#     verification or kafka (this chart's rule), contains '$(' or '${' or a
+#     non-ASCII character, or reads options from a file ('@' argument file,
+#     -XX:VMOptionsFile, -XX:Flags);
+#   - a config key that is not a ConfigMap key ([-._a-zA-Z0-9]+). Every key and
+#     value the templates interpolate is quoted, so a value never adds a key.
 config:
   # REQUIRED (deploy/terraform output jdbc_url). Must verify the server
   # certificate against the mounted RDS CA bundle (databaseCa below), e.g.
@@ -138,11 +148,14 @@ config:
   # later), after CREDIT_RESERVATION_SWEEP_ENABLED (runbook section 8).
   CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED: "false"
 
-# The Spring profile the pods run (rendered as SPRING_PROFILES_ACTIVE; config may
-# not name one): kafka-msk (MSK, IAM over SASL_SSL, application-kafka-msk.yml) or
-# kafka-strimzi (in-cluster Strimzi, mutual TLS, application-kafka-strimzi.yml).
-# Nothing else renders: the local profile (application-local.yml) switches the
-# startup TLS assertion off and exists for local runs only.
+# The Spring profile the pods run (rendered as SPRING_PROFILES_ACTIVE through the
+# reference guard's fbx.kafkaProfile, from kafka.profile mapped onto its
+# kafka.runtime msk or strimzi; config may not name one): kafka-msk (MSK, IAM
+# over SASL_SSL, application-kafka-msk.yml; KAFKA_SECURITY_PROTOCOL must be
+# SASL_SSL) or kafka-strimzi (in-cluster Strimzi, mutual TLS,
+# application-kafka-strimzi.yml; KAFKA_SECURITY_PROTOCOL must be SSL). Nothing
+# else renders: the local profile (application-local.yml) switches the startup
+# TLS assertion off and exists for local runs only.
 kafka:
   profile: kafka-msk
 

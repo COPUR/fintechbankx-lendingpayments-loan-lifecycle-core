@@ -152,24 +152,30 @@ commit. Waivers go in `api/asyncapi/<spec-name>.accepted-breaking.txt` and need 
 
 ### Chart guard
 
-`deploy/helm/loan-lifecycle-service/templates/_fbx-guard.tpl` is the shared chart's datasource TLS guard
-(`fbx.datasourceOverrideName`, `fbx.isJvmOptionsName`, `fbx.validateJvmOptions`, `fbx.validateDatabaseTls`,
-`fbx.validateJdbcUrl`), copied verbatim from `fintechbankx-platform-delivery-iac-cicd-templates` at commit
-`2caa48f`, `charts/fintechbankx-service/templates/_helpers.tpl` lines 70-239, under a header that names the
-source. The `deploy/helm` job fails when its sha256 differs:
+`deploy/helm/loan-lifecycle-service/templates/_fbx_helpers.tpl` is a byte-identical copy of the shared chart's
+helpers, `fintechbankx-platform-delivery-iac-cicd-templates` commit `a4f0072`,
+`charts/fintechbankx-service/templates/_helpers.tpl` (its datasource/TLS guard is `fbx.guard`, with
+`fbx.validateEnvSources`, `fbx.validateDatabaseTls`, `fbx.validateKafkaTls`, `fbx.validateKeyNames`,
+`fbx.validateJdbcUrl`, `fbx.validateJvmOptions`, `fbx.datasourceOverrideName`, `fbx.canonicalName` and
+`fbx.kafkaProfile`; its other `fbx.*` helpers are not included anywhere, and no name collides with this chart's
+`loan.*`). The `deploy/helm` job fails when its sha256 differs:
 
 | Copy | sha256 |
 |---|---|
-| `deploy/helm/loan-lifecycle-service/templates/_fbx-guard.tpl` | `ec8e55eae8606f4a7180f25e4246d176a26f66b5742872824b6909c4241ec552` |
+| `deploy/helm/loan-lifecycle-service/templates/_fbx_helpers.tpl` | `1fd684735383301baf3052c5d8978dd86edee1ac1c66ebfb944a8a6a166f4c92` |
 
 Do not edit it: copy the reference again and update the commit and the sum here and in
-`.github/workflows/deployability.yml`. This chart's own additions (`templates/_helpers.tpl`, `loan.guardValues`)
-call the copy through an adapter dict shaped like the shared chart's values and add on top: the indexed and
-dotted spellings of `spring.config.*`, `spring.profiles.active|include|default|group`, `fintechbankx.tls.*`,
-`spring.kafka.*security.protocol` and `spring.kafka.properties.*`, `fintechbankx` and `kafka` in a JVM option,
-`kafka.profile` (the only `SPRING_PROFILES_ACTIVE` the pods get: `kafka-msk` or `kafka-strimzi`, never
-`local`) and `KAFKA_SECURITY_PROTOCOL` (`SASL_SSL` or `SSL`). The job's refusal loop lists every spelling the
-loan #14 review probed (`values.yaml` `config` comment).
+`.github/workflows/deployability.yml`. `templates/_helpers.tpl` `loan.guardValues` (called at the top of
+`deployment.yaml` and `migration-job.yaml`) hands `fbx.guard` an adapter dict mapping this chart's routes onto the
+shared chart's value names: `config`, `extraEnv`/`envFrom`/`extraEnvFrom` (none rendered; mapped so an addition is
+refused), `javaToolOptions` (none), `databaseCa`, `kafka.runtime` (from `kafka.profile`: `kafka-msk` is `msk`,
+`kafka-strimzi` is `strimzi`; `SPRING_PROFILES_ACTIVE` is rendered through `fbx.kafkaProfile`) and the fixed
+ExternalSecret keys with their `remoteSecretName` values. Rules this chart keeps because `fbx.guard` has none:
+`kafka.profile` must be one of the two Kafka profiles (never `local`), no `spring.kafka.properties.*` key or
+extraEnv name, and no `kafka` in a JVM option. Every key and value the templates interpolate is quoted (`int` for
+numbers), and the job checks that a config value with a newline adds no key and no container arg. The job's refusal
+loop lists every spelling the loan #14 review probed (`values.yaml` `config` comment) and a probe, with its expected
+message, for each rule `a4f0072` adds.
 
 ## Callers (mesh ALLOW rules)
 

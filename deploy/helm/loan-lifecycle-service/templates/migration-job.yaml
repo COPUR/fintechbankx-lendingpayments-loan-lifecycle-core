@@ -1,4 +1,5 @@
 {{- if .Values.migration.enabled }}
+{{- /* Round 6 (guardrail 4a): the Job reads config.DB_URL, so it runs the guard too (fbx.guard plus loan.guardValues). */ -}}
 {{- include "loan.guardValues" . }}
 {{- /*
 Flyway as a separate step (platform contract "Database roles"): runs before
@@ -20,22 +21,22 @@ metadata:
     helm.sh/hook-weight: "-10"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
-  refreshInterval: {{ .Values.externalSecret.refreshInterval }}
+  refreshInterval: {{ .Values.externalSecret.refreshInterval | quote }}
   secretStoreRef:
-    kind: {{ .Values.externalSecret.secretStoreRef.kind }}
-    name: {{ .Values.externalSecret.secretStoreRef.name }}
+    kind: {{ .Values.externalSecret.secretStoreRef.kind | quote }}
+    name: {{ .Values.externalSecret.secretStoreRef.name | quote }}
   target:
     name: {{ include "loan.migrationName" . }}
     creationPolicy: Owner
   data:
-    - secretKey: DB_MIGRATION_USERNAME
+    - secretKey: "DB_MIGRATION_USERNAME"
       remoteRef:
-        key: {{ include "loan.remoteKey" (list "migration.remoteSecretName" .Values.migration.remoteSecretName) }}
-        property: username
-    - secretKey: DB_MIGRATION_PASSWORD
+        key: {{ include "loan.remoteKey" (list "migration.remoteSecretName" .Values.migration.remoteSecretName) | quote }}
+        property: "username"
+    - secretKey: "DB_MIGRATION_PASSWORD"
       remoteRef:
-        key: {{ include "loan.remoteKey" (list "migration.remoteSecretName" .Values.migration.remoteSecretName) }}
-        property: password
+        key: {{ include "loan.remoteKey" (list "migration.remoteSecretName" .Values.migration.remoteSecretName) | quote }}
+        property: "password"
 ---
 apiVersion: batch/v1
 kind: Job
@@ -49,8 +50,8 @@ metadata:
     helm.sh/hook-weight: "0"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
-  backoffLimit: {{ .Values.migration.backoffLimit }}
-  activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds }}
+  backoffLimit: {{ .Values.migration.backoffLimit | int }}
+  activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds | int }}
   template:
     metadata:
       # app.kubernetes.io/name = the service account, as on the service
@@ -62,7 +63,7 @@ spec:
       labels:
         {{- include "loan.baseLabels" . | nindent 8 }}
         app.kubernetes.io/component: db-migration
-        fintechbankx.io/squad: {{ .Values.squad }}
+        fintechbankx.io/squad: {{ .Values.squad | quote }}
         sidecar.istio.io/inject: {{ .Values.migration.istioSidecar | quote }}
       annotations:
         # A classic Istio sidecar never exits, so the Job would never
@@ -80,7 +81,7 @@ spec:
       containers:
         - name: db-migration
           image: "{{ required "image.repository is required" .Values.image.repository }}:{{ required "image.tag is required" .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
           args: ["migrate"]
           env:
             # Path of the mounted RDS CA bundle (cicd-templates 4f0f266).
@@ -105,15 +106,15 @@ spec:
             - name: tmp
               mountPath: /tmp
             - name: database-ca
-              mountPath: {{ .Values.databaseCa.mountPath }}
+              mountPath: {{ .Values.databaseCa.mountPath | quote }}
               readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
         - name: database-ca
           configMap:
-            name: {{ .Values.databaseCa.configMapName }}
+            name: {{ .Values.databaseCa.configMapName | quote }}
             items:
-              - key: {{ .Values.databaseCa.key }}
-                path: {{ .Values.databaseCa.key }}
+              - key: {{ .Values.databaseCa.key | quote }}
+                path: {{ .Values.databaseCa.key | quote }}
 {{- end }}
