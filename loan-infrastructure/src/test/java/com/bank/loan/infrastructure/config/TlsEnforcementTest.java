@@ -21,8 +21,9 @@ class TlsEnforcementTest {
     private static final String VERIFY_FULL =
         "spring.datasource.url=jdbc:postgresql://db.internal:5432/db_ln_loan_lifecycle_test"
             + "?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem";
+    /** A JDBC URL may carry the credentials as query parameters; the stand-in value must never reach the message. */
     private static final String REQUIRE =
-        "spring.datasource.url=jdbc:postgresql://db.internal:5432/db_ln_loan_lifecycle_test?sslmode=require&password=do-not-print";
+        "spring.datasource.url=jdbc:postgresql://db.internal:5432/db_ln_loan_lifecycle_test?sslmode=require&user=do-not-print";
 
     private final ApplicationContextRunner service = new ApplicationContextRunner()
         .withUserConfiguration(TlsEnforcementConfiguration.class)
