@@ -51,18 +51,22 @@ Usage: include "loan.remoteKey" (list "externalSecret.remoteSecretName" .Values.
 {{- end -}}
 
 {{- /*
-Values guard (round 6, guardrail 4a). The reference guard is vendored unchanged
-from cicd-templates a4f0072 (templates/_fbx_helpers.tpl, sha256 pinned in
-README "Chart guard" and checked by the deploy/helm job); fbx.guard reads only
-.Values, so this helper hands it an adapter dict shaped like the shared chart's
-values and mapping every route this chart renders:
+Values guard (round 6, guardrail 4a; re-vendored in round 7). The reference guard
+is vendored unchanged from cicd-templates 6b6c317 (templates/_fbx_helpers.tpl,
+sha256 pinned in README "Chart guard" and checked by the deploy/helm job with
+scripts/ci/verify-vendored-guard.sh); fbx.guard reads only .Values, so this
+helper hands it an adapter dict shaped like the shared chart's values and
+mapping every route this chart renders:
   - config: the ConfigMap (configmap.yaml), the pods' only environment source
     besides the chart's own DB_SSL_ROOT_CERT and SPRING_FLYWAY_ENABLED entries;
   - extraEnv, envFrom, extraEnvFrom: this chart renders none; the values are
     mapped so that adding one is refused or checked, never silently rendered;
   - javaToolOptions: none (the image sets JAVA_TOOL_OPTIONS); config may carry
     JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS or _JAVA_OPTIONS, which the guard checks;
-  - databaseCa: always enabled, the bundle is always mounted;
+  - databaseCa: always enabled, the bundle is always mounted; mountPath, key
+    and configMapName are the values deployment.yaml and migration-job.yaml
+    mount, and the guard pins them to /etc/fintechbankx/rds-ca,
+    global-bundle.pem and rds-ca-bundle (a null configMapName is refused);
   - kafka.runtime: kafka.profile mapped (kafka-msk -> msk, kafka-strimzi ->
     strimzi); SPRING_PROFILES_ACTIVE is rendered through fbx.kafkaProfile;
   - externalSecret: the fixed secretKeys of externalsecret.yaml (data) and of
@@ -75,9 +79,10 @@ This chart's own rules, kept because fbx.guard does not have them:
   2. no config key or extraEnv name under spring.kafka.properties.* (relaxed
      canonical form): sasl.jaas.config, sasl.client.callback.handler.class and
      the other client properties come from the Kafka profile only (fbx.guard
-     checks only security.protocol and endpoint.identification.algorithm);
-  3. a JVM option value may not mention kafka (-Dspring.kafka.bootstrap-servers
-     would redirect the client; fbx.validateJvmOptions stops at the TLS names).
+     checks the ssl.* names, security.protocol and
+     endpoint.identification.algorithm only).
+Removed in round 7 because fbx.guard now covers them: the "no kafka in a JVM
+option" rule (fbx.validateJvmOptions refuses kafka and mongodb).
 Called once at the top of deployment.yaml and of migration-job.yaml.
 Usage: include "loan.guardValues" .
 */ -}}
@@ -97,17 +102,11 @@ Usage: include "loan.guardValues" .
 {{- if .Values.migration.enabled -}}
 {{- $extraData = list (dict "secretKey" "DB_MIGRATION_USERNAME" "property" "username" "remoteSecretName" (toString .Values.migration.remoteSecretName)) (dict "secretKey" "DB_MIGRATION_PASSWORD" "property" "password" "remoteSecretName" (toString .Values.migration.remoteSecretName)) -}}
 {{- end -}}
-{{- dict "config" .Values.config "extraEnv" (.Values.extraEnv | default list) "envFrom" (.Values.envFrom | default list) "extraEnvFrom" (.Values.extraEnvFrom | default list) "javaToolOptions" "" "databaseCa" (dict "enabled" true "mountPath" .Values.databaseCa.mountPath "key" .Values.databaseCa.key) "kafka" (dict "runtime" (include "loan.kafkaRuntime" .)) "externalSecret" (dict "enabled" (or $es.enabled .Values.migration.enabled) "data" $data "extraData" $extraData "dataFrom" list) | toJson -}}
+{{- dict "config" .Values.config "extraEnv" (.Values.extraEnv | default list) "envFrom" (.Values.envFrom | default list) "extraEnvFrom" (.Values.extraEnvFrom | default list) "javaToolOptions" "" "databaseCa" (dict "enabled" true "mountPath" .Values.databaseCa.mountPath "key" .Values.databaseCa.key "configMapName" .Values.databaseCa.configMapName) "kafka" (dict "runtime" (include "loan.kafkaRuntime" .)) "externalSecret" (dict "enabled" (or $es.enabled .Values.migration.enabled) "data" $data "extraData" $extraData "dataFrom" list) | toJson -}}
 {{- end -}}
 
 {{- define "loan.springProfile" -}}
 {{- include "fbx.kafkaProfile" (dict "Values" (include "loan.sharedValues" . | fromJson)) -}}
-{{- end -}}
-
-{{- define "loan.validateJvmOptions" -}}
-{{- if regexMatch "(?i)kafka" (toString .value) -}}
-{{- fail (printf "%s must not mention kafka (a JVM system property would redirect the Kafka client or change its transport; the Kafka settings come from the kafka.profile)" .where) -}}
-{{- end -}}
 {{- end -}}
 
 {{- define "loan.kafkaPropertiesName" -}}
@@ -117,21 +116,15 @@ Usage: include "loan.guardValues" .
 {{- define "loan.guardValues" -}}
 {{- $shared := dict "Values" (include "loan.sharedValues" . | fromJson) -}}
 {{- include "fbx.guard" $shared -}}
-{{- range $key, $value := .Values.config -}}
+{{- range $key, $_ := .Values.config -}}
 {{- if include "loan.kafkaPropertiesName" $key -}}
 {{- fail (printf "config.%s is not allowed: the Kafka client properties (spring.kafka.properties.*) come from the kafka.profile, never from values" $key) -}}
-{{- end -}}
-{{- if include "fbx.isJvmOptionsName" $key -}}
-{{- include "loan.validateJvmOptions" (dict "where" (printf "config.%s" $key) "value" $value) -}}
 {{- end -}}
 {{- end -}}
 {{- range $env := (.Values.extraEnv | default list) -}}
 {{- $envName := toString (default "" $env.name) -}}
 {{- if include "loan.kafkaPropertiesName" $envName -}}
 {{- fail (printf "extraEnv must not set %s: the Kafka client properties (spring.kafka.properties.*) come from the kafka.profile, never from values" $envName) -}}
-{{- end -}}
-{{- if include "fbx.isJvmOptionsName" $envName -}}
-{{- include "loan.validateJvmOptions" (dict "where" (printf "extraEnv.%s" $envName) "value" (default "" $env.value)) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

@@ -34,6 +34,14 @@ jobs:
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.3
+      - name: Vendored platform guard
+        run: |
+          # Source: COPUR/fintechbankx-platform-delivery-iac-cicd-templates,
+          # charts/fintechbankx-service/templates/_helpers.tpl at commit 6b6c317
+          # (scripts/ci/verify-vendored-guard.sh is the same commit). The pinned digest is
+          # the sha256 of the whole file; verify-vendored-guard.sh also checks that no other
+          # file redefines fbx.* and that every workload template calls the guard first.
+          scripts/ci/verify-vendored-guard.sh deploy/helm/loan-lifecycle-service 8ba2e4a11ead019c25bf0a01e4fe4bbabb6fef0e1980e5fa828ccb9f5673f8ba
       - name: Lint and render chart
         run: |
           chart=deploy/helm/loan-lifecycle-service
@@ -77,7 +85,7 @@ jobs:
           # in the pods and the migration Job.
           test "$(grep -c 'name: DB_SSL_ROOT_CERT' <<<"$rendered")" -eq 2
           grep -A1 'name: DB_SSL_ROOT_CERT' <<<"$rendered" | grep -q 'value: "/etc/fintechbankx/rds-ca/global-bundle.pem"'
-          # Round 6 (guardrail 4a, loan #14 review; cicd-templates a4f0072 fbx.validateJdbcUrl, vendored in
+          # Round 6 (guardrail 4a, loan #14 review; cicd-templates 6b6c317 fbx.validateJdbcUrl, vendored in
           # _fbx_helpers.tpl): the JDBC URL is parsed the way PgJDBC parses it, not searched by substring.
           # sslmode (lower case) exactly once and verify-full, sslrootcert exactly once and the mounted bundle,
           # no key that bypasses verification, no percent-encoded '=' or '&', no TLS key before the '?'.
@@ -119,7 +127,7 @@ jobs:
           # Round 5 (governance 2b and 4) and round 6 (guardrail 4a, loan #14 review): no value may redirect
           # Spring's configuration, name a profile, bypass the DB_URL guard, switch the startup TLS assertion
           # off or change the Kafka client's transport, in any spelling (case, '.', '-', '_', indexed _0) of
-          # the key, nor through a JVM option. fbx.guard (_fbx_helpers.tpl, cicd-templates a4f0072) plus
+          # the key, nor through a JVM option. fbx.guard (_fbx_helpers.tpl, cicd-templates 6b6c317) plus
           # _helpers.tpl loan.guardValues. A dotted key is escaped (\.) so --set-string sets one literal key, not a nested map; values
           # stay plain (no '{' or ',') so a refusal comes from the guard, never from helm's --set parser.
           for forbidden in "config.SPRING_CONFIG_IMPORT=optional:configtree:/etc/fintechbankx/config/" \
@@ -195,7 +203,7 @@ jobs:
           # names the reference guard allows, and a JVM option that sets neither TLS nor configuration.
           grep -q 'SPRING_PROFILES_ACTIVE: "kafka-msk"' <<<"$rendered"
           helm template ci "$chart" $args --set kafka.profile=kafka-strimzi --set-string config.KAFKA_SECURITY_PROTOCOL=SSL | grep -q 'SPRING_PROFILES_ACTIVE: "kafka-strimzi"'
-          # What a4f0072 covers beyond 2caa48f, each refused for its own reason: SSL bundle names, DB_SSL_ROOT_CERT
+          # What the vendored guard covers beyond 2caa48f, each refused for its own reason: SSL bundle names, DB_SSL_ROOT_CERT
           # and other TLS parameter names, -Djdk.tls.* / -Djava.security.properties / hostname verification in a
           # JVM option, '$(' and '${' references, envFrom, DB_URL in another spelling, every spring.config.* name,
           # and the Kafka protocol matched to the runtime of kafka.profile; plus this chart's own rules.
@@ -210,7 +218,7 @@ jobs:
           refuse 'config._JAVA_OPTIONS must not mention' --set-string 'config._JAVA_OPTIONS=-Djdk.internal.httpclient.disableHostnameVerification=true'
           refuse 'config.JAVA_TOOL_OPTIONS must not mention' --set-string 'config.JAVA_TOOL_OPTIONS=-Dspring..config.import=file:/etc/other/'
           refuse 'config.JAVA_TOOL_OPTIONS must not contain' --set-string 'config.JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75 $(FBX_X)'
-          refuse 'config.JAVA_TOOL_OPTIONS must not mention kafka' --set-string 'config.JAVA_TOOL_OPTIONS=-Dspring.kafka.bootstrap-servers=other:9092'
+          refuse 'config.JAVA_TOOL_OPTIONS must not mention .*kafka' --set-string 'config.JAVA_TOOL_OPTIONS=-Dspring.kafka.bootstrap-servers=other:9092'
           refuse 'extraEnv.FOO must not contain' --set-string 'extraEnv[0].name=FOO' --set-string 'extraEnv[0].value=$(DB_URL)'
           refuse 'extraEnv must not set DB_URL' --set-string 'extraEnv[0].name=DB_URL' --set-string 'extraEnv[0].value=jdbc:postgresql://other:5432/db'
           refuse 'extraEnv must not set DB_SSL_ROOT_CERT' --set-string 'extraEnv[0].name=DB_SSL_ROOT_CERT' --set-string 'extraEnv[0].value='
@@ -230,13 +238,107 @@ jobs:
           refuse 'config.SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG is not allowed' --set-string config.SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG=x
           refuse 'kafka.profile must be kafka-msk or kafka-strimzi' --set kafka.profile=local
           refuse 'kafka.profile is required' --set kafka.profile=null
+          # Round 7 (cicd-templates 6b6c317), the platform suites' negative cases through this chart's value names
+          # (the chart renders no extraEnv, envFrom or javaToolOptions; extraEnv is mapped into the guard, so it is
+          # probed with --set). Database CA mount: pinned while the bundle is mounted, which is always.
+          refuse 'databaseCa.mountPath must be /etc/fintechbankx/rds-ca \(got "/app/config"\)' --set-string databaseCa.mountPath=/app/config --set-string "config.DB_URL=jdbc:postgresql://ci-db:5432/db?sslmode=verify-full&sslrootcert=/app/config/global-bundle.pem"
+          refuse 'databaseCa.mountPath must be /etc/fintechbankx/rds-ca' --set-string databaseCa.mountPath=/etc/fintechbankx/rds-ca/
+          refuse 'databaseCa.key must be global-bundle.pem \(got "other-bundle.pem"\)' --set-string databaseCa.key=other-bundle.pem --set-string "config.DB_URL=jdbc:postgresql://ci-db:5432/db?sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/other-bundle.pem"
+          refuse 'databaseCa.configMapName must be rds-ca-bundle \(got "any-config"\)' --set-string databaseCa.configMapName=any-config
+          refuse 'databaseCa.configMapName is required while databaseCa.enabled' --set databaseCa.configMapName=null
+          # Database names and URLs the suites add to the round 6 list.
+          refuse 'config.DB_URL must use sslmode=verify-full' --set-string 'config.DB_URL=jdbc:postgresql://ci-db:5432/db?xsslmode=verify-full&sslmode=disable&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem'
+          refuse 'config.DB_URL must set sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem exactly once' --set-string 'config.DB_URL=jdbc:postgresql://ci-db:5432/db?sslmode=verify-full'
+          refuse 'config.DB_URL must not set sslfactory' --set-string "config.DB_URL=jdbc:postgresql://ci-db:5432/db?sslmode=verify-full&sslrootcert=$ca&sslfactory=org.postgresql.ssl.NonValidatingFactory"
+          refuse 'config.DB_URL must not set service' --set-string "config.DB_URL=jdbc:postgresql://ci-db:5432/db?sslmode=verify-full&sslrootcert=$ca&service=loan"
+          refuse 'config.DB_URL must not percent-encode' --set-string "config.DB_URL=jdbc:postgresql://ci-db:5432/db?sslmode=verify-full&sslrootcert=$ca&sslmode%3Ddisable"
+          refuse 'config.DB_URL has a query parameter name that is not plain' --set-string "config.DB_URL=jdbc:postgresql://ci-db:5432/db?sslmode=verify-full&sslrootcert=$ca&ssl%6Dode=disable"
+          refuse 'config.DB_URL must spell SSLMODE in lower case' --set-string "config.DB_URL=jdbc:postgresql://ci-db:5432/db?SSLMODE=verify-full&sslrootcert=$ca"
+          refuse 'config.DB_URL must carry TLS parameters only in the query string' --set-string "config.DB_URL=jdbc:postgresql://ci-db:5432/db;sslmode=disable?sslmode=verify-full&sslrootcert=$ca"
+          refuse 'config.DB_URL must be a jdbc:' --set-string 'config.DB_URL=postgresql://ci-db:5432/db?sslmode=disable'
+          refuse 'config.SPRING_DATASOURCE_URL is not allowed' --set-string 'config.SPRING_DATASOURCE_URL=jdbc:postgresql://ci-db:5432/db?sslmode=require'
+          refuse 'config.SPRING_FLYWAY_URL is not allowed' --set-string "config.SPRING_FLYWAY_URL=jdbc:postgresql://ci-db:5432/db?sslmode=verify-full&sslrootcert=$ca"
+          refuse 'config.SPRING_DATASOURCE_HIKARI_JDBC_URL is not allowed' --set-string 'config.SPRING_DATASOURCE_HIKARI_JDBC_URL=x'
+          refuse 'extraEnv must not set DB_URL' --set-string 'extraEnv[0].name=DB_URL' --set-string 'extraEnv[0].value=jdbc:postgresql://ci-db:5432/db?sslmode=require'
+          refuse 'extraEnv must not set SPRING_DATASOURCE_URL' --set-string 'extraEnv[0].name=SPRING_DATASOURCE_URL' --set-string 'extraEnv[0].value=jdbc:postgresql://ci-db:5432/db?sslmode=require'
+          refuse 'extraEnv must not set Spring_Datasource_Hikari_Jdbc_Url' --set-string 'extraEnv[0].name=Spring_Datasource_Hikari_Jdbc_Url' --set-string "extraEnv[0].value=jdbc:postgresql://ci-db:5432/db?sslmode=verify-full&sslrootcert=$ca"
+          refuse 'extraEnv must not set SPRING_FLYWAY_URL' --set-string 'extraEnv[0].name=SPRING_FLYWAY_URL' --set-string "extraEnv[0].value=jdbc:postgresql://ci-db:5432/db?sslmode=verify-full&sslrootcert=$ca"
+          refuse 'extraEnv must not set spring_application_json' --set-string 'extraEnv[0].name=spring_application_json' --set-string 'extraEnv[0].value=x'
+          refuse 'extraEnv.REPORTING_DB_JDBC must use sslmode=verify-full' --set-string 'extraEnv[0].name=REPORTING_DB_JDBC' --set-string 'extraEnv[0].value=jdbc:postgresql://ci-db:5432/db?sslmode=require'
+          refuse 'config.DB_URL must use sslmode=verify-full' --set-string 'config.DB_URL=jdbc:aws-wrapper:postgresql://ci-db:5432/db?sslmode=require'
+          # Kafka client TLS names: a client TLS setting, in any spelling (the trust store, key store and protocol
+          # come from the kafka.profile), on config and extraEnv; only the ssl.endpoint.identification.algorithm
+          # value is checked (https).
+          refuse 'config.SPRING_KAFKA_SSL_TRUSTSTORE_LOCATION is not allowed: a Kafka client TLS setting' --set-string config.SPRING_KAFKA_SSL_TRUSTSTORE_LOCATION=file:/etc/other/any.jks
+          refuse 'config.SPRING_KAFKA_SSL_TRUST_STORE_LOCATION is not allowed: a Kafka client TLS setting' --set-string config.SPRING_KAFKA_SSL_TRUST_STORE_LOCATION=file:/etc/other/any.jks
+          refuse 'config.spring.kafka.ssl.trust-store-certificates is not allowed: a Kafka client TLS setting' --set-string 'config.spring\.kafka\.ssl\.trust-store-certificates=-----BEGIN CERTIFICATE-----'
+          refuse 'config.spring.kafka.s-sl.trust-store-location is not allowed: a Kafka client TLS setting' --set-string 'config.spring\.kafka\.s-sl\.trust-store-location=file:/etc/other/any.jks'
+          refuse 'config.SPRING_KAFKA_SSL_PROTOCOL is not allowed: a Kafka client TLS setting' --set-string config.SPRING_KAFKA_SSL_PROTOCOL=TLSv1
+          refuse 'extraEnv must not set SPRING_KAFKA_PRODUCER_SSL_KEY_STORE_LOCATION \(value or valueFrom\): a Kafka client TLS setting' --set-string 'extraEnv[0].name=SPRING_KAFKA_PRODUCER_SSL_KEY_STORE_LOCATION' --set-string 'extraEnv[0].value=file:/etc/other/any.p12'
+          refuse 'extraEnv must not set spring.kafka.consumer.ssl.trust-store-type \(value or valueFrom\): a Kafka client TLS setting' --set-string 'extraEnv[0].name=spring.kafka.consumer.ssl.trust-store-type' --set-string 'extraEnv[0].valueFrom.configMapKeyRef.name=other' --set-string 'extraEnv[0].valueFrom.configMapKeyRef.key=type'
+          refuse 'config.SPRING_KAFKA_ADMIN_SSL_TRUST_STORE_CERTIFICATES is not allowed: a Kafka client TLS setting' --set-string 'config.SPRING_KAFKA_ADMIN_SSL_TRUST_STORE_CERTIFICATES=-----BEGIN CERTIFICATE-----'
+          refuse 'config.spring.kafka.streams.ssl.key-password is not allowed: a Kafka client TLS setting' --set-string 'config.spring\.kafka\.streams\.ssl\.key-password=x'
+          refuse 'config.spring.kafka.properties.ssl.truststore.location is not allowed: a Kafka client TLS setting' --set-string 'config.spring\.kafka\.properties\.ssl\.truststore\.location=/etc/other/any.jks'
+          refuse 'config.SPRING_KAFKA_PROPERTIES_SSL_TRUSTSTORE_LOCATION is not allowed: a Kafka client TLS setting' --set-string config.SPRING_KAFKA_PROPERTIES_SSL_TRUSTSTORE_LOCATION=/etc/other/any.jks
+          refuse 'config.spring.kafka.pro-perties.ssl.truststore.location is not allowed: a Kafka client TLS setting' --set-string 'config.spring\.kafka\.pro-perties\.ssl\.truststore\.location=/etc/other/any.jks'
+          refuse 'config.spring.kafka.streams.properties.ssl.keystore.location is not allowed: a Kafka client TLS setting' --set-string 'config.spring\.kafka\.streams\.properties\.ssl\.keystore\.location=/etc/other/any.p12'
+          refuse 'extraEnv must not set SPRING_KAFKA_CONSUMER_PROPERTIES_SSL_TRUSTSTORE_TYPE \(value or valueFrom\): a Kafka client TLS setting' --set-string 'extraEnv[0].name=SPRING_KAFKA_CONSUMER_PROPERTIES_SSL_TRUSTSTORE_TYPE' --set-string 'extraEnv[0].valueFrom.secretKeyRef.name=other' --set-string 'extraEnv[0].valueFrom.secretKeyRef.key=type'
+          refuse 'config.SPRING_KAFKA_PROPERTIES_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM must be https' --set-string config.SPRING_KAFKA_PROPERTIES_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM=
+          refuse 'config.JDK_JAVA_OPTIONS must not mention .*kafka' --set-string 'config.JDK_JAVA_OPTIONS=-Dspring.Kaf_ka.producer.acks=0'
+          refuse 'extraEnv._JAVA_OPTIONS must not mention .*kafka' --set-string 'extraEnv[0].name=_JAVA_OPTIONS' --set-string 'extraEnv[0].value=-Dlogging.level.org.apache.kafka=DEBUG'
+          refuse 'config.JAVA_TOOL_OPTIONS must not mention .*kafka' --set-string 'config.JAVA_TOOL_OPTIONS=-Dspring.kafka.ssl.trust-store-location=file:/etc/other/any.jks'
+          # Strimzi: the client certificate, key and CA come from a Secret (extraEnv valueFrom.secretKeyRef), never a literal or config.
+          refuse 'extraEnv KAFKA_TLS_CA must come from valueFrom.secretKeyRef' --set kafka.profile=kafka-strimzi --set-string config.KAFKA_SECURITY_PROTOCOL=SSL --set-string 'extraEnv[0].name=KAFKA_TLS_CA' --set-string 'extraEnv[0].value=-----BEGIN CERTIFICATE-----'
+          refuse 'extraEnv KAFKA_TLS_CERT must come from valueFrom.secretKeyRef' --set kafka.profile=kafka-strimzi --set-string config.KAFKA_SECURITY_PROTOCOL=SSL --set-string 'extraEnv[0].name=KAFKA_TLS_CERT' --set-string 'extraEnv[0].valueFrom.configMapKeyRef.name=other' --set-string 'extraEnv[0].valueFrom.configMapKeyRef.key=user.crt'
+          refuse 'extraEnv KAFKA_TLS_KEY must come from valueFrom.secretKeyRef' --set kafka.profile=kafka-strimzi --set-string config.KAFKA_SECURITY_PROTOCOL=SSL --set-string 'extraEnv[0].name=KAFKA_TLS_KEY' --set-string 'extraEnv[0].valueFrom.fieldRef.fieldPath=metadata.name'
+          refuse 'config.KAFKA_TLS_CA is not allowed: .*Secret' --set kafka.profile=kafka-strimzi --set-string config.KAFKA_SECURITY_PROTOCOL=SSL --set-string 'config.KAFKA_TLS_CA=-----BEGIN CERTIFICATE-----'
+          refuse 'config.KAFKA_TLS_KEY is not allowed: .*Secret' --set-string config.KAFKA_TLS_KEY=x
+          refuse 'extraEnv kafka.tls.ca is not allowed: .*KAFKA_TLS_CA' --set kafka.profile=kafka-strimzi --set-string config.KAFKA_SECURITY_PROTOCOL=SSL --set-string 'extraEnv[0].name=kafka.tls.ca' --set-string 'extraEnv[0].valueFrom.secretKeyRef.name=kafka-client-tls' --set-string 'extraEnv[0].valueFrom.secretKeyRef.key=ca.crt'
+          refuse 'config.Kafka_Tls_Cert is not allowed' --set-string config.Kafka_Tls_Cert=x
+          refuse 'config.SPRING_KAFKA_SSL_TRUST_STORE_CERTIFICATES is not allowed: a Kafka client TLS setting' --set kafka.profile=kafka-strimzi --set-string config.KAFKA_SECURITY_PROTOCOL=SSL --set-string 'config.SPRING_KAFKA_SSL_TRUST_STORE_CERTIFICATES=-----BEGIN CERTIFICATE-----'
+          # DocumentDB: this service has no DocumentDB; the connection string and the spring.data.mongodb.* settings are still refused.
+          refuse 'config.SPRING_DATA_MONGODB_URI is not allowed: a spring.data.mongodb.\* property' --set-string 'config.SPRING_DATA_MONGODB_URI=mongodb://docdb.example.internal:27017/db?tls=false'
+          refuse 'config.spring.data.mongodb.uri is not allowed: a spring.data.mongodb.\* property' --set-string 'config.spring\.data\.mongodb\.uri=mongodb://docdb.example.internal:27017/db?tls=false'
+          refuse 'config.spring.data.mongo-db.uri is not allowed: a spring.data.mongodb.\* property' --set-string 'config.spring\.data\.mongo-db\.uri=mongodb://docdb.example.internal:27017/db?tls=false'
+          refuse 'config.spring.data\[mongodb\].uri is not allowed: a spring.data.mongodb.\* property' --set-string 'config.spring\.data\[mongodb\]\.uri=mongodb://docdb.example.internal:27017/db?tls=false'
+          refuse 'config.SPRING_DATA_MONGODB_SSL_ENABLED is not allowed: a spring.data.mongodb.\* property' --set-string config.SPRING_DATA_MONGODB_SSL_ENABLED=false
+          refuse 'extraEnv must not set spring.data.mongodb.host \(value or valueFrom\): a spring.data.mongodb.\* property' --set-string 'extraEnv[0].name=spring.data.mongodb.host' --set-string 'extraEnv[0].value=other.example.internal'
+          refuse 'extraEnv must not set SPRING_DATA_MONGODB_REPLICA_SET_NAME \(value or valueFrom\): a spring.data.mongodb.\* property' --set-string 'extraEnv[0].name=SPRING_DATA_MONGODB_REPLICA_SET_NAME' --set-string 'extraEnv[0].valueFrom.configMapKeyRef.name=other' --set-string 'extraEnv[0].valueFrom.configMapKeyRef.key=rs'
+          refuse 'config.spring.data.mongodb.password is not allowed: a spring.data.mongodb.\* property' --set-string 'config.spring\.data\.mongodb\.password=x'
+          refuse 'config.MONGODB_URI is not allowed: MONGODB_URI is the DocumentDB connection string' --set-string 'config.MONGODB_URI=mongodb://docdb.example.internal:27017/db?tls=false'
+          refuse 'extraEnv MONGODB_URI must come from valueFrom.secretKeyRef' --set-string 'extraEnv[0].name=MONGODB_URI' --set-string 'extraEnv[0].value=mongodb://docdb.example.internal:27017/db?tlsAllowInvalidCertificates=true'
+          refuse 'extraEnv MONGODB_URI must come from valueFrom.secretKeyRef' --set-string 'extraEnv[0].name=MONGODB_URI' --set-string 'extraEnv[0].valueFrom.configMapKeyRef.name=other' --set-string 'extraEnv[0].valueFrom.configMapKeyRef.key=uri'
+          refuse 'extraEnv mongodb.uri is not allowed: MONGODB_URI is the DocumentDB connection string' --set-string 'extraEnv[0].name=mongodb.uri' --set-string 'extraEnv[0].valueFrom.secretKeyRef.name=docdb-app' --set-string 'extraEnv[0].valueFrom.secretKeyRef.key=uri'
+          refuse 'config.JAVA_TOOL_OPTIONS must not mention .*mongodb' --set-string 'config.JAVA_TOOL_OPTIONS=-DMONGODB_URI=mongodb://other.example.internal:27017/db'
+          refuse 'config.JAVA_TOOL_OPTIONS must not mention .*mongodb' --set-string 'config.JAVA_TOOL_OPTIONS=-Dspring.data.mongo-db.uri=mongodb://other.example.internal:27017/db'
+          # Property-reading names: Spring's property mapper drops '_' inside an element, so these bind the same
+          # spring.kafka.ssl.*, spring.data.mongodb.*, spring.profiles.*, spring.config.*, spring.application.json,
+          # spring.ssl.*, fintechbankx.tls.* and spring.datasource.* / spring.flyway.* properties.
+          refuse 'config.spring.kafka.s_sl.trust-store-type is not allowed: a Kafka client TLS setting' --set kafka.profile=kafka-strimzi --set-string config.KAFKA_SECURITY_PROTOCOL=SSL --set-string 'config.spring\.kafka\.s_sl\.trust-store-type=PKCS12'
+          refuse 'extraEnv must not set spring.kafka.consumer.s_sl.trust-store-type \(value or valueFrom\): a Kafka client TLS setting' --set-string 'extraEnv[0].name=spring.kafka.consumer.s_sl.trust-store-type' --set-string 'extraEnv[0].valueFrom.secretKeyRef.name=other' --set-string 'extraEnv[0].valueFrom.secretKeyRef.key=type'
+          refuse 'config.spring.kafka.con_sumer.ssl.trust-store-type is not allowed: a Kafka client TLS setting' --set-string 'config.spring\.kafka\.con_sumer\.ssl\.trust-store-type=PKCS12'
+          refuse 'config.spring.kafka.streams.pro_perties.ssl.truststore.location is not allowed: a Kafka client TLS setting' --set-string 'config.spring\.kafka\.streams\.pro_perties\.ssl\.truststore\.location=/etc/other/any.jks'
+          refuse 'config.spring.kafka.security.pro_tocol must be SASL_SSL or SSL' --set-string 'config.spring\.kafka\.security\.pro_tocol=PLAINTEXT'
+          refuse 'extraEnv spring.kafka.secu_rity.protocol must set a literal value' --set-string 'extraEnv[0].name=spring.kafka.secu_rity.protocol' --set-string 'extraEnv[0].valueFrom.configMapKeyRef.name=other' --set-string 'extraEnv[0].valueFrom.configMapKeyRef.key=protocol'
+          refuse 'config.spring.data.mongo_db.host is not allowed: a spring.data.mongodb.\* property' --set-string 'config.spring\.data\.mongo_db\.host=placeholder-host'
+          refuse 'extraEnv must not set spring.data.mongo_db.uri \(value or valueFrom\): a spring.data.mongodb.\* property' --set-string 'extraEnv[0].name=spring.data.mongo_db.uri' --set-string 'extraEnv[0].valueFrom.secretKeyRef.name=other' --set-string 'extraEnv[0].valueFrom.secretKeyRef.key=uri'
+          refuse 'config.spring.da_ta.mongodb.port is not allowed: a spring.data.mongodb.\* property' --set-string 'config.spring\.da_ta\.mongodb\.port=27018'
+          refuse 'config.spring.pro_files.active is not allowed: a profile can activate' --set-string 'config.spring\.pro_files\.active=local'
+          refuse 'extraEnv must not set spring.pro_files.default \(value or valueFrom\): a profile can activate' --set-string 'extraEnv[0].name=spring.pro_files.default' --set-string 'extraEnv[0].value=local'
+          refuse 'extraEnv must not set s_pring.profiles.active \(value or valueFrom\): a profile can activate' --set-string 'extraEnv[0].name=s_pring.profiles.active' --set-string 'extraEnv[0].value=local'
+          refuse 'config.spring.con_fig.import is not allowed: a spring.config.\* property' --set-string 'config.spring\.con_fig\.import=optional:file:/etc/other/override.yml'
+          refuse 'extraEnv must not set spring.applica_tion.json \(value or valueFrom\): it can redirect or override the datasource' --set-string 'extraEnv[0].name=spring.applica_tion.json' --set-string 'extraEnv[0].value=x'
+          refuse 'config.spring.s_sl.bundle.pem.documentdb.truststore.certificate is not allowed: an SSL bundle property' --set-string 'config.spring\.s_sl\.bundle\.pem\.documentdb\.truststore\.certificate=file:/etc/other/any-ca.pem'
+          refuse 'config.fintech_bankx.tls.enforce is not allowed: it can switch off the service' --set-string 'config.fintech_bankx\.tls\.enforce=false'
+          refuse 'extraEnv must not set fintechbankx.t_ls.enforce \(value or valueFrom\): it can switch off' --set-string 'extraEnv[0].name=fintechbankx.t_ls.enforce' --set-string 'extraEnv[0].valueFrom.configMapKeyRef.name=other' --set-string 'extraEnv[0].valueFrom.configMapKeyRef.key=enforce'
+          refuse 'config.spring.data_source.url is not allowed: it can redirect or override the datasource' --set-string 'config.spring\.data_source\.url=jdbc:h2:mem:x'
+          refuse 'config.spring.data_source.driver-class-name is not allowed: it can redirect or override the datasource' --set-string 'config.spring\.data_source\.driver-class-name=org.h2.Driver'
+          refuse 'config.spring.fly_way.url is not allowed: it can redirect or override the datasource' --set-string 'config.spring\.fly_way\.url=jdbc:h2:mem:x'
+          # Controls: names that only look alike, and the credential names, still render.
+          helm template ci "$chart" $args --set-string 'config.app\.feature_flags\.new_ui=true' --set-string 'config.logging\.level\.com_example_loan=DEBUG' > /dev/null
+          helm template ci "$chart" $args --set-string config.SPRING_DATA_MONGODB_USERNAME=of_app --set-string 'extraEnv[0].name=spring_data_mongodb_username' --set-string 'extraEnv[0].value=of_app' > /dev/null
           helm template ci "$chart" $args --set-string config.SPRING_DATASOURCE_USERNAME=loan_lifecycle_app > /dev/null
           helm template ci "$chart" $args --set-string config.JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError" > /dev/null
-          # The reference guard is a byte copy of cicd-templates a4f0072 charts/fintechbankx-service/templates/_helpers.tpl
-          # (README "Chart guard"); any edit fails here.
-          sha256sum --check --strict <<'EOF'
-          1fd684735383301baf3052c5d8978dd86edee1ac1c66ebfb944a8a6a166f4c92  deploy/helm/loan-lifecycle-service/templates/_fbx_helpers.tpl
-          EOF
           # Flyway runs only in the hook Job, as the schema owner; the pods never get that secret.
           job="$(helm template ci "$chart" $args --show-only templates/migration-job.yaml)"
           grep -q 'helm.sh/hook: pre-install,pre-upgrade' <<<"$job"

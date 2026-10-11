@@ -152,30 +152,40 @@ commit. Waivers go in `api/asyncapi/<spec-name>.accepted-breaking.txt` and need 
 
 ### Chart guard
 
-`deploy/helm/loan-lifecycle-service/templates/_fbx_helpers.tpl` is a byte-identical copy of the shared chart's
-helpers, `fintechbankx-platform-delivery-iac-cicd-templates` commit `a4f0072`,
-`charts/fintechbankx-service/templates/_helpers.tpl` (its datasource/TLS guard is `fbx.guard`, with
-`fbx.validateEnvSources`, `fbx.validateDatabaseTls`, `fbx.validateKafkaTls`, `fbx.validateKeyNames`,
-`fbx.validateJdbcUrl`, `fbx.validateJvmOptions`, `fbx.datasourceOverrideName`, `fbx.canonicalName` and
+`deploy/helm/loan-lifecycle-service/templates/_fbx_helpers.tpl` is a byte-identical copy, without a header, of the
+shared chart's helpers: source repository `COPUR/fintechbankx-platform-delivery-iac-cicd-templates`, path
+`charts/fintechbankx-service/templates/_helpers.tpl`, commit `6b6c317` (its datasource/TLS guard is `fbx.guard`, with
+`fbx.validateEnvSources`, `fbx.validateDatabaseTls`, `fbx.validateKafkaTls`, `fbx.validateKafkaTlsValue`,
+`fbx.validateSecretNames`, `fbx.validateKeyNames`, `fbx.validateDatabaseCa`, `fbx.validateJdbcUrl`,
+`fbx.validateJvmOptions`, `fbx.datasourceOverrideName`, `fbx.canonicalName`, `fbx.propertyName` and
 `fbx.kafkaProfile`; its other `fbx.*` helpers are not included anywhere, and no name collides with this chart's
-`loan.*`). The `deploy/helm` job fails when its sha256 differs:
+`loan.*`). The `deploy/helm` job runs `scripts/ci/verify-vendored-guard.sh deploy/helm/loan-lifecycle-service <sha256>`
+(a byte copy of the script at the same commit); it fails when the sha256 differs, when another template file redefines
+an `fbx.*` template, or when `deployment.yaml` or `migration-job.yaml` does not run the guard before it writes anything:
 
 | Copy | sha256 |
 |---|---|
-| `deploy/helm/loan-lifecycle-service/templates/_fbx_helpers.tpl` | `1fd684735383301baf3052c5d8978dd86edee1ac1c66ebfb944a8a6a166f4c92` |
+| `deploy/helm/loan-lifecycle-service/templates/_fbx_helpers.tpl` | `8ba2e4a11ead019c25bf0a01e4fe4bbabb6fef0e1980e5fa828ccb9f5673f8ba` |
+| `scripts/ci/verify-vendored-guard.sh` | `430a88e1a6939d4a40dc32f0c6d201775f64e717e5eeb39b0348c8f8c0435eac` |
 
-Do not edit it: copy the reference again and update the commit and the sum here and in
-`.github/workflows/deployability.yml`. `templates/_helpers.tpl` `loan.guardValues` (called at the top of
+Do not edit either: copy the reference again and update the commit and the sum here and in
+`.github/workflows/deployability.yml` (the step "Vendored platform guard" names the source repository, path and commit
+beside the pinned digest). `templates/_helpers.tpl` `loan.guardValues` (called at the top of
 `deployment.yaml` and `migration-job.yaml`) hands `fbx.guard` an adapter dict mapping this chart's routes onto the
 shared chart's value names: `config`, `extraEnv`/`envFrom`/`extraEnvFrom` (none rendered; mapped so an addition is
-refused), `javaToolOptions` (none), `databaseCa`, `kafka.runtime` (from `kafka.profile`: `kafka-msk` is `msk`,
-`kafka-strimzi` is `strimzi`; `SPRING_PROFILES_ACTIVE` is rendered through `fbx.kafkaProfile`) and the fixed
-ExternalSecret keys with their `remoteSecretName` values. Rules this chart keeps because `fbx.guard` has none:
-`kafka.profile` must be one of the two Kafka profiles (never `local`), no `spring.kafka.properties.*` key or
-extraEnv name, and no `kafka` in a JVM option. Every key and value the templates interpolate is quoted (`int` for
-numbers), and the job checks that a config value with a newline adds no key and no container arg. The job's refusal
-loop lists every spelling the loan #14 review probed (`values.yaml` `config` comment) and a probe, with its expected
-message, for each rule `a4f0072` adds.
+refused), `javaToolOptions` (none), `databaseCa` (`enabled` always true, `mountPath`, `key` and `configMapName` from the
+values the templates mount; the guard pins them to `/etc/fintechbankx/rds-ca`, `global-bundle.pem` and `rds-ca-bundle`,
+which are this chart's defaults, and refuses a null `configMapName`), `kafka.runtime` (from `kafka.profile`:
+`kafka-msk` is `msk`, `kafka-strimzi` is `strimzi`; `SPRING_PROFILES_ACTIVE` is rendered through `fbx.kafkaProfile`)
+and the fixed ExternalSecret keys with their `remoteSecretName` values. Rules this chart keeps because `fbx.guard` has
+none: `kafka.profile` must be one of the two Kafka profiles (never `local`), and no `spring.kafka.properties.*` key or
+extraEnv name (the guard refuses the `ssl.*` names, `security.protocol` and the endpoint identification value only).
+The chart's former "no `kafka` in a JVM option" rule is gone: `fbx.validateJvmOptions` refuses `kafka` and `mongodb`.
+Every key and value the templates interpolate is quoted (`int` for numbers), and the job checks that a config value
+with a newline adds no key and no container arg. The job's refusal loop lists every spelling the loan #14 review probed
+(`values.yaml` `config` comment) and a `refuse` probe, with its expected message, for each rule the guard adds,
+including the platform's database CA, Kafka client TLS, DocumentDB and property-reading cases through this chart's
+value names.
 
 ## Callers (mesh ALLOW rules)
 

@@ -72,7 +72,7 @@ podDisruptionBudget:
 # no extraEnv, envFrom or javaToolOptions: every pod setting goes through
 # config, and the ExternalSecret keys are fixed in the templates. The chart
 # refuses to render (round 6, guardrail 4a) through the reference guard
-# vendored unchanged from cicd-templates a4f0072 (templates/_fbx_helpers.tpl,
+# vendored unchanged from cicd-templates 6b6c317 (templates/_fbx_helpers.tpl,
 # fbx.guard; README "Chart guard") plus this chart's own rules
 # (templates/_helpers.tpl loan.guardValues), whatever the case or spelling of
 # a key (Spring's relaxed binding: '.', '-', '_', '[]', indexed _0):
@@ -92,14 +92,17 @@ podDisruptionBudget:
 #   - spring.profiles.* (the profile is kafka.profile);
 #   - spring.ssl.* and *ssl_bundle* (trust anchors come from the mounted bundles);
 #   - fintechbankx.tls.* (the startup TLS assertion is never switched off);
-#   - spring.kafka.properties.* (this chart's rule); a *security_protocol key
-#     must hold SASL_SSL with kafka.profile kafka-msk or SSL with kafka-strimzi,
-#     an *endpoint_identification_algorithm key must hold https;
+#   - spring.kafka.ssl.*, spring.kafka.*.ssl.*, spring.kafka.properties.ssl.*,
+#     KAFKA_TLS_* and spring.data.mongodb.* / MONGODB_URI (the reference guard);
+#     every other spring.kafka.properties.* name (this chart's rule); a
+#     *security_protocol key must hold SASL_SSL with kafka.profile kafka-msk or
+#     SSL with kafka-strimzi, an *endpoint_identification_algorithm key must
+#     hold https;
 #   - JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS or _JAVA_OPTIONS whose value mentions
 #     datasource, flyway, liquibase, r2dbc, jdbc, ssl, application.json,
 #     spring.config, spring.profiles, fintechbankx.tls, security.protocol,
 #     endpoint.identification, java.security.properties, jdk.tls, hostname
-#     verification or kafka (this chart's rule), contains '$(' or '${' or a
+#     verification, kafka or mongodb, contains '$(' or '${' or a
 #     non-ASCII character, or reads options from a file ('@' argument file,
 #     -XX:VMOptionsFile, -XX:Flags);
 #   - a config key that is not a ConfigMap key ([-._a-zA-Z0-9]+). Every key and
