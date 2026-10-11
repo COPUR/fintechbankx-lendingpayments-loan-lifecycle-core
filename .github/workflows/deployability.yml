@@ -384,6 +384,26 @@ jobs:
           assert job["args"] == ["migrate"], job["args"]
           assert "\n" in [e for e in job["env"] if e["name"] == "DB_USERNAME"][0]["value"]
           print("template interpolation: a newline in a value adds no key, no arg")'
+          # Round-8 review: the image is one quoted scalar, so an image value cannot append container
+          # fields (command, args) the guard never saw. --set-file applies after the --set in $args.
+          printf 'ci/loan"\n          command: ["sh"]\n          args: ["-c", "x"]\n          x: "y' > "$tmp/image.txt"
+          helm template ci "$chart" $args --set-file "image.repository=$tmp/image.txt" 2>"$tmp/image.err" | python3 -c '
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          seen = set()
+          for d in docs:
+              if d["kind"] not in ("Deployment", "Job"):
+                  continue
+              seen.add(d["kind"])
+              for c in d["spec"]["template"]["spec"]["containers"]:
+                  assert isinstance(c["image"], str) and c["image"].startswith("ci/loan\"\n"), c["image"]
+                  assert "command" not in c, c.get("command")
+                  if d["kind"] == "Deployment":
+                      assert "args" not in c, c.get("args")
+                  else:
+                      assert c["args"] == ["migrate"], c["args"]
+          assert seen == {"Deployment", "Job"}, seen
+          print("image: one scalar, no command or args added")' || { cat "$tmp/image.err" >&2; exit 1; }
           helm template ci "$chart" $args | python3 scripts/ci/externalsecret-naming.py --env dev
           helm template ci "$chart" -f "$chart/values-dev.yaml" $args | python3 scripts/ci/externalsecret-naming.py --env dev
           # The checks themselves must catch a wrong render.
