@@ -205,6 +205,52 @@ class CustomerProfileHttpAdapterTest {
         server.verify();
     }
 
+    /**
+     * The payoff release ({loanId}:release) under the customer's release by
+     * reference: 422 RESERVATION_NOT_FOUND means nothing is held for the loan
+     * (released already, or holding 0), so the release counts as done and is
+     * counted as unmatched; 422 RELEASE_EXCEEDS_RESERVATION is a refusal that
+     * re-sending will not change, never "customer service unavailable".
+     */
+    @Test
+    void thePayoffReleaseMapsTheReleaseCodesInsteadOfReportingUnavailable() {
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:release"))
+            .andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY).contentType(MediaType.APPLICATION_JSON)
+                .body("{\"code\":\"RESERVATION_NOT_FOUND\"}"));
+        server.expect(requestTo(BASE + "/credit/release"))
+            .andExpect(header("x-idempotency-key", "LOAN-HTTP-1:release"))
+            .andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY).contentType(MediaType.APPLICATION_JSON)
+                .body("{\"code\":\"RELEASE_EXCEEDS_RESERVATION\"}"));
+        io.micrometer.core.instrument.simple.SimpleMeterRegistry meters = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        CustomerProfileHttpAdapter counted = new CustomerProfileHttpAdapter(builder.build(), () -> "service-token",
+            Currency.getInstance("AED"), generations, 3, CustomerProfileHttpAdapter.Paths.DEFAULT, meters);
+
+        assertThat(counted.releaseCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN))).isEqualTo(CreditDecision.ACCEPTED);
+        assertThat(meters.get("loan.credit.releases.unmatched").counter().count()).isEqualTo(1.0);
+        assertThat(counted.releaseCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN))).isEqualTo(CreditDecision.REFUSED);
+        assertThat(meters.get("loan.credit.releases.unmatched").counter().count()).isEqualTo(1.0);
+        server.verify();
+    }
+
+    /** The release codes are no answer to a reserve: a non-retryable rejection, not "unavailable". */
+    @Test
+    void releaseCodesOnAReserveAreARejectionNotUnavailable() {
+        for (String code : new String[] {"RESERVATION_NOT_FOUND", "RELEASE_EXCEEDS_RESERVATION"}) {
+            server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY)
+                .contentType(MediaType.APPLICATION_JSON).body("{\"code\":\"" + code + "\"}"));
+        }
+
+        for (String code : new String[] {"RESERVATION_NOT_FOUND", "RELEASE_EXCEEDS_RESERVATION"}) {
+            assertThatThrownBy(() -> adapter.reserveCredit(LOAN, CUSTOMER, Money.aed(BigDecimal.TEN)))
+                .isInstanceOf(com.bank.loan.domain.port.out.CreditMovementRejectedException.class)
+                .isNotInstanceOf(CustomerCreditUnavailableException.class)
+                .hasMessageContaining("422 " + code)
+                .message().doesNotContain("LOAN-HTTP-1");
+        }
+        server.verify();
+    }
+
     @Test
     void outagesRejectedTokensAndKeyConflictsAreUnavailable() {
         server.expect(requestTo(BASE + "/credit/reserve")).andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));

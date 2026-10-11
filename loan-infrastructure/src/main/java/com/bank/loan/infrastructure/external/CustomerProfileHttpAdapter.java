@@ -352,9 +352,29 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
         return outcome;
     }
 
+    /**
+     * The payoff release under the customer's release by reference: 422
+     * RESERVATION_NOT_FOUND means nothing is held for the loan (released
+     * already, or holding 0), so it counts as done and is counted as
+     * unmatched; 422 RELEASE_EXCEEDS_RESERVATION is a refusal that re-sending
+     * will not change.
+     */
     @Override
     public CreditDecision releaseCredit(LoanId loanId, CustomerId customerId, Money amount) {
-        return moveCredit(loanId, customerId, amount, paths.release(), loanId.getValue() + ":release");
+        String key = loanId.getValue() + ":release";
+        try {
+            return moveCredit(loanId, customerId, amount, paths.release(), key);
+        } catch (ReleaseRefusedException refusal) {
+            if (RESERVATION_NOT_FOUND.equals(refusal.code())) {
+                unmatchedReleases.increment();
+                log.warn("Customer service holds no reservation for release {} ({}); nothing to release",
+                    key, refusal.code());
+                return CreditDecision.ACCEPTED;
+            }
+            log.error("Customer service refused release {} with {}: more than the loan's reservation", key,
+                refusal.code());
+            return CreditDecision.REFUSED;
+        }
     }
 
     private static String reserveKey(LoanId loanId, int generation) {
@@ -434,6 +454,10 @@ public class CustomerProfileHttpAdapter implements CustomerCreditService {
                 // push lands in the catalog.
                 if (status == HttpStatus.UNPROCESSABLE_ENTITY.value()
                         && (RESERVATION_NOT_FOUND.equals(code) || RELEASE_EXCEEDS_RESERVATION.equals(code))) {
+                    if (!movement.equals(paths.release())) {
+                        throw new CreditMovementRejectedException("Customer service answered " + status + " " + code
+                            + " to credit " + movement + ", a release code; not retried", error);
+                    }
                     throw new ReleaseRefusedException(code, "Customer service answered " + status + " " + code
                         + " to credit " + movement, error);
                 }
