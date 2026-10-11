@@ -1,0 +1,74 @@
+package com.bank.loan.infrastructure.outbox;
+
+import com.bank.loan.domain.Loan;
+import com.bank.loan.domain.port.out.EventCausation;
+import com.bank.loan.domain.port.out.LoanEventPublisher;
+import com.bank.loan.infrastructure.web.CorrelationIdFilter;
+import com.bank.shared.kernel.domain.DomainEvent;
+import org.slf4j.MDC;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+import java.util.UUID;
+
+/**
+ * Transactional outbox: writes each event's envelope in the caller's
+ * transaction (MANDATORY), so the loan row and its events commit or roll
+ * back together. {@link OutboxRelay} ships them to Kafka afterwards.
+ */
+@Component
+public class OutboxLoanEventPublisher implements LoanEventPublisher {
+
+    private final SpringDataOutboxRepository outbox;
+    private final LoanEventEnvelopeFactory envelopes;
+
+    public OutboxLoanEventPublisher(SpringDataOutboxRepository outbox, LoanEventEnvelopeFactory envelopes) {
+        this.outbox = outbox;
+        this.envelopes = envelopes;
+    }
+
+    /**
+     * correlationId: the causing message's when there is one (ADR-019
+     * section 4, end to end), else the API request's x-fapi-interaction-id,
+     * else a new id. causationId: the causing message's eventId, else null
+     * (the events start a flow).
+     */
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void publish(Loan loan, List<DomainEvent> events, EventCausation causation) {
+        String interactionId = currentInteractionId();
+        String correlationId = causation != null ? causation.correlationId()
+            : interactionId != null ? interactionId : UUID.randomUUID().toString();
+        String causationId = causation == null ? null : causation.causationId();
+        String traceparent = currentTraceparent();
+        outbox.saveAll(events.stream()
+            .map(event -> envelopes.toOutboxRow(loan, event, correlationId, causationId)
+                .withTraceparent(traceparent)
+                .withFapiInteractionId(interactionId))
+            .toList());
+    }
+
+    /**
+     * W3C traceparent of the current span (Micrometer Tracing puts traceId and
+     * spanId in the MDC), or null outside a traced request.
+     */
+    static String currentTraceparent() {
+        String traceId = MDC.get("traceId");
+        String spanId = MDC.get("spanId");
+        if (traceId == null || spanId == null || !traceId.matches("[0-9a-f]{32}") || !spanId.matches("[0-9a-f]{16}")) {
+            return null;
+        }
+        return "00-" + traceId + "-" + spanId + "-01";
+    }
+
+    /**
+     * The x-fapi-interaction-id of the current loan API request (CorrelationIdFilter
+     * puts it in the MDC, generating one when the client sent none), or null when
+     * the flow did not start at the API (consumer, sweep).
+     */
+    private static String currentInteractionId() {
+        return MDC.get(CorrelationIdFilter.MDC_KEY);
+    }
+}

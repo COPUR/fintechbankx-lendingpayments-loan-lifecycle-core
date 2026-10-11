@@ -32,7 +32,10 @@ class LoanResponseTest {
         assertThat(response.annualInterestRate()).isEqualByComparingTo("6.0000");
         assertThat(response.termInMonths()).isEqualTo(12);
         assertThat(response.status()).isEqualTo("CREATED");
-        assertThat(response.monthlyPayment()).isPositive();
+        assertThat(response.rateBasis()).isEqualTo("NOMINAL_ANNUAL");
+        assertThat(response.currency()).isEqualTo("AED");
+        assertThat(response.monthlyPayment()).isEqualByComparingTo("1032.80");
+        assertThat(response.outstandingBalance()).isEqualByComparingTo("12393.58");
         assertThat(response.createdAt()).isNotNull();
         assertThat(response.lastModifiedAt()).isNotNull();
     }

@@ -1,0 +1,120 @@
+{{- if .Values.migration.enabled }}
+{{- /* Round 6 (guardrail 4a): the Job reads config.DB_URL, so it runs the guard too (fbx.guard plus loan.guardValues). */ -}}
+{{- include "loan.guardValues" . }}
+{{- /*
+Flyway as a separate step (platform contract "Database roles"): runs before
+every install and upgrade, as the schema owner, with the db-migration secret.
+The service pods never mount that secret and run with SPRING_FLYWAY_ENABLED=false.
+Both resources are hooks and are deleted once the hooks succeed, so the owner
+credential (the ExternalSecret's target Secret, owned by it) leaves the
+namespace with them. A failed Job stays for inspection until the next attempt.
+*/ -}}
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: {{ include "loan.migrationName" . }}
+  labels:
+    {{- include "loan.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-migration
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  refreshInterval: {{ .Values.externalSecret.refreshInterval | quote }}
+  secretStoreRef:
+    kind: {{ .Values.externalSecret.secretStoreRef.kind | quote }}
+    name: {{ .Values.externalSecret.secretStoreRef.name | quote }}
+  target:
+    name: {{ include "loan.migrationName" . }}
+    creationPolicy: Owner
+  data:
+    - secretKey: "DB_MIGRATION_USERNAME"
+      remoteRef:
+        key: {{ include "loan.remoteKey" (list "migration.remoteSecretName" .Values.migration.remoteSecretName) | quote }}
+        property: "username"
+    - secretKey: "DB_MIGRATION_PASSWORD"
+      remoteRef:
+        key: {{ include "loan.remoteKey" (list "migration.remoteSecretName" .Values.migration.remoteSecretName) | quote }}
+        property: "password"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "loan.migrationName" . }}
+  labels:
+    {{- include "loan.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-migration
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migration.backoffLimit | int }}
+  activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds | int }}
+  template:
+    metadata:
+      # app.kubernetes.io/name = the service account, as on the service
+      # pods: mesh NetworkPolicies grant Aurora egress (5432) by that label
+      # only. component db-migration (not service) keeps the Service, PDB,
+      # NetworkPolicy, topology spread and Deployment from selecting this pod.
+      # No fintechbankx.io/service-id: observability would scrape it and count
+      # a completed Job pod as a down service instance.
+      labels:
+        {{- include "loan.baseLabels" . | nindent 8 }}
+        app.kubernetes.io/component: db-migration
+        fintechbankx.io/squad: {{ .Values.squad | quote }}
+        sidecar.istio.io/inject: {{ .Values.migration.istioSidecar | quote }}
+      annotations:
+        # A classic Istio sidecar never exits, so the Job would never
+        # complete; see values migration.istioSidecar.
+        sidecar.istio.io/inject: {{ .Values.migration.istioSidecar | quote }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: db-migration
+          image: "{{ required "image.repository is required" .Values.image.repository }}:{{ required "image.tag is required" .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
+          args: ["migrate"]
+          env:
+            # Path of the mounted RDS CA bundle (cicd-templates 4f0f266).
+            - name: DB_SSL_ROOT_CERT
+              value: {{ printf "%s/%s" (trimSuffix "/" .Values.databaseCa.mountPath) .Values.databaseCa.key | quote }}
+            - name: DB_URL
+              value: {{ .Values.config.DB_URL | quote }}
+            # The runtime role V4 grants (Flyway placeholder runtime_role).
+            - name: DB_USERNAME
+              value: {{ .Values.config.DB_USERNAME | quote }}
+          envFrom:
+            - secretRef:
+                name: {{ include "loan.migrationName" . }}
+          resources:
+            {{- toYaml .Values.migration.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: database-ca
+              mountPath: {{ .Values.databaseCa.mountPath | quote }}
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: database-ca
+          configMap:
+            name: {{ .Values.databaseCa.configMapName | quote }}
+            items:
+              - key: {{ .Values.databaseCa.key | quote }}
+                path: {{ .Values.databaseCa.key | quote }}
+{{- end }}

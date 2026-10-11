@@ -1,0 +1,221 @@
+# svc-ln-loan-lifecycle runtime configuration.
+# Every environment-specific value comes from the environment (Helm values,
+# Kubernetes Secret synced from AWS Secrets Manager); nothing secret is here.
+spring:
+  application:
+    # Naming standard: app.<ctx>.<capability> (service id svc-ln-loan-lifecycle)
+    name: app.ln.loan-lifecycle
+  threads:
+    virtual:
+      enabled: true
+  lifecycle:
+    timeout-per-shutdown-phase: 25s
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/db_ln_loan_lifecycle_local}
+    username: ${DB_USERNAME:loan_lifecycle_app}
+    # The credential is bound from SPRING_DATASOURCE_PASSWORD (Kubernetes Secret
+    # synced from AWS Secrets Manager); it is never written in this file.
+    hikari:
+      schema: sc_ln_loan_lifecycle
+      maximum-pool-size: ${DB_POOL_MAX:10}
+      minimum-idle: ${DB_POOL_MIN_IDLE:2}
+      connection-timeout: 3000
+      max-lifetime: 1200000
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: sc_ln_loan_lifecycle
+        jdbc:
+          time_zone: UTC
+          batch_size: 50
+        order_inserts: true
+        order_updates: true
+  flyway:
+    # Migrations run as the schema owner (DB_MIGRATION_USERNAME / _PASSWORD,
+    # secret <env>/loan-lifecycle-service/db-migration), deployed as the Helm
+    # pre-install/pre-upgrade Job "migrate"; the pods get only the runtime
+    # role (DB_USERNAME, secret db-app) and run with SPRING_FLYWAY_ENABLED=false.
+    # V4 grants the runtime role its DML. Without DB_MIGRATION_* (local runs,
+    # tests without the split) Flyway uses the app credentials.
+    user: ${DB_MIGRATION_USERNAME:${spring.datasource.username}}
+    password: ${DB_MIGRATION_PASSWORD:${spring.datasource.password:}}
+    placeholders:
+      runtime_role: ${spring.datasource.username}
+    schemas: sc_ln_loan_lifecycle
+    default-schema: sc_ln_loan_lifecycle
+    create-schemas: true
+    locations: classpath:db/migration
+  # Runtime-neutral Kafka settings; authentication comes from the kafka-msk or
+  # kafka-strimzi profile. Topics are created only through the platform
+  # catalog, never by this service.
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    client-id: svc-ln-loan-lifecycle
+    security:
+      protocol: ${KAFKA_SECURITY_PROTOCOL:PLAINTEXT}
+    admin:
+      auto-create: false
+    producer:
+      acks: all
+      compression-type: lz4
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        # Kafka refuses to build the producer unless
+        # delivery.timeout.ms >= linger.ms + request.timeout.ms.
+        delivery.timeout.ms: 30000
+        request.timeout.ms: 20000
+        linger.ms: 5
+    consumer:
+      isolation-level: read_committed
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${OIDC_ISSUER_URI:http://localhost:8180/realms/fintechbankx}
+          jwk-set-uri: ${OIDC_JWK_SET_URI:http://localhost:8180/realms/fintechbankx/protocol/openid-connect/certs}
+      # Outbound service-to-service calls use this service's own
+      # client-credentials token, never the caller's token.
+      client:
+        registration:
+          customer-service:
+            provider: fintechbankx
+            client-id: ${SERVICE_CLIENT_ID:svc-ln-loan-lifecycle}
+            client-secret: ${SERVICE_CLIENT_SECRET:}
+            authorization-grant-type: client_credentials
+            client-authentication-method: client_secret_basic
+        provider:
+          fintechbankx:
+            token-uri: ${OIDC_TOKEN_URI:http://localhost:8180/realms/fintechbankx/protocol/openid-connect/token}
+
+server:
+  port: 8080
+  shutdown: graceful
+  forward-headers-strategy: framework
+
+management:
+  server:
+    port: 8081
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db
+        liveness:
+          include: livenessState
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:0.1}
+  metrics:
+    tags:
+      service: svc-ln-loan-lifecycle
+      squad: lending
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+  observations:
+    key-values:
+      service: svc-ln-loan-lifecycle
+
+loan:
+  security:
+    # Tokens must name this service in aud (Keycloak audience mapper).
+    audience: ${OIDC_AUDIENCE:svc-ln-loan-lifecycle}
+  customer-credit:
+    # http (customer-profile-kyc) or in-memory (local runs and tests only).
+    # No default: deployments must choose (switch to http only after the
+    # customer cutover, runbook precondition table).
+    adapter: ${CUSTOMER_CREDIT_ADAPTER:}
+    base-url: ${CUSTOMER_SERVICE_BASE_URL:http://customer-profile-kyc-service.customer.svc.cluster.local:8080}
+    client-registration-id: customer-service
+    # ISO 4217 currency the customer service holds credit in when its
+    # response omits currency. No default: never assumed.
+    ledger-currency: ${CUSTOMER_CREDIT_LEDGER_CURRENCY:}
+    connect-timeout: PT1S
+    read-timeout: PT2S
+    max-attempts: 3
+    paths:
+      credit-position: /api/v1/customers/{customerId}/credit
+      reserve: /api/v1/customers/{customerId}/credit/reserve
+      release: /api/v1/customers/{customerId}/credit/release
+  credit-reservation:
+    sweep:
+      # Review 5460235552: re-drives credit reservations of never-disbursed loans
+      # that a crash, a failed disbursement or an abandoned loan left behind
+      # (pending releases and accepted reservations), releasing each by its
+      # reference (the loan id) once the grace period has passed. One replica
+      # at a time (advisory lock); runs at start-up, then after each interval.
+      # Gauges: loan_credit_reservations_pending,
+      # loan_credit_reservations_operator{reason}. The chart sets all four
+      # (values.yaml config); see runbook section 8.
+      enabled: ${CREDIT_RESERVATION_SWEEP_ENABLED:true}
+      interval: ${CREDIT_RESERVATION_SWEEP_INTERVAL:PT1M}
+      grace: ${CREDIT_RESERVATION_SWEEP_GRACE:PT10M}
+      batch-size: 50
+      # What the sweep does with a reserve that was sent but never answered
+      # (RESERVING past the grace period). false: it is marked UNCONFIRMED and
+      # left for an operator (loan_credit_reservations_operator{reason="unconfirmed"}),
+      # never released blind. true: it is released by its reference, which needs
+      # the customer service's 422 RESERVATION_NOT_FOUND for an unknown reference
+      # (customer-profile-kyc-core PR #13 a6ebe01 or later) to be live first; the
+      # grace must then outlast max-attempts x (connect-timeout + read-timeout)
+      # or the service does not start. Turned on per environment only after #13
+      # is deployed there (runbook section 8).
+      release-unanswered: ${CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED:false}
+  outbox:
+    retention: P7D
+    relay:
+      # Off until the aggregate topic evt.ln.loan.v1 (every Loan event type,
+      # eventType header; ADR-019) is in the platform catalog and on the cluster.
+      enabled: ${OUTBOX_RELAY_ENABLED:false}
+      interval: PT1S
+      batch-size: 100
+      # Longer than delivery.timeout.ms, so the relay never gives up on a send
+      # Kafka is still retrying (which would publish the event twice).
+      send-timeout: PT35S
+      # ADR-021 decision 4: only payload errors park a row; any other failure
+      # stops the batch, marks nothing and backs off (1 s doubling to 5 min).
+      # Alert on outbox_oldest_pending_age_seconds; failures count in
+      # outbox_send_failures_total{exception}.
+  repayment-consumer:
+    # Reads the payment aggregate topic evt.pay.payment.v1, handles only
+    # Payments.Payment.LoanPaymentCompleted.v1 (eventType header) and skips the
+    # other types; off until the topic and this service's DLQ evt.ln.loan.dlq.v1
+    # exist and the payments cutover window opens.
+    enabled: ${LOAN_REPAYMENT_CONSUMER_ENABLED:false}
+    concurrency: 1
+
+fintechbankx:
+  tls:
+    # Round 5 (governance 2b) and round 6 (guardrail 4a): the service refuses
+    # to start unless every datasource URL a pool can use
+    # (spring.datasource.url, spring.datasource.hikari.jdbc-url,
+    # spring.flyway.url), read as PgJDBC reads it, has exactly one
+    # sslmode=verify-full and no verification-bypass key, and, with a Kafka
+    # client configured, the effective security.protocol of the producer (and
+    # consumer) built from spring.kafka is SASL_SSL (kafka-msk) or SSL
+    # (kafka-strimzi, mutual TLS); PLAINTEXT, SASL_PLAINTEXT and unset stop the
+    # start (TlsEnforcement, an early bean whose message names the offending
+    # setting; the migrate Job context imports it too). Only explicit local and
+    # test configuration sets this false: the local profile
+    # (application-local.yml) and the bootstrap test resources. The chart never
+    # sets it and refuses fintechbankx.tls.*, every profile name and the JVM
+    # options in any spelling (deploy/helm, _helpers.tpl loan.guardValues).
+    enforce: true
+
+logging:
+  pattern:
+    level: "%5p [${spring.application.name},%X{traceId:-},%X{spanId:-},%X{correlationId:-}]"

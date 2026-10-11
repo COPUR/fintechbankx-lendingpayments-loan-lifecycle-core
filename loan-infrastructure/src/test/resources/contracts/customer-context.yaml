@@ -1,0 +1,780 @@
+# Copied for loan's consumer contract test (CustomerProfileHttpAdapterContractTest).
+# Source: fintechbankx-customer-profile-kyc-core, branch claude/customer-risk-compliance-deployable-ygi0zo (PR #13),
+# head 4a8f468, file api/openapi/customer-context.yaml, unchanged (identical to a6ebe01). Since 8794365 it states the
+# release-by-reference rules (customer CRC decision 2026-10-10, a6ebe01): a release whose reference matches no
+# reservation is always 422 RESERVATION_NOT_FOUND and never touches untracked or migrated credit; a tracked
+# reference released beyond what it holds is 422 RELEASE_EXCEEDS_RESERVATION; only a release without a reference
+# takes untracked used credit. changeKycStatus names the aggregate topic evt.cus.customer.v1 itself, so loan's
+# earlier local edit is gone. Loan calls only /credit, /credit/reserve and /credit/release, never identity-link.
+# PR #13 is not merged: replace with the catalogued version once it is.
+openapi: 3.0.3
+info:
+  title: Customer Context Service API
+  version: 1.0.0
+  description: Customer profile and credit management APIs.
+  license:
+    name: Proprietary
+    url: https://openfinance.example.com/license
+servers:
+  - url: https://api.sandbox.openfinance.ae
+    description: Sandbox
+
+tags:
+  - name: CustomerManagement
+
+paths:
+  /api/v1/customers:
+    post:
+      tags: [CustomerManagement]
+      summary: Create customer
+      operationId: createCustomer
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCustomerRequest'
+      responses:
+        '201':
+          description: Customer created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: A customer with this e-mail address already exists (code CUSTOMER_ALREADY_EXISTS; the e-mail is not echoed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Business validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/customers/{customerId}:
+    get:
+      tags: [CustomerManagement]
+      summary: Get customer by id
+      operationId: getCustomer
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - $ref: '#/components/parameters/CustomerId'
+      responses:
+        '200':
+          description: Customer found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Customer not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/customers/{customerId}/credit:
+    get:
+      tags: [CustomerManagement]
+      summary: Get a customer's credit position
+      operationId: getCustomerCredit
+      description: |-
+        Credit limit, used and available credit, without personal data. For
+        services that decide on credit (SERVICE realm role, calling client on
+        the service's allowed list), staff, and the customer themself.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - $ref: '#/components/parameters/CustomerId'
+      responses:
+        '200':
+          description: Credit position
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerCreditResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Customer not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/customers/{customerId}/kyc-status:
+    get:
+      tags: [CustomerManagement]
+      summary: Read the customer's KYC status (no personal data)
+      operationId: getKycStatus
+      description: |-
+        KYC fields only, for the payment service and other callers that must
+        not see personal data. Callers: SERVICE tokens whose client (azp) is
+        on SERVICE_CALLERS_KYC (default svc-pay-initiation-settlement; the
+        credit allow-list does not apply here), BANKER, ADMIN, and the
+        customer themselves (customer_id claim). New capability with no
+        monolith counterpart.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - $ref: '#/components/parameters/CustomerId'
+      responses:
+        '200':
+          description: KYC status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KycStatusResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Customer not found (CUSTOMER_NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      tags: [CustomerManagement]
+      summary: Staff verify or reject the customer's KYC
+      operationId: changeKycStatus
+      description: |-
+        BANKER or ADMIN only. Records the token subject as the staff member who
+        changed it and publishes Customer.Customer.KycStatusChanged.v1 on
+        evt.cus.customer.v1 (the customer aggregate topic). Setting the current status
+        again changes nothing and publishes nothing.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - $ref: '#/components/parameters/CustomerId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangeKycStatusRequest'
+      responses:
+        '200':
+          description: KYC status after the change
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KycStatusResponse'
+        '400':
+          description: Status missing or not VERIFIED/REJECTED (INVALID_REQUEST)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Customer not found (CUSTOMER_NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: CONCURRENT_UPDATE, the customer changed concurrently; retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/customers/{customerId}/credit-limit:
+    put:
+      tags: [CustomerManagement]
+      summary: Update customer credit limit
+      operationId: updateCreditLimit
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - $ref: '#/components/parameters/CustomerId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCreditLimitRequest'
+      responses:
+        '200':
+          description: Credit limit updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Customer not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: CONCURRENT_UPDATE, the customer kept changing while the service retried; retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: CREDIT_LIMIT_BELOW_USED_CREDIT, the new limit is below the credit the customer already uses
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/customers/{customerId}/credit/reserve:
+    post:
+      tags: [CustomerManagement]
+      summary: Reserve credit
+      operationId: reserveCredit
+      description: |-
+        Called by other services (SERVICE realm role, calling client on the
+        service's allowed list) and staff. x-idempotency-key is required. A
+        repeat is recognised only when the whole movement matches: the same
+        key, movement type, amount, currency and reference return the current
+        position without moving credit again; the same key with any of these
+        different is 409 IDEMPOTENCY_KEY_REUSED. The answer is the credit
+        position only (no personal data).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - $ref: '#/components/parameters/CustomerId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreditMovementRequest'
+      responses:
+        '200':
+          description: Credit reserved; the credit position only, without personal data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerCreditResponse'
+        '400':
+          description: Missing x-idempotency-key or invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Customer not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Idempotency key reused for a different credit movement (IDEMPOTENCY_KEY_REUSED), or the customer kept changing while the service retried a lost race (CONCURRENT_UPDATE)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: INSUFFICIENT_CREDIT (not enough available credit), or CURRENCY_MISMATCH (a valid ISO 4217 currency other than the customer's credit currency; a malformed currency is 400)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/customers/{customerId}/credit/release:
+    post:
+      tags: [CustomerManagement]
+      summary: Release reserved credit
+      operationId: releaseCredit
+      description: |-
+        Called by other services (SERVICE realm role, calling client on the
+        service's allowed list) and staff. x-idempotency-key is required. A
+        repeat is recognised only when the whole movement matches: the same
+        key, movement type, amount, currency and reference return the current
+        position without moving credit again; the same key with any of these
+        different is 409 IDEMPOTENCY_KEY_REUSED. The answer is the credit
+        position only (no personal data).
+
+        Release by reference: a reference that names one of the customer's
+        reservations (the reference sent with earlier reserves) releases at
+        most what that reservation still holds; partial releases are fine,
+        more is 422 RELEASE_EXCEEDS_RESERVATION. A release that carries a
+        reference matching no reservation is always 422 RESERVATION_NOT_FOUND,
+        whatever the amount, so an unknown loan id never touches migrated
+        credit. Only a release without a reference releases untracked used
+        credit, at most used credit minus all open reservations (for example
+        a balance migrated from the monolith); more is 422
+        RESERVATION_NOT_FOUND. Nothing is floored at zero. An idempotency-key
+        replay is answered before these rules.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - $ref: '#/components/parameters/CustomerId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreditMovementRequest'
+      responses:
+        '200':
+          description: Credit released; the credit position only, without personal data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerCreditResponse'
+        '400':
+          description: Missing x-idempotency-key or invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Customer not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Idempotency key reused for a different credit movement (IDEMPOTENCY_KEY_REUSED), or the customer kept changing while the service retried a lost race (CONCURRENT_UPDATE)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: CURRENCY_MISMATCH, a valid ISO 4217 currency other than the customer's credit currency (a malformed currency is 400); RELEASE_EXCEEDS_RESERVATION, the release is larger than what the named reservation still holds; RESERVATION_NOT_FOUND, the reference matches no reservation, or a release without a reference is larger than the untracked used credit. Nothing is released in any of these cases
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/customers/{customerId}/identity-link:
+    put:
+      tags: [CustomerManagement]
+      summary: Link the customer to the end user's identity account
+      operationId: linkIdentity
+      description: |-
+        Onboarding step for staff. Records the link to the Keycloak user and
+        sets that user's attribute customer_id to the customer id, so the
+        user's access tokens carry the customer_id claim. Repeating the call
+        for the same user is safe. Fails closed: if the identity directory
+        cannot be updated, nothing is recorded (503).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - $ref: '#/components/parameters/CustomerId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IdentityLinkRequest'
+      responses:
+        '200':
+          description: Customer linked; the identity user carries customer_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentityLinkResponse'
+        '400':
+          description: Invalid identity user id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Customer not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The customer or the identity user is already linked elsewhere (IDENTITY_LINK_CONFLICT)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: No identity user with this id (IDENTITY_USER_NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Identity directory could not be updated; nothing recorded (IDENTITY_DIRECTORY_UNAVAILABLE)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    Authorization:
+      name: Authorization
+      in: header
+      required: true
+      schema:
+        type: string
+      description: Access token.
+    DPoP:
+      name: DPoP
+      in: header
+      required: false
+      schema:
+        type: string
+      description: |-
+        DPoP proof (RFC 9449). Optional here: per the platform contract
+        (addendum 2026-10-08) DPoP binding applies only to open-finance TPP
+        clients. This service is called with internal client-credentials,
+        staff and first-party web/mobile tokens, which are not DPoP-bound, so
+        it does not verify DPoP; a DPoP header sent anyway is ignored. The
+        service enforces the issuer, its own service id in aud, and the azp
+        allow-list for SERVICE callers.
+    InteractionId:
+      name: X-FAPI-Interaction-ID
+      in: header
+      required: true
+      schema:
+        type: string
+      description: End-to-end correlation identifier.
+    CustomerId:
+      name: customerId
+      in: path
+      required: true
+      schema:
+        type: string
+    IdempotencyKey:
+      name: x-idempotency-key
+      in: header
+      required: true
+      description: |-
+        Caller-chosen key, unique per customer, that makes a credit movement
+        safe to retry. It must be deterministic: derived from what the
+        movement is for, never random, so a retry after a timeout resends the
+        same key and the credit moves once. svc-ln-loan-lifecycle uses
+        "<loanId>:reserve" (":g<n>" appended after n cancelled reservations),
+        "<loanId>:reserve...:compensation" to cancel a reservation, and
+        "<loanId>:release" when the loan is repaid, with the loan id as the
+        body's reference. The same key with a different amount, currency,
+        movement or reference is 409 IDEMPOTENCY_KEY_REUSED.
+      schema:
+        type: string
+        maxLength: 128
+  schemas:
+    CreateCustomerRequest:
+      type: object
+      required: [firstName, lastName, email, initialCreditLimit]
+      properties:
+        firstName:
+          type: string
+        lastName:
+          type: string
+        email:
+          type: string
+          format: email
+        phoneNumber:
+          type: string
+        initialCreditLimit:
+          type: number
+          format: double
+          description: At most as many decimal places as the currency allows (2 for USD and AED, 0 for JPY). More is a 400 INVALID_REQUEST, never rounded; trailing zeros are fine.
+        currency:
+          type: string
+          example: USD
+
+    UpdateCreditLimitRequest:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: number
+          format: double
+          description: At most as many decimal places as the currency allows (2 for USD and AED, 0 for JPY). More is a 400 INVALID_REQUEST, never rounded; trailing zeros are fine.
+        currency:
+          type: string
+          example: USD
+
+    CreditMovementRequest:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: number
+          format: double
+          description: At most as many decimal places as the currency allows (2 for USD and AED, 0 for JPY). More is a 400 INVALID_REQUEST, never rounded; trailing zeros are fine.
+        currency:
+          type: string
+          example: USD
+        reference:
+          type: string
+          maxLength: 128
+          description: What the credit is moved for, for example the loan id. Stored with the movement for reconciliation. A reserve with a reference adds to that reservation; a release with a reference takes from that reservation and is refused with RESERVATION_NOT_FOUND when none matches (see releaseCredit). Optional; without it a reserve is untracked and a release may take only untracked used credit.
+
+    KycStatusResponse:
+      type: object
+      description: KYC fields only; no name, e-mail, phone or address.
+      required: [customerId, kycVerified, kycStatus, kycSource]
+      properties:
+        customerId:
+          type: string
+        kycVerified:
+          type: boolean
+          description: true exactly when kycStatus is VERIFIED.
+        kycStatus:
+          type: string
+          enum: [PENDING, VERIFIED, REJECTED]
+        kycSource:
+          type: string
+          enum: [MIGRATED, STAFF]
+          description: MIGRATED, carried over from the monolith (verified as of the migration; decision pending), or STAFF, set in this service.
+        verifiedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the customer was verified; null unless kycStatus is VERIFIED.
+
+    ChangeKycStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [VERIFIED, REJECTED]
+
+    CustomerCreditResponse:
+      type: object
+      required: [customerId, currency, creditLimit, usedCredit, availableCredit]
+      properties:
+        customerId:
+          type: string
+        currency:
+          type: string
+        creditLimit:
+          type: number
+          format: double
+        usedCredit:
+          type: number
+          format: double
+        availableCredit:
+          type: number
+          format: double
+
+    CustomerResponse:
+      type: object
+      required: [customerId, firstName, lastName, creditLimit, usedCredit, availableCredit, status, createdAt, lastModifiedAt]
+      properties:
+        customerId:
+          type: string
+        firstName:
+          type: string
+        lastName:
+          type: string
+        email:
+          type: string
+          format: email
+          nullable: true
+          description: Absent for customers migrated from the monolith, which never stored an e-mail address.
+        phoneNumber:
+          type: string
+          nullable: true
+        creditLimit:
+          type: number
+          format: double
+        usedCredit:
+          type: number
+          format: double
+        availableCredit:
+          type: number
+          format: double
+        status:
+          type: string
+        creditScore:
+          type: integer
+          nullable: true
+        monthlyIncome:
+          type: number
+          format: double
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        lastModifiedAt:
+          type: string
+          format: date-time
+
+    IdentityLinkRequest:
+      type: object
+      required: [identityUserId]
+      properties:
+        identityUserId:
+          type: string
+          pattern: '^[A-Za-z0-9-]{1,64}$'
+          description: Keycloak user id (token sub) of the end user.
+
+    IdentityLinkResponse:
+      type: object
+      required: [customerId, identityUserId]
+      properties:
+        customerId:
+          type: string
+        identityUserId:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required: [code, message, interactionId, timestamp]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        interactionId:
+          type: string
+        timestamp:
+          type: string
+          format: date-time

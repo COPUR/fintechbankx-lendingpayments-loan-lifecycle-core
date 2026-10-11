@@ -1,0 +1,9 @@
+apiVersion: v2
+name: loan-lifecycle-service
+description: svc-ln-loan-lifecycle, the Loan bounded context of FinTechBankX lending.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+annotations:
+  fintechbankx.io/service-id: svc-ln-loan-lifecycle
+  fintechbankx.io/owning-squad: Loan Lifecycle Squad
