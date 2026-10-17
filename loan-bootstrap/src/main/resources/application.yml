@@ -91,6 +91,15 @@ spring:
             client-secret: ${SERVICE_CLIENT_SECRET:}
             authorization-grant-type: client_credentials
             client-authentication-method: client_secret_basic
+          # Same client, second registration: the journal-entry calls to the
+          # accounts ledger (journal.client-registration-id). The ledger expects
+          # svc-acc-accounts-ledger in aud (Keycloak audience mapper on this client).
+          accounts-ledger:
+            provider: fintechbankx
+            client-id: ${SERVICE_CLIENT_ID:svc-ln-loan-lifecycle}
+            client-secret: ${SERVICE_CLIENT_SECRET:}
+            authorization-grant-type: client_credentials
+            client-authentication-method: client_secret_basic
         provider:
           fintechbankx:
             token-uri: ${OIDC_TOKEN_URI:http://localhost:8180/realms/fintechbankx/protocol/openid-connect/token}
@@ -197,6 +206,18 @@ loan:
     # exist and the payments cutover window opens.
     enabled: ${LOAN_REPAYMENT_CONSUMER_ENABLED:false}
     concurrency: 1
+
+journal:
+  # Journal entries to the accounts ledger (svc-acc-accounts-ledger, ADR-030,
+  # POST /api/v1/journal-entries): http or in-memory (local runs and tests only).
+  # No business flow calls the port yet; the wiring is a separate change.
+  adapter: ${JOURNAL_ADAPTER:http}
+  base-url: ${ACCOUNTS_SERVICE_BASE_URL:http://accounts-ledger-service.corebanking.svc.cluster.local:8080}
+  client-registration-id: accounts-ledger
+  path: /api/v1/journal-entries
+  connect-timeout: PT1S
+  read-timeout: PT2S
+  max-attempts: 3
 
 fintechbankx:
   tls:
