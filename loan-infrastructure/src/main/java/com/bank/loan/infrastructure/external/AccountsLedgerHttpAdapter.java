@@ -148,7 +148,7 @@ public class AccountsLedgerHttpAdapter implements JournalEntryPort {
                 throw new AccountsLedgerUnavailableException("Accounts ledger unavailable for the journal entry", transport);
             } catch (RestClientException unreadable) {
                 // A malformed answer can carry the ledger's text in this exception's message: no cause is kept.
-                throw new AccountsLedgerUnavailableException("Accounts ledger unavailable for the journal entry");
+                throw new AccountsLedgerUnavailableException("Accounts ledger answered with an unreadable journal entry");
             }
         }
     }

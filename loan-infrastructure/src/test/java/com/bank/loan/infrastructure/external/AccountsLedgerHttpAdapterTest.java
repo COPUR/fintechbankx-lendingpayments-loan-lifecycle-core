@@ -341,6 +341,7 @@ class AccountsLedgerHttpAdapterTest {
 
         assertThatThrownBy(() -> adapter.post(ENTRY))
             .isInstanceOf(AccountsLedgerUnavailableException.class)
+            .hasMessage("Accounts ledger answered with an unreadable journal entry")
             .hasNoCause()
             .message().doesNotContain("ACC-CUSTOMER-1", "12.34");
     }
