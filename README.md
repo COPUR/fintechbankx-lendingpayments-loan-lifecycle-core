@@ -70,8 +70,9 @@ DTOs) <- `loan-infrastructure` (`web`, `persistence`, `outbox`, `messaging`, `ex
 No Kafka, no customer service, no Keycloak token needed to start:
 
 ```
+export SPRING_DATASOURCE_PASSWORD=<password>
 SPRING_PROFILES_ACTIVE=local \
-DB_URL=jdbc:postgresql://localhost:5432/<db> DB_USERNAME=<user> SPRING_DATASOURCE_PASSWORD=<password> \
+DB_URL=jdbc:postgresql://localhost:5432/<db> DB_USERNAME=<user> \
 CUSTOMER_CREDIT_ADAPTER=in-memory CUSTOMER_CREDIT_LEDGER_CURRENCY=AED \
 OUTBOX_RELAY_ENABLED=false LOAN_REPAYMENT_CONSUMER_ENABLED=false \
 ./gradlew :loan-bootstrap:bootRun
