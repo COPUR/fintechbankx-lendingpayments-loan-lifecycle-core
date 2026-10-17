@@ -39,6 +39,7 @@ public class JournalClientConfiguration {
             @Value("${journal.client-registration-id:accounts-ledger}") String registrationId,
             @Value("${journal.path:/api/v1/journal-entries}") String path,
             @Value("${journal.max-attempts:3}") int maxAttempts,
+            @Value("${journal.retry-backoff:PT0.2S}") Duration retryBackoff,
             @Value("${journal.connect-timeout:PT1S}") Duration connectTimeout,
             @Value("${journal.read-timeout:PT2S}") Duration readTimeout) {
         AuthorizedClientServiceOAuth2AuthorizedClientManager manager =
@@ -54,6 +55,6 @@ public class JournalClientConfiguration {
             .requestFactory(ClientHttpRequestFactories.get(settings))
             .build();
         return new AccountsLedgerHttpAdapter(client,
-            CustomerCreditClientConfiguration.serviceToken(manager, registrationId), maxAttempts, path);
+            CustomerCreditClientConfiguration.serviceToken(manager, registrationId), maxAttempts, path, retryBackoff);
     }
 }

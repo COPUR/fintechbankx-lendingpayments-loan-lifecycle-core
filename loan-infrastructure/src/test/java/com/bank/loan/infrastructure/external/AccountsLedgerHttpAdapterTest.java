@@ -19,6 +19,7 @@ import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
 import java.net.SocketTimeoutException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Currency;
 import java.util.List;
@@ -92,7 +93,7 @@ class AccountsLedgerHttpAdapterTest {
             .andExpect(content().json("{\"reference\":\"LOAN-HTTP-8\",\"currency\":\"AED\",\"lines\":["
                 + "{\"accountId\":\"ACC-CLEARING-1\",\"side\":\"DEBIT\",\"amount\":1250.00},"
                 + "{\"accountId\":\"ACC-CUSTOMER-1\",\"side\":\"CREDIT\",\"amount\":1250.00}]}", true))
-            .andRespond(withStatus(HttpStatus.CREATED).contentType(MediaType.APPLICATION_JSON).body(BOOKED));
+            .andRespond(withStatus(HttpStatus.CREATED).contentType(MediaType.APPLICATION_JSON).body(BOOKED.replace("LOAN-HTTP-7", "LOAN-HTTP-8")));
 
         adapter.post(bare);
         server.verify();
@@ -236,5 +237,38 @@ class AccountsLedgerHttpAdapterTest {
 
         assertThat(renamed.post(ENTRY).journalEntryId()).isEqualTo("JE-42");
         server.verify();
+    }
+
+    @Test
+    void aBookingForAnotherReferenceIsUnavailable() {
+        server.expect(requestTo(JOURNAL)).andRespond(withStatus(HttpStatus.CREATED).contentType(MediaType.APPLICATION_JSON)
+            .body(BOOKED.replace("\"reference\":\"LOAN-HTTP-7\"", "\"reference\":\"LOAN-OTHER-9\"")));
+
+        assertThatThrownBy(() -> adapter.post(ENTRY)).isInstanceOf(AccountsLedgerUnavailableException.class);
+    }
+
+    @Test
+    void aLedgerErrorBodyIsNotKeptAsACause() {
+        server.expect(requestTo(JOURNAL)).andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY)
+            .contentType(MediaType.APPLICATION_JSON).body(REFUSED.formatted("INSUFFICIENT_FUNDS")));
+        server.expect(requestTo(JOURNAL)).andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+
+        assertThatThrownBy(() -> adapter.post(ENTRY)).isInstanceOf(JournalEntryRejectedException.class).hasNoCause();
+        assertThatThrownBy(() -> adapter.post(ENTRY)).isInstanceOf(AccountsLedgerUnavailableException.class).hasNoCause();
+    }
+
+    @Test
+    void retriesWaitBetweenAttempts() {
+        AccountsLedgerHttpAdapter paced = new AccountsLedgerHttpAdapter(builder.build(), () -> "service-token", 2,
+            "/api/v1/journal-entries", Duration.ofMillis(50));
+        server.expect(requestTo(JOURNAL)).andRespond(withStatus(HttpStatus.CONFLICT)
+            .contentType(MediaType.APPLICATION_JSON).body(REFUSED.formatted("CONCURRENT_UPDATE")));
+        server.expect(requestTo(JOURNAL)).andRespond(withStatus(HttpStatus.CREATED)
+            .contentType(MediaType.APPLICATION_JSON).body(BOOKED));
+
+        long startedAt = System.nanoTime();
+        paced.post(ENTRY);
+
+        assertThat(Duration.ofNanos(System.nanoTime() - startedAt)).isGreaterThanOrEqualTo(Duration.ofMillis(45));
     }
 }

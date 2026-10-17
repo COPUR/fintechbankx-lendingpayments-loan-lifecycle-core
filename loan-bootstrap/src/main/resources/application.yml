@@ -218,6 +218,7 @@ journal:
   connect-timeout: PT1S
   read-timeout: PT2S
   max-attempts: 3
+  retry-backoff: PT0.2S
 
 fintechbankx:
   tls:

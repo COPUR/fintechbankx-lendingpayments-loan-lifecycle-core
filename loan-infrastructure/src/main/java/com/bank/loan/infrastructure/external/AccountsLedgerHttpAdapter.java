@@ -20,6 +20,7 @@ import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Set;
@@ -65,16 +66,24 @@ public class AccountsLedgerHttpAdapter implements JournalEntryPort {
     private final Supplier<String> bearerToken;
     private final int maxAttempts;
     private final String path;
+    private final Duration retryBackoff;
 
     public AccountsLedgerHttpAdapter(RestClient restClient, Supplier<String> bearerToken, int maxAttempts) {
-        this(restClient, bearerToken, maxAttempts, DEFAULT_PATH);
+        this(restClient, bearerToken, maxAttempts, DEFAULT_PATH, Duration.ZERO);
     }
 
     public AccountsLedgerHttpAdapter(RestClient restClient, Supplier<String> bearerToken, int maxAttempts, String path) {
+        this(restClient, bearerToken, maxAttempts, path, Duration.ZERO);
+    }
+
+    /** The wait before a retry doubles with each attempt: retryBackoff, 2 x retryBackoff, ... */
+    public AccountsLedgerHttpAdapter(RestClient restClient, Supplier<String> bearerToken, int maxAttempts, String path,
+                                     Duration retryBackoff) {
         this.restClient = restClient;
         this.bearerToken = bearerToken;
         this.maxAttempts = Math.max(1, maxAttempts);
         this.path = path;
+        this.retryBackoff = retryBackoff;
     }
 
     @Override
@@ -88,40 +97,54 @@ public class AccountsLedgerHttpAdapter implements JournalEntryPort {
                     .body(request)
                     .retrieve()
                     .toEntity(JournalEntryResponse.class);
-                return receipt(response);
+                return receipt(response, request.reference());
             } catch (HttpClientErrorException error) {
                 int status = error.getStatusCode().value();
                 String code = errorCode(error);
                 if (status == HttpStatus.CONFLICT.value() && isRetryable(code)) {
                     if (attempt < maxAttempts) {
                         log.info("Accounts ledger reported {} on a journal entry; retrying with the same reference", code);
+                        pause(attempt);
                         continue;
                     }
                     throw new AccountsLedgerUnavailableException("Accounts ledger kept reporting " + code
-                        + " for the journal entry", error);
+                        + " for the journal entry");
                 }
                 if (isRejection(status, code)) {
                     log.info("Accounts ledger refused a journal entry: {} {}", status, code);
                     throw new JournalEntryRejectedException(code, "Accounts ledger answered " + status + " " + code
-                        + " to the journal entry; not retried", error);
+                        + " to the journal entry; not retried");
                 }
                 throw new AccountsLedgerUnavailableException("Accounts ledger answered " + status + " " + code
-                    + " to the journal entry", error);
+                    + " to the journal entry");
             } catch (RestClientResponseException serverError) {
                 throw new AccountsLedgerUnavailableException("Accounts ledger answered " + serverError.getStatusCode().value()
-                    + " to the journal entry", serverError);
+                    + " to the journal entry");
             } catch (RestClientException unavailable) {
                 throw new AccountsLedgerUnavailableException("Accounts ledger unavailable for the journal entry", unavailable);
             }
         }
     }
 
-    private static JournalEntryReceipt receipt(ResponseEntity<JournalEntryResponse> response) {
+    private void pause(int attempt) {
+        try {
+            Thread.sleep(retryBackoff.multipliedBy(1L << (attempt - 1)).toMillis());
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new AccountsLedgerUnavailableException("Accounts ledger retry interrupted", interrupted);
+        }
+    }
+
+    /** Nothing is trusted unless the booking names the reference that was sent. */
+    private static JournalEntryReceipt receipt(ResponseEntity<JournalEntryResponse> response, String reference) {
         JournalEntryResponse body = response.getBody();
         if (!response.getStatusCode().is2xxSuccessful() || body == null || body.journalEntryId() == null
                 || body.journalEntryId().isBlank() || body.bookedAt() == null) {
             throw new AccountsLedgerUnavailableException("Accounts ledger answered " + response.getStatusCode().value()
                 + " with no usable booking for the journal entry");
+        }
+        if (!reference.equals(body.reference())) {
+            throw new AccountsLedgerUnavailableException("Accounts ledger booked a journal entry for another reference");
         }
         boolean replay = response.getStatusCode().value() == HttpStatus.OK.value() || Boolean.TRUE.equals(body.replay());
         log.debug("Journal entry {} {}", body.journalEntryId(), replay ? "replayed" : "booked");
@@ -177,6 +200,6 @@ public class AccountsLedgerHttpAdapter implements JournalEntryPort {
 
     /** JournalEntryResponse: only what the receipt needs; any other field is ignored. */
     @JsonIgnoreProperties(ignoreUnknown = true)
-    record JournalEntryResponse(String journalEntryId, Instant bookedAt, Boolean replay) {
+    record JournalEntryResponse(String journalEntryId, String reference, Instant bookedAt, Boolean replay) {
     }
 }
