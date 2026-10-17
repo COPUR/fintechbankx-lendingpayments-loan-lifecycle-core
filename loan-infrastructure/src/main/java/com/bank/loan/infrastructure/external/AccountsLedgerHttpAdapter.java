@@ -18,6 +18,7 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
+import org.springframework.web.client.UnknownContentTypeException;
 
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -61,6 +62,10 @@ public class AccountsLedgerHttpAdapter implements JournalEntryPort {
     static final String DEFAULT_PATH = "/api/v1/journal-entries";
     private static final Pattern ERROR_CODE = Pattern.compile("\"code\"\\s*:\\s*\"([A-Z_]+)\"");
     private static final Set<String> REFUSALS = Set.of("INSUFFICIENT_FUNDS", "ACCOUNT_NOT_OPERATIONAL", "UNBALANCED_ENTRY");
+    /** Retries stop at this many attempts, whatever the configuration says. */
+    static final int MAX_ATTEMPTS_CEILING = 10;
+    /** No single wait before a retry is longer than this, whatever the configuration says. */
+    static final Duration MAX_RETRY_WAIT = Duration.ofSeconds(5);
 
     private final RestClient restClient;
     private final Supplier<String> bearerToken;
@@ -76,14 +81,15 @@ public class AccountsLedgerHttpAdapter implements JournalEntryPort {
         this(restClient, bearerToken, maxAttempts, path, Duration.ZERO);
     }
 
-    /** The wait before a retry doubles with each attempt: retryBackoff, 2 x retryBackoff, ... */
+    /** The wait before a retry doubles with each attempt: retryBackoff, 2 x retryBackoff, ... up to MAX_RETRY_WAIT. */
     public AccountsLedgerHttpAdapter(RestClient restClient, Supplier<String> bearerToken, int maxAttempts, String path,
                                      Duration retryBackoff) {
         this.restClient = restClient;
         this.bearerToken = bearerToken;
-        this.maxAttempts = Math.max(1, maxAttempts);
+        this.maxAttempts = Math.min(Math.max(1, maxAttempts), MAX_ATTEMPTS_CEILING);
         this.path = path;
-        this.retryBackoff = retryBackoff;
+        this.retryBackoff = retryBackoff.isNegative() ? Duration.ZERO
+            : retryBackoff.compareTo(MAX_RETRY_WAIT) > 0 ? MAX_RETRY_WAIT : retryBackoff;
     }
 
     @Override
@@ -120,15 +126,25 @@ public class AccountsLedgerHttpAdapter implements JournalEntryPort {
             } catch (RestClientResponseException serverError) {
                 throw new AccountsLedgerUnavailableException("Accounts ledger answered " + serverError.getStatusCode().value()
                     + " to the journal entry");
+            } catch (UnknownContentTypeException unreadable) {
+                // The answer's body may hold the ledger's text: it is not kept as a cause.
+                throw new AccountsLedgerUnavailableException("Accounts ledger answered in a content type the journal entry cannot read");
             } catch (RestClientException unavailable) {
                 throw new AccountsLedgerUnavailableException("Accounts ledger unavailable for the journal entry", unavailable);
             }
         }
     }
 
+    /** The wait before retry {@code attempt}: retryBackoff doubled per earlier attempt, never above MAX_RETRY_WAIT. */
+    static Duration waitBeforeRetry(Duration retryBackoff, int attempt) {
+        int doublings = Math.min(attempt - 1, MAX_ATTEMPTS_CEILING);
+        Duration wait = retryBackoff.multipliedBy(1L << doublings);
+        return wait.compareTo(MAX_RETRY_WAIT) > 0 ? MAX_RETRY_WAIT : wait;
+    }
+
     private void pause(int attempt) {
         try {
-            Thread.sleep(retryBackoff.multipliedBy(1L << (attempt - 1)).toMillis());
+            Thread.sleep(waitBeforeRetry(retryBackoff, attempt).toMillis());
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new AccountsLedgerUnavailableException("Accounts ledger retry interrupted", interrupted);

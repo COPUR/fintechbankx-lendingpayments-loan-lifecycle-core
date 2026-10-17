@@ -244,7 +244,21 @@ class AccountsLedgerHttpAdapterTest {
         server.expect(requestTo(JOURNAL)).andRespond(withStatus(HttpStatus.CREATED).contentType(MediaType.APPLICATION_JSON)
             .body(BOOKED.replace("\"reference\":\"LOAN-HTTP-7\"", "\"reference\":\"LOAN-OTHER-9\"")));
 
-        assertThatThrownBy(() -> adapter.post(ENTRY)).isInstanceOf(AccountsLedgerUnavailableException.class);
+        assertThatThrownBy(() -> adapter.post(ENTRY))
+            .isInstanceOf(AccountsLedgerUnavailableException.class)
+            .hasNoCause()
+            .message().doesNotContain("LOAN-HTTP-7", "LOAN-OTHER-9");
+    }
+
+    @Test
+    void anAnswerInAContentTypeTheAdapterCannotReadIsUnavailableWithNoCause() {
+        server.expect(requestTo(JOURNAL)).andRespond(withStatus(HttpStatus.CREATED)
+            .contentType(MediaType.TEXT_PLAIN).body("account ACC-CUSTOMER-1 has 12.34 available"));
+
+        assertThatThrownBy(() -> adapter.post(ENTRY))
+            .isInstanceOf(AccountsLedgerUnavailableException.class)
+            .hasNoCause()
+            .message().doesNotContain("ACC-CUSTOMER-1", "12.34");
     }
 
     @Test
@@ -270,5 +284,27 @@ class AccountsLedgerHttpAdapterTest {
         paced.post(ENTRY);
 
         assertThat(Duration.ofNanos(System.nanoTime() - startedAt)).isGreaterThanOrEqualTo(Duration.ofMillis(45));
+    }
+
+    @Test
+    void theWaitDoublesWithEachRetryAndNeverPassesTheCap() {
+        assertThat(AccountsLedgerHttpAdapter.waitBeforeRetry(Duration.ofMillis(100), 1)).isEqualTo(Duration.ofMillis(100));
+        assertThat(AccountsLedgerHttpAdapter.waitBeforeRetry(Duration.ofMillis(100), 2)).isEqualTo(Duration.ofMillis(200));
+        assertThat(AccountsLedgerHttpAdapter.waitBeforeRetry(Duration.ofMillis(100), 3)).isEqualTo(Duration.ofMillis(400));
+        assertThat(AccountsLedgerHttpAdapter.waitBeforeRetry(Duration.ofSeconds(1), 4))
+            .isEqualTo(AccountsLedgerHttpAdapter.MAX_RETRY_WAIT);
+        assertThat(AccountsLedgerHttpAdapter.waitBeforeRetry(Duration.ofMillis(100), 1_000))
+            .isEqualTo(AccountsLedgerHttpAdapter.MAX_RETRY_WAIT);
+    }
+
+    @Test
+    void theRetryCountIsCappedAtTheCeilingWhateverTheConfiguration() {
+        AccountsLedgerHttpAdapter unbounded = new AccountsLedgerHttpAdapter(builder.build(), () -> "service-token", 1_000);
+        server.expect(ExpectedCount.times(AccountsLedgerHttpAdapter.MAX_ATTEMPTS_CEILING), requestTo(JOURNAL))
+            .andRespond(withStatus(HttpStatus.CONFLICT).contentType(MediaType.APPLICATION_JSON)
+                .body(REFUSED.formatted("CONCURRENT_UPDATE")));
+
+        assertThatThrownBy(() -> unbounded.post(ENTRY)).isInstanceOf(AccountsLedgerUnavailableException.class);
+        server.verify();
     }
 }
