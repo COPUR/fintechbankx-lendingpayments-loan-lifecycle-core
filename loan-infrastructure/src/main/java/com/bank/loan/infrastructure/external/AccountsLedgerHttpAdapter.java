@@ -17,6 +17,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientResponseException;
 import org.springframework.web.client.UnknownContentTypeException;
 
@@ -67,11 +68,20 @@ public class AccountsLedgerHttpAdapter implements JournalEntryPort {
     /** No single wait before a retry is longer than this, whatever the configuration says. */
     static final Duration MAX_RETRY_WAIT = Duration.ofSeconds(5);
 
+    /** Waits before a retry. Tests replace it to read the waits without sleeping. */
+    @FunctionalInterface
+    interface RetryPause {
+        RetryPause SLEEP = wait -> Thread.sleep(wait.toMillis());
+
+        void await(Duration wait) throws InterruptedException;
+    }
+
     private final RestClient restClient;
     private final Supplier<String> bearerToken;
     private final int maxAttempts;
     private final String path;
     private final Duration retryBackoff;
+    private final RetryPause retryPause;
 
     public AccountsLedgerHttpAdapter(RestClient restClient, Supplier<String> bearerToken, int maxAttempts) {
         this(restClient, bearerToken, maxAttempts, DEFAULT_PATH, Duration.ZERO);
@@ -84,12 +94,17 @@ public class AccountsLedgerHttpAdapter implements JournalEntryPort {
     /** The wait before a retry doubles with each attempt: retryBackoff, 2 x retryBackoff, ... up to MAX_RETRY_WAIT. */
     public AccountsLedgerHttpAdapter(RestClient restClient, Supplier<String> bearerToken, int maxAttempts, String path,
                                      Duration retryBackoff) {
+        this(restClient, bearerToken, maxAttempts, path, retryBackoff, RetryPause.SLEEP);
+    }
+
+    AccountsLedgerHttpAdapter(RestClient restClient, Supplier<String> bearerToken, int maxAttempts, String path,
+                              Duration retryBackoff, RetryPause retryPause) {
         this.restClient = restClient;
         this.bearerToken = bearerToken;
         this.maxAttempts = Math.min(Math.max(1, maxAttempts), MAX_ATTEMPTS_CEILING);
         this.path = path;
-        this.retryBackoff = retryBackoff.isNegative() ? Duration.ZERO
-            : retryBackoff.compareTo(MAX_RETRY_WAIT) > 0 ? MAX_RETRY_WAIT : retryBackoff;
+        this.retryBackoff = retryBackoff;
+        this.retryPause = retryPause;
     }
 
     @Override
@@ -129,22 +144,36 @@ public class AccountsLedgerHttpAdapter implements JournalEntryPort {
             } catch (UnknownContentTypeException unreadable) {
                 // The answer's body may hold the ledger's text: it is not kept as a cause.
                 throw new AccountsLedgerUnavailableException("Accounts ledger answered in a content type the journal entry cannot read");
-            } catch (RestClientException unavailable) {
-                throw new AccountsLedgerUnavailableException("Accounts ledger unavailable for the journal entry", unavailable);
+            } catch (ResourceAccessException transport) {
+                throw new AccountsLedgerUnavailableException("Accounts ledger unavailable for the journal entry", transport);
+            } catch (RestClientException unreadable) {
+                // A malformed answer can carry the ledger's text in this exception's message: no cause is kept.
+                throw new AccountsLedgerUnavailableException("Accounts ledger unavailable for the journal entry");
             }
         }
     }
 
-    /** The wait before retry {@code attempt}: retryBackoff doubled per earlier attempt, never above MAX_RETRY_WAIT. */
+    /** A negative backoff waits nothing; an oversized one waits the cap. */
+    static Duration boundedBackoff(Duration retryBackoff) {
+        if (retryBackoff.isNegative()) {
+            return Duration.ZERO;
+        }
+        return retryBackoff.compareTo(MAX_RETRY_WAIT) > 0 ? MAX_RETRY_WAIT : retryBackoff;
+    }
+
+    /**
+     * The wait before retry {@code attempt}: the backoff doubled per earlier attempt, never above MAX_RETRY_WAIT.
+     * Safe for any input: an attempt below 1 is the first retry, and the backoff is bounded here too.
+     */
     static Duration waitBeforeRetry(Duration retryBackoff, int attempt) {
-        int doublings = Math.min(attempt - 1, MAX_ATTEMPTS_CEILING);
-        Duration wait = retryBackoff.multipliedBy(1L << doublings);
+        int doublings = (int) Math.clamp(attempt - 1L, 0, MAX_ATTEMPTS_CEILING);
+        Duration wait = boundedBackoff(retryBackoff).multipliedBy(1L << doublings);
         return wait.compareTo(MAX_RETRY_WAIT) > 0 ? MAX_RETRY_WAIT : wait;
     }
 
     private void pause(int attempt) {
         try {
-            Thread.sleep(waitBeforeRetry(retryBackoff, attempt).toMillis());
+            retryPause.await(waitBeforeRetry(retryBackoff, attempt));
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new AccountsLedgerUnavailableException("Accounts ledger retry interrupted", interrupted);

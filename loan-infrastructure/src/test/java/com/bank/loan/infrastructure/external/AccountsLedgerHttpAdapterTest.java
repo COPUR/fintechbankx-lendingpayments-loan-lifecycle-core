@@ -20,6 +20,7 @@ import org.springframework.web.client.RestClient;
 
 import java.net.SocketTimeoutException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.time.Instant;
 import java.util.Currency;
 import java.util.List;
@@ -306,5 +307,55 @@ class AccountsLedgerHttpAdapterTest {
 
         assertThatThrownBy(() -> unbounded.post(ENTRY)).isInstanceOf(AccountsLedgerUnavailableException.class);
         server.verify();
+    }
+
+    @Test
+    void aWaitIsSafeForAnAttemptBelowOneAndForANegativeBackoff() {
+        assertThat(AccountsLedgerHttpAdapter.waitBeforeRetry(Duration.ofMillis(100), 0)).isEqualTo(Duration.ofMillis(100));
+        assertThat(AccountsLedgerHttpAdapter.waitBeforeRetry(Duration.ofMillis(100), Integer.MIN_VALUE))
+            .isEqualTo(Duration.ofMillis(100));
+        assertThat(AccountsLedgerHttpAdapter.waitBeforeRetry(Duration.ofMillis(-5), 1)).isEqualTo(Duration.ZERO);
+        assertThat(AccountsLedgerHttpAdapter.waitBeforeRetry(Duration.ofHours(1), 0))
+            .isEqualTo(AccountsLedgerHttpAdapter.MAX_RETRY_WAIT);
+    }
+
+    @Test
+    void aNegativeBackoffIsWaitedAsZeroWhenTheAdapterIsBuilt() {
+        assertThat(waitsBeforeOneRetry(Duration.ofMillis(-200))).containsExactly(Duration.ZERO);
+    }
+
+    @Test
+    void anOversizedBackoffIsWaitedAsTheCapWhenTheAdapterIsBuilt() {
+        assertThat(waitsBeforeOneRetry(Duration.ofHours(1))).containsExactly(AccountsLedgerHttpAdapter.MAX_RETRY_WAIT);
+    }
+
+    @Test
+    void aModestBackoffIsWaitedAsConfiguredWhenTheAdapterIsBuilt() {
+        assertThat(waitsBeforeOneRetry(Duration.ofMillis(200))).containsExactly(Duration.ofMillis(200));
+    }
+
+    @Test
+    void aMalformedAnswerIsUnavailableWithNoCause() {
+        server.expect(requestTo(JOURNAL)).andRespond(withStatus(HttpStatus.CREATED)
+            .contentType(MediaType.APPLICATION_JSON).body("{\"journalEntryId\": ACC-CUSTOMER-1 12.34}"));
+
+        assertThatThrownBy(() -> adapter.post(ENTRY))
+            .isInstanceOf(AccountsLedgerUnavailableException.class)
+            .hasNoCause()
+            .message().doesNotContain("ACC-CUSTOMER-1", "12.34");
+    }
+
+    /** The waits the adapter takes before its one retry, read through the pause seam instead of sleeping. */
+    private List<Duration> waitsBeforeOneRetry(Duration retryBackoff) {
+        List<Duration> waits = new ArrayList<>();
+        AccountsLedgerHttpAdapter paused = new AccountsLedgerHttpAdapter(builder.build(), () -> "service-token", 2,
+            AccountsLedgerHttpAdapter.DEFAULT_PATH, retryBackoff, waits::add);
+        server.expect(requestTo(JOURNAL)).andRespond(withStatus(HttpStatus.CONFLICT)
+            .contentType(MediaType.APPLICATION_JSON).body(REFUSED.formatted("CONCURRENT_UPDATE")));
+        server.expect(requestTo(JOURNAL)).andRespond(withStatus(HttpStatus.CREATED)
+            .contentType(MediaType.APPLICATION_JSON).body(BOOKED));
+
+        paused.post(ENTRY);
+        return waits;
     }
 }

@@ -7,7 +7,7 @@
 set -e
 : "${GITHUB_SHA:?GITHUB_SHA must be set (the runner sets it)}"
 # PyYAML for the checks below: pinned by hash, installed from wheels only, into a venv under RUNNER_TEMP
-# when the runner's Python lacks it (PEP 668 blocks pip --user on the fbx-ci Ubuntu VM).
+# when the runner's Python lacks it (PEP 668 blocks pip --user on externally managed Pythons, such as Ubuntu 24.04).
 if ! python3 -c "import yaml" 2>/dev/null; then
   : "${RUNNER_TEMP:?RUNNER_TEMP must be set: the PyYAML venv is created under the runner temp directory}"
   venv="$RUNNER_TEMP/fbx-chart-probes-venv"
