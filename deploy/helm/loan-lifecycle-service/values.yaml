@@ -124,6 +124,9 @@ config:
   OIDC_AUDIENCE: svc-ln-loan-lifecycle   # tokens must carry this in aud
   SERVICE_CLIENT_ID: svc-ln-loan-lifecycle
   CUSTOMER_SERVICE_BASE_URL: ""   # REQUIRED e.g. http://customer-profile-kyc-service.customer.svc.cluster.local:8080
+  # REQUIRED svc-acc-accounts-ledger (ADR-030), POST /api/v1/journal-entries. In the cluster:
+  # http://accounts-ledger-service.corebanking.svc.cluster.local:8080
+  ACCOUNTS_SERVICE_BASE_URL: ""
   # REQUIRED http or in-memory. Switch to http only after the customer
   # cutover has passed its step 5 (runbook precondition table).
   CUSTOMER_CREDIT_ADAPTER: ""

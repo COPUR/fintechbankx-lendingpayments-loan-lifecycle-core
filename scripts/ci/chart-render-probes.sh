@@ -18,6 +18,7 @@ args="$args --set config.OIDC_ISSUER_URI=https://ci-idp/realms/fintechbankx"
 args="$args --set config.OIDC_JWK_SET_URI=https://ci-idp/realms/fintechbankx/protocol/openid-connect/certs"
 args="$args --set config.OIDC_TOKEN_URI=https://ci-idp/realms/fintechbankx/protocol/openid-connect/token"
 args="$args --set config.CUSTOMER_SERVICE_BASE_URL=http://ci-customer:8080"
+args="$args --set config.ACCOUNTS_SERVICE_BASE_URL=http://ci-accounts:8080"
 args="$args --set config.CUSTOMER_CREDIT_ADAPTER=http --set config.CUSTOMER_CREDIT_LEDGER_CURRENCY=XTS"
 helm lint "$chart" $args
 helm template ci "$chart" $args > /dev/null
@@ -169,6 +170,7 @@ helm template ci "$chart" $args --set kafka.profile=kafka-strimzi --set-string c
 # and other TLS parameter names, -Djdk.tls.* / -Djava.security.properties / hostname verification in a
 # JVM option, '$(' and '${' references, envFrom, DB_URL in another spelling, every spring.config.* name,
 # and the Kafka protocol matched to the runtime of kafka.profile; plus this chart's own rules.
+refuse 'config.ACCOUNTS_SERVICE_BASE_URL is required' --set-string config.ACCOUNTS_SERVICE_BASE_URL=
 refuse 'config.SPRING_SSL_BUNDLE_PEM_DB_TRUSTSTORE_CERTIFICATE is not allowed' --set-string config.SPRING_SSL_BUNDLE_PEM_DB_TRUSTSTORE_CERTIFICATE=x
 refuse 'config.SPRING_KAFKA_SSL_BUNDLE is not allowed' --set-string config.SPRING_KAFKA_SSL_BUNDLE=other
 refuse 'config.spring.ssl.bundle.jks.db.truststore.location is not allowed' --set-string 'config.spring\.ssl\.bundle\.jks\.db\.truststore\.location=/tmp/x'
@@ -329,7 +331,13 @@ fi
 helm template ci "$chart" $args | python3 scripts/ci/externalsecret-scope.py loan-lifecycle-service dev
 # Secret naming contract, the check copied from customer-profile-kyc-core 58f7369:
 # each ExternalSecret is labelled with the service account and reads only <env>/<SA>/ keys.
-python3 -c "import yaml" 2>/dev/null || python3 -m pip install --user pyyaml==6.0.2
+# PyYAML for the checks below, in a throwaway venv: the runner's Python may be externally managed,
+# where pip --user fails.
+if ! python3 -c "import yaml" 2>/dev/null; then
+  pyyaml_venv="$(mktemp -d)/pyyaml"
+  python3 -m venv "$pyyaml_venv" && "$pyyaml_venv/bin/pip" install --quiet pyyaml==6.0.2 || exit 1
+  PATH="$pyyaml_venv/bin:$PATH"
+fi
 # Template interpolation: every key and value is quoted, so a value with a newline stays one value and a
 # key with a newline is refused (fbx.validateKeyNames) instead of opening a second key.
 tmp="$(mktemp -d)"
@@ -424,7 +432,6 @@ if helm template ci "$chart" --set image.repository=ci/x --set image.tag=ci > /d
 fi
 # Platform round 7: the migration Job runs as its own hook ServiceAccount (no token, no IAM
 # role), created before the Job, never the chart's account or the namespace default.
-python3 -c "import yaml" 2>/dev/null || python3 -m pip install --user pyyaml==6.0.2
 helm template ci "$chart" $args | python3 -c '
 import sys, yaml
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
