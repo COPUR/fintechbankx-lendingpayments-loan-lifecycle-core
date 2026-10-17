@@ -155,7 +155,7 @@ commit. Waivers go in `api/asyncapi/<spec-name>.accepted-breaking.txt` and need 
 
 `deploy/helm/loan-lifecycle-service/templates/_fbx_helpers.tpl` is a byte-identical copy, without a header, of the
 shared chart's helpers: source repository `COPUR/fintechbankx-platform-delivery-iac-cicd-templates`, path
-`charts/fintechbankx-service/templates/_helpers.tpl`, commit `6b6c317` (its datasource/TLS guard is `fbx.guard`, with
+`charts/fintechbankx-service/templates/_helpers.tpl`, commit `73e1881` (its datasource/TLS guard is `fbx.guard`, with
 `fbx.validateEnvSources`, `fbx.validateDatabaseTls`, `fbx.validateKafkaTls`, `fbx.validateKafkaTlsValue`,
 `fbx.validateSecretNames`, `fbx.validateKeyNames`, `fbx.validateDatabaseCa`, `fbx.validateJdbcUrl`,
 `fbx.validateJvmOptions`, `fbx.datasourceOverrideName`, `fbx.canonicalName`, `fbx.propertyName` and
@@ -166,8 +166,8 @@ an `fbx.*` template, or when `deployment.yaml` or `migration-job.yaml` does not 
 
 | Copy | sha256 |
 |---|---|
-| `deploy/helm/loan-lifecycle-service/templates/_fbx_helpers.tpl` | `8ba2e4a11ead019c25bf0a01e4fe4bbabb6fef0e1980e5fa828ccb9f5673f8ba` |
-| `scripts/ci/verify-vendored-guard.sh` | `430a88e1a6939d4a40dc32f0c6d201775f64e717e5eeb39b0348c8f8c0435eac` |
+| `deploy/helm/loan-lifecycle-service/templates/_fbx_helpers.tpl` | `4f2cdfe056f5afce0297f699c8b66cb80dc42e8e311759bf4a973f8a15b28b2d` |
+| `scripts/ci/verify-vendored-guard.sh` | `76fc07d2e189f9d412a6e6bf94e9f55839188375704dd97e7106354be205aa94` |
 
 Do not edit either: copy the reference again and update the commit and the sum here and in
 `.github/workflows/deployability.yml` (the step "Vendored platform guard" names the source repository, path and commit

@@ -52,7 +52,7 @@ Usage: include "loan.remoteKey" (list "externalSecret.remoteSecretName" .Values.
 
 {{- /*
 Values guard (round 6, guardrail 4a; re-vendored in round 7). The reference guard
-is vendored unchanged from cicd-templates 6b6c317 (templates/_fbx_helpers.tpl,
+is vendored unchanged from cicd-templates 73e1881 (templates/_fbx_helpers.tpl,
 sha256 pinned in README "Chart guard" and checked by the deploy/helm job with
 scripts/ci/verify-vendored-guard.sh); fbx.guard reads only .Values, so this
 helper hands it an adapter dict shaped like the shared chart's values and

@@ -72,7 +72,7 @@ podDisruptionBudget:
 # no extraEnv, envFrom or javaToolOptions: every pod setting goes through
 # config, and the ExternalSecret keys are fixed in the templates. The chart
 # refuses to render (round 6, guardrail 4a) through the reference guard
-# vendored unchanged from cicd-templates 6b6c317 (templates/_fbx_helpers.tpl,
+# vendored unchanged from cicd-templates 73e1881 (templates/_fbx_helpers.tpl,
 # fbx.guard; README "Chart guard") plus this chart's own rules
 # (templates/_helpers.tpl loan.guardValues), whatever the case or spelling of
 # a key (Spring's relaxed binding: '.', '-', '_', '[]', indexed _0):
