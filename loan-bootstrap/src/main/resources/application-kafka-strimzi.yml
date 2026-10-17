@@ -1,0 +1,16 @@
+# In-cluster Strimzi (SPRING_PROFILES_ACTIVE=kafka-strimzi): mutual TLS with
+# the KafkaUser certificate of svc-ln-loan-lifecycle (KafkaUser Secret
+# user.crt -> KAFKA_TLS_CERT, user.key -> KAFKA_TLS_KEY). KAFKA_TLS_CA must be
+# the CLUSTER CA (Secret <cluster>-cluster-ca-cert, key ca.crt), which signs
+# the brokers' certificates; the KafkaUser Secret's ca.crt is the clients CA
+# and would not verify the brokers.
+spring:
+  kafka:
+    security:
+      protocol: SSL
+    ssl:
+      key-store-type: PEM
+      trust-store-type: PEM
+      key-store-certificate-chain: ${KAFKA_TLS_CERT}
+      key-store-key: ${KAFKA_TLS_KEY}
+      trust-store-certificates: ${KAFKA_TLS_CA}

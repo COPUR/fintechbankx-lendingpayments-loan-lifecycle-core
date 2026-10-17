@@ -10,7 +10,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class CreateLoanRequestTest {
 
     @Test
-    void getPrincipalAsMoneyShouldUseProvidedCurrencyOrDefaultUsd() {
+    void getPrincipalAsMoneyUsesTheGivenCurrencyAndNeverAssumesOne() {
         CreateLoanRequest withCurrency = new CreateLoanRequest(
             "CUST-001",
             new BigDecimal("10000.00"),
@@ -27,7 +27,12 @@ class CreateLoanRequestTest {
         );
 
         assertThat(withCurrency.getPrincipalAsMoney().getCurrency().getCurrencyCode()).isEqualTo("AED");
-        assertThat(withoutCurrency.getPrincipalAsMoney().getCurrency().getCurrencyCode()).isEqualTo("USD");
+        assertThatThrownBy(withoutCurrency::getPrincipalAsMoney)
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("Currency is required");
+        assertThatThrownBy(withoutCurrency::validate)
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("Currency is required");
     }
 
     @Test

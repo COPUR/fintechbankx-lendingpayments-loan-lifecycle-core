@@ -14,7 +14,7 @@ class LoanApplicationExceptionsTest {
             "AED 2500.00"
         );
 
-        assertThat(ex.getMessage()).contains("CUST-EX-001");
+        assertThat(ex.getMessage()).doesNotContain("CUST-EX-001");   // no identifiers in messages (API body, logs)
         assertThat(ex.getMessage()).contains("Requested");
         assertThat(ex.getMessage()).contains("Available");
     }
@@ -23,7 +23,7 @@ class LoanApplicationExceptionsTest {
     void loanNotFoundExceptionFactoryShouldBuildDetailedMessage() {
         LoanNotFoundException ex = LoanNotFoundException.withId("LOAN-EX-001");
 
-        assertThat(ex.getMessage()).isEqualTo("Loan not found with ID: LOAN-EX-001");
+        assertThat(ex.getMessage()).isEqualTo("Loan not found");
     }
 
     @Test
@@ -31,7 +31,7 @@ class LoanApplicationExceptionsTest {
         RuntimeException cause = new RuntimeException("db unavailable");
         LoanNotFoundException ex = new LoanNotFoundException("LOAN-EX-002", cause);
 
-        assertThat(ex.getMessage()).contains("LOAN-EX-002");
+        assertThat(ex.getMessage()).doesNotContain("LOAN-EX-002");
         assertThat(ex.getCause()).isSameAs(cause);
     }
 }

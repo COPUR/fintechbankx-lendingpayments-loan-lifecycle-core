@@ -9,11 +9,12 @@ public class LoanNotFoundException extends RuntimeException {
         super(message);
     }
     
+    /** No identifier in the message: it reaches API bodies and logs. */
     public LoanNotFoundException(String loanId, Throwable cause) {
-        super("Loan not found with ID: " + loanId, cause);
+        super("Loan not found", cause);
     }
-    
+
     public static LoanNotFoundException withId(String loanId) {
-        return new LoanNotFoundException("Loan not found with ID: " + loanId);
+        return new LoanNotFoundException("Loan not found");
     }
 }

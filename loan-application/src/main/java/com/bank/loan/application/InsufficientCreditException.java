@@ -13,9 +13,10 @@ public class InsufficientCreditException extends RuntimeException {
         super(message, cause);
     }
     
+    /** The message carries amounts only, never the customer id (it reaches API bodies and logs). */
     public static InsufficientCreditException forCustomer(String customerId, String requestedAmount, String availableAmount) {
         return new InsufficientCreditException(
-            String.format("Customer %s has insufficient credit. Requested: %s, Available: %s", 
-                customerId, requestedAmount, availableAmount));
+            String.format("The customer has insufficient credit. Requested: %s, Available: %s",
+                requestedAmount, availableAmount));
     }
 }
