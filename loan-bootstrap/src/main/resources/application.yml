@@ -92,14 +92,16 @@ spring:
             authorization-grant-type: client_credentials
             client-authentication-method: client_secret_basic
           # Same client, second registration: the journal-entry calls to the
-          # accounts ledger (journal.client-registration-id). The ledger expects
-          # svc-acc-accounts-ledger in aud (Keycloak audience mapper on this client).
+          # accounts ledger (journal.client-registration-id). The optional client
+          # scope aud-svc-acc-accounts-ledger puts svc-acc-accounts-ledger in aud;
+          # only this registration requests it.
           accounts-ledger:
             provider: fintechbankx
             client-id: ${SERVICE_CLIENT_ID:svc-ln-loan-lifecycle}
             client-secret: ${SERVICE_CLIENT_SECRET:}
             authorization-grant-type: client_credentials
             client-authentication-method: client_secret_basic
+            scope: aud-svc-acc-accounts-ledger
         provider:
           fintechbankx:
             token-uri: ${OIDC_TOKEN_URI:http://localhost:8180/realms/fintechbankx/protocol/openid-connect/token}
