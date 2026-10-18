@@ -69,13 +69,15 @@ with the statements in `V4__grant_runtime_role_least_privilege.sql` before switc
   principal less the principal part paid. The guard changes no data.
 - **Per-environment check, must pass before cutover.** For each environment, run the guard against that
   environment's loan service database and require exit 0:
-  `PGOPTIONS='-c default_transaction_read_only=on' psql "<loan service conninfo>" -v ON_ERROR_STOP=1 -f db/backfill/00_guard_old_schedule_balance.sql`.
-  The read-only setting keeps the check from writing even on the schema owner's credential. It is a session
+  `PGOPTIONS='-c default_transaction_read_only=on' psql "<loan service conninfo>" -v ON_ERROR_STOP=1 -f db/backfill/00_assert_read_only_session.sql -f db/backfill/00_guard_old_schedule_balance.sql`.
+  The read-only setting keeps the check from writing even on the schema owner's credential. The first file
+  stops the check if the session is not read-only: an `options=` keyword in the conninfo replaces PGOPTIONS,
+  so without that assertion the command would run on a writable session. It is a session
   default, not a privilege boundary: once Platform provides a read-only role for the loan service database,
   connect as that role instead. A refusal ("BACKFILL REFUSED: <n> loan(s) hold a balance written under the
   old schedule rule") gives the row count; those rows need a decision (recompute or reload) before the
-  backfill runs. Record each environment's result (environment, date, operator, exit code, output) in the
-  acceptance checklist in section 6. No environment has been checked yet, so none is recorded as clean.
+  backfill runs. Record each environment's result (environment, date, the role or change-ticket reference,
+  exit code, output) in the acceptance checklist in section 6. No environment has been checked yet, so none is recorded as clean.
 - Exports `loans`, `loan_installments`, COMPLETED `payments` and their `payment_installments` in one
   read-only snapshot (no customer columns), stages and transforms them
   (`02_transform_into_loan_service.sql`, mapping listed at its top).
@@ -193,7 +195,7 @@ Rollback triggers (measured from the start of step 2 (d), any one):
 - [ ] DBA bootstrap of `loan_lifecycle_owner` and `loan_lifecycle_app` per environment, secrets filled
 - [ ] Mesh team requests A (gateway route), B (Aurora, MSK, STS egress), C (callee ALLOW rules) applied, plus the ALLOW rules for the callers in README
 - [ ] Production backfill and reconciliation report attached here
-- [ ] Old-schedule-balance guard passed per environment before cutover (section 2): one line per environment with date, operator, exit code and output. No environment has been checked yet.
+- [ ] Old-schedule-balance guard passed per environment before cutover (section 2): one line per environment with date, the role or change-ticket reference, exit code and output. No environment has been checked yet.
 
 ## 7. Parked outbox events
 

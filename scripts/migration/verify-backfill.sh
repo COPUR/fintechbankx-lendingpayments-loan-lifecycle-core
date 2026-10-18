@@ -42,14 +42,16 @@ for migration in $(ls "$root"/loan-infrastructure/src/main/resources/db/migratio
     | PGOPTIONS="-c search_path=sc_ln_loan_lifecycle" psql_q -d "$dst_db" -f -
 done
 
-expect_guard_refusal() {
-  local label="$1" err; shift
+# A refusal case passes only when the refusal carries its own check's message, so
+# a refusal by another check, or a run that goes through, fails the rehearsal.
+expect_refusal_by() {
+  local label="$1" pattern="$2" err; shift 2
   if err="$("$@" 2>&1 > /dev/null)"; then
     echo "FAIL $label: the backfill ran" >&2
     exit 1
   fi
-  if ! grep -q "BACKFILL REFUSED: [0-9]* loan(s) hold a balance written under the old schedule rule" <<< "$err"; then
-    echo "FAIL $label: refused, but not by the guard: $err" >&2
+  if ! grep -q "$pattern" <<< "$err"; then
+    echo "FAIL $label: refused, but not by the expected check: $err" >&2
     exit 1
   fi
   echo "ok   $label"
@@ -80,11 +82,13 @@ B="22222222-2222-2222-2222-222222222222"
 C="33333333-3333-3333-3333-333333333333"
 D="44444444-4444-4444-4444-444444444444"
 E="55555555-5555-5555-5555-555555555555"
+guard_refusal="BACKFILL REFUSED: [0-9][0-9]* loan(s) hold a balance written under the old schedule rule"
+inflight_refusal="BACKFILL REFUSED: [0-9][0-9]* monolith payment(s) are INITIATED or PROCESSING"
 
 echo "--- preconditions"
 expect_refusal "no currency, no run" "$backfill" "dbname=$src_db" "dbname=$dst_db"
 psql_q -d "$src_db" -c "INSERT INTO payments (id, loan_id, payment_amount, payment_status) VALUES ('ffffffff-0000-0000-0000-000000000001', '$C', 1350.00, 'PROCESSING')"
-expect_refusal "in-flight monolith payment, no run" "$backfill" "dbname=$src_db" "dbname=$dst_db" "$currency"
+expect_refusal_by "in-flight monolith payment, no run" "$inflight_refusal" "$backfill" "dbname=$src_db" "dbname=$dst_db" "$currency"
 check "nothing written while refused" "SELECT count(*) FROM $L.loan" "0"
 psql_q -d "$src_db" -c "DELETE FROM payments WHERE id = 'ffffffff-0000-0000-0000-000000000001'"
 
@@ -150,12 +154,12 @@ psql_q -d "$dst_db" -c "INSERT INTO $L.loan (loan_id, customer_id, principal_amo
                                              outstanding_balance, created_at, updated_at, rate_basis)
                         VALUES ('LOAN-OLD-SCHEDULE', '1', 12000.00, '$currency', 6.0000, 12, 'DISBURSED', '2026-06-01',
                                 '2026-06-01', '2026-06-01', '2027-06-01', 12393.58, now(), now(), 'NOMINAL_ANNUAL')"
-expect_guard_refusal "created loan on the old schedule balance refuses the backfill" \
+expect_refusal_by "created loan on the old schedule balance refuses the backfill" "$guard_refusal" \
   "$backfill" "dbname=$src_db" "dbname=$dst_db" "$currency"
 psql_q -d "$dst_db" -c "DELETE FROM $L.loan WHERE loan_id = 'LOAN-OLD-SCHEDULE'"
 # A migrated loan the service changed, holding the schedule still due (10,800.00) instead of its principal (9,000.00).
 psql_q -d "$dst_db" -c "UPDATE $L.loan SET outstanding_balance = 10800.00 WHERE loan_id = '$B'"
-expect_guard_refusal "changed migrated loan on the old schedule balance refuses the backfill" \
+expect_refusal_by "changed migrated loan on the old schedule balance refuses the backfill" "$guard_refusal" \
   "$backfill" "dbname=$src_db" "dbname=$dst_db" "$currency"
 psql_q -d "$dst_db" -c "UPDATE $L.loan SET outstanding_balance = 9000.00 WHERE loan_id = '$B'"
 "$backfill" "dbname=$src_db" "dbname=$dst_db" "$currency" > /dev/null
