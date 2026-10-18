@@ -93,6 +93,16 @@ class LoanPaymentCompletedConsumerTest {
             .isInstanceOf(ContractViolationException.class).hasMessageContaining("ISO 4217");
     }
 
+    @Test
+    void anAmountFinerThanTheCurrencyIsRefusedNotRounded() {
+        assertThatThrownBy(() -> LoanPaymentCompleted.parse(json, EVENT.replace("\"1100.00\"", "\"1100.001\"")))
+            .isInstanceOf(ContractViolationException.class).hasMessageContaining("more decimals than AED");
+        assertThatThrownBy(() -> LoanPaymentCompleted.parse(json, EVENT.replace("\"1100.00\"", "\"0.005\"")))
+            .isInstanceOf(ContractViolationException.class).hasMessageContaining("more decimals than AED");
+        assertThat(LoanPaymentCompleted.parse(json, EVENT.replace("\"1100.00\"", "\"1100.10\"")).actualAmount())
+            .isEqualTo(Money.aed(new BigDecimal("1100.10")));
+    }
+
     /**
      * ADR-019 section 4: the consumed record's correlationId (envelope, else
      * the correlationId header) and its eventId as causationId go to the use

@@ -21,12 +21,12 @@ endpoints are listed last; the service does not provide them.
 
 | Method | Monolith path | Service path | Request changes | Response changes | Status changes |
 |---|---|---|---|---|---|
-| POST | `/api/v1/loans` | same | `currency` **required** (ISO 4217, `^[A-Z]{3}$`); no USD default. A customer's `customerId` must equal the token's `customer_id` claim | adds `rateBasis`, `flatTotalRate`, `currency`; `outstandingBalance` = schedule total (principal + interest); `monthlyPayment` = first installment | 400 missing/invalid currency; 403 other customer; 422 `INSUFFICIENT_CREDIT` / `CURRENCY_MISMATCH` / `CUSTOMER_NOT_FOUND`; 503 `CUSTOMER_SERVICE_UNAVAILABLE` |
+| POST | `/api/v1/loans` | same | `currency` **required** (ISO 4217, `^[A-Z]{3}$`); no USD default. A customer's `customerId` must equal the token's `customer_id` claim | adds `rateBasis`, `flatTotalRate`, `currency`; `outstandingBalance` = principal (as the monolith); `monthlyPayment` = first installment | 400 missing/invalid currency; 403 other customer; 422 `INSUFFICIENT_CREDIT` / `CURRENCY_MISMATCH` / `CUSTOMER_NOT_FOUND`; 503 `CUSTOMER_SERVICE_UNAVAILABLE` |
 | GET | `/api/v1/loans/{loanId}` | same | none | as above | 403 when a customer reads another customer's loan (monolith: 200); roles also LOAN_OFFICER, SERVICE |
 | POST | `/api/v1/loans/{loanId}/approve` | same | none | as above | 409 `INVALID_LOAN_STATE` (monolith: 500) |
 | POST | `/api/v1/loans/{loanId}/reject` | same | `reason` optional, max 500 | as above | 409 `INVALID_LOAN_STATE` |
 | POST | `/api/v1/loans/{loanId}/disburse` | same | none | as above | 422 `INSUFFICIENT_CREDIT` (loan stays APPROVED), 409 (`INVALID_LOAN_STATE`, `CONCURRENT_UPDATE`, `CREDIT_RESERVATION_HELD_FOR_OPERATOR`: the loan's reservation waits for an operator, do not retry), 503 |
-| POST | `/api/v1/loans/{loanId}/payments` | same | `amount` > 0 and `currency` (`^[A-Z]{3}$`, the loan's) required; optional header `x-idempotency-key` (max 128) | `outstandingBalance` falls by the amount paid, allocated interest first in installment order | 400 non-positive / over the balance / wrong currency; 403 other customer; 422 `IDEMPOTENCY_KEY_REUSED`; 409 `DUPLICATE_REQUEST` |
+| POST | `/api/v1/loans/{loanId}/payments` | same | `amount` > 0 and `currency` (`^[A-Z]{3}$`, the loan's) required; optional header `x-idempotency-key` (max 128) | `outstandingBalance` falls by the principal part of the amount paid (migrated flat-rate loan) or by the whole amount (loan created here); the loan is FULLY_PAID at zero | 400 non-positive / over the amount still owed / more decimals than the currency / wrong currency; 403 other customer; 409 `INVALID_LOAN_STATE` after payoff (LN-11); 422 `IDEMPOTENCY_KEY_REUSED`; 409 `DUPLICATE_REQUEST` |
 | POST | `/api/v1/loans/{loanId}/cancel` | same | `reason` optional, max 500 | as above | 403 other customer; 409 `INVALID_LOAN_STATE` |
 | GET | `/api/v1/loans` (enhanced) | not provided | | | 405 (only POST on this path) |
 | PUT | `/{loanId}/approve`, `/disburse`, `/reject` (enhanced, `Idempotency-Key`) | use the POST endpoints | | | 405 |
@@ -69,9 +69,18 @@ INT-SERVICE-CREDIT-CALLS):
    any loan. Registered as INT-OWNERSHIP; the monolith returns 200 (LN-16).
 4. **In-flight repayments stay in the monolith.** Monolith payments still INITIATED or PROCESSING at
    cutover finish there and are not migrated; the backfill refuses to run while any exist.
-5. **Schedule-based balances.** New loans get an amortised schedule at creation; `outstandingBalance`
-   is everything still due (principal + scheduled interest), not the principal; payments are
-   allocated interest first and recorded per installment; the loan is FULLY_PAID when the schedule is.
+5. **Principal balances.** `outstandingBalance` is the principal still owed, as the monolith reports it
+   (LN-10, LN-11). For a migrated flat-rate loan a payment reduces it by the principal part of the amount
+   paid, interest first per installment, so the balance is zero exactly when every installment is paid; a
+   loan created here is reduced by the whole amount paid. The loan is FULLY_PAID when the balance reaches
+   zero, and a payment after that is refused (409 `INVALID_LOAN_STATE`; the monolith answers 500, LN-11;
+   status-only difference INT-LN-PAYOFF-REFUSAL-STATUS). A payment above what is still owed (the remaining
+   installments for a migrated loan, the balance for a loan created here) is refused with 400. The
+   principal-part rule for migrated loans is the built default, pending the product owner's decision card.
+   Each payment is also allocated to the installment rows, interest first in installment order, so every
+   row's paid amount stays true. New loans carry the amortised schedule for `monthlyPayment` and these
+   allocations. The amortised balance is parked until the product owner approves it as a separate change
+   (INT-LOAN-SCHEDULE-BALANCE and INT-LOAN-PRINCIPAL-PAYOFF, rejected for cut-over).
 6. **Repayment idempotency.** Optional `x-idempotency-key` on payments: replay applies once.
 
 ## 4. Local boot without Kafka

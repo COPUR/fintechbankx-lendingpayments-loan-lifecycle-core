@@ -147,7 +147,7 @@ class LoanLifecycleServiceIT {
     }
 
     @Test
-    void loanLifecycleOverHttpAllocatesRepaymentsAndWritesEveryEventToTheOutbox() throws Exception {
+    void loanLifecycleOverHttpAppliesRepaymentsToThePrincipalAndWritesEveryEventToTheOutbox() throws Exception {
         String loanId = createLoan("12000.00", 12, "6.0");
 
         mvc.perform(asOfficer(post("/api/v1/loans/{id}/approve", loanId)))
@@ -156,17 +156,17 @@ class LoanLifecycleServiceIT {
         mvc.perform(asOfficer(post("/api/v1/loans/{id}/disburse", loanId)))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.status").value("DISBURSED"))
-            .andExpect(jsonPath("$.outstandingBalance").value(12393.58))
+            .andExpect(jsonPath("$.outstandingBalance").value(12000.00))
             .andExpect(jsonPath("$.monthlyPayment").value(1032.80))
             .andExpect(jsonPath("$.rateBasis").value("NOMINAL_ANNUAL"));
         mvc.perform(asCustomer(post("/api/v1/loans/{id}/payments", loanId))
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"amount\": 1100.00, \"currency\": \"AED\"}"))
             .andExpect(status().isOk())
-            .andExpect(jsonPath("$.outstandingBalance").value(11293.58));
+            .andExpect(jsonPath("$.outstandingBalance").value(10900.00));
         mvc.perform(asCustomer(post("/api/v1/loans/{id}/payments", loanId))
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"amount\": 11293.58, \"currency\": \"AED\"}"))
+                .content("{\"amount\": 10900.00, \"currency\": \"AED\"}"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.status").value("FULLY_PAID"))
             .andExpect(jsonPath("$.outstandingBalance").value(0));
@@ -176,6 +176,8 @@ class LoanLifecycleServiceIT {
             .containsEntry("version", 4L)
             .hasEntrySatisfying("outstanding_balance", v -> assertThat((BigDecimal) v).isEqualByComparingTo("0"));
 
+        // Repayments come off the principal balance whole. The schedule allocation is bookkeeping: the
+        // first payment's 67.20 beyond installment 1 goes to installment 2, interest first.
         List<java.util.Map<String, Object>> firstAllocations = jdbc.queryForList("""
             select a.installment_number, a.amount, a.principal, a.interest
               from sc_ln_loan_lifecycle.repayment_allocation a
@@ -188,7 +190,10 @@ class LoanLifecycleServiceIT {
         assertThat((BigDecimal) firstAllocations.get(1).get("principal")).isEqualByComparingTo("12.06");
         assertThat(jdbc.queryForObject("""
             select sum(amount) from sc_ln_loan_lifecycle.repayment_allocation where loan_id = ?
-            """, BigDecimal.class, loanId)).isEqualByComparingTo("12393.58");
+            """, BigDecimal.class, loanId)).isEqualByComparingTo("12000.00");
+        assertThat(jdbc.queryForObject("""
+            select sum(amount) from sc_ln_loan_lifecycle.repayment where loan_id = ?
+            """, BigDecimal.class, loanId)).isEqualByComparingTo("12000.00");
         assertThat(jdbc.queryForList("select source from sc_ln_loan_lifecycle.repayment where loan_id = ?", String.class, loanId))
             .containsOnly("API");
 
@@ -301,6 +306,47 @@ class LoanLifecycleServiceIT {
                     .formatted(CUSTOMER)))
             .andExpect(status().isBadRequest())
             .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+    }
+
+    /**
+     * S1: a payment after payoff is refused with the fixed message, and the refusal changes nothing.
+     */
+    @Test
+    void paymentAfterPayoffIsA409WithAFixedMessageAndChangesNothing() throws Exception {
+        String loanId = disbursedLoan("12000.00");
+        mvc.perform(asCustomer(post("/api/v1/loans/{id}/payments", loanId))
+                .contentType(MediaType.APPLICATION_JSON).content("{\"amount\": 12000.00, \"currency\": \"AED\"}"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.status").value("FULLY_PAID"));
+
+        mvc.perform(asCustomer(post("/api/v1/loans/{id}/payments", loanId))
+                .contentType(MediaType.APPLICATION_JSON).content("{\"amount\": 1.00, \"currency\": \"AED\"}"))
+            .andExpect(status().isConflict())
+            .andExpect(jsonPath("$.code").value("INVALID_LOAN_STATE"))
+            .andExpect(jsonPath("$.message").value("The loan is not in a state that allows this operation"));
+
+        assertThat(jdbc.queryForObject("select count(*) from sc_ln_loan_lifecycle.repayment where loan_id = ?", Integer.class, loanId))
+            .isEqualTo(1);
+        assertThat(jdbc.queryForObject("select outstanding_balance from sc_ln_loan_lifecycle.loan where loan_id = ?", BigDecimal.class, loanId))
+            .isEqualByComparingTo("0");
+    }
+
+    /**
+     * S4: an amount finer than the currency's minor unit is refused, not rounded HALF_UP into a payment.
+     */
+    @Test
+    void paymentWithMoreDecimalsThanTheCurrencyIsA400AndChangesNothing() throws Exception {
+        String loanId = disbursedLoan("5000.00");
+
+        mvc.perform(asCustomer(post("/api/v1/loans/{id}/payments", loanId))
+                .contentType(MediaType.APPLICATION_JSON).content("{\"amount\": 10.001, \"currency\": \"AED\"}"))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+
+        assertThat(jdbc.queryForObject("select count(*) from sc_ln_loan_lifecycle.repayment where loan_id = ?", Integer.class, loanId))
+            .isZero();
+        assertThat(jdbc.queryForObject("select outstanding_balance from sc_ln_loan_lifecycle.loan where loan_id = ?", BigDecimal.class, loanId))
+            .isEqualByComparingTo("5000.00");
     }
 
     @Test

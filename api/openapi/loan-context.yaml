@@ -546,7 +546,7 @@ components:
         outstandingBalance:
           type: number
           format: double
-          description: Everything still due on the schedule, unpaid principal plus scheduled interest.
+          description: Principal still owed, as the monolith reports it. A payment reduces it by the principal part of the amount paid (a migrated flat-rate loan pays interest first, per installment); a loan created here is reduced by the whole amount paid. The loan is FULLY_PAID at zero.
         monthlyPayment:
           type: number
           format: double

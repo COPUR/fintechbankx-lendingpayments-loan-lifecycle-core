@@ -115,7 +115,9 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(IllegalStateException.class)
     ResponseEntity<ErrorResponse> invalidTransition(IllegalStateException ex) {
-        return error(HttpStatus.CONFLICT, "INVALID_LOAN_STATE", ex.getMessage());
+        // The detail names internal statuses; keep it in the log, answer with a fixed message.
+        log.warn("Loan operation refused in its current state: {}", ex.getMessage());
+        return error(HttpStatus.CONFLICT, "INVALID_LOAN_STATE", "The loan is not in a state that allows this operation");
     }
 
     @ExceptionHandler(OptimisticLockingFailureException.class)

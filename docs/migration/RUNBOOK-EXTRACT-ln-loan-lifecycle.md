@@ -63,6 +63,13 @@ with the statements in `V4__grant_runtime_role_least_privilege.sql` before switc
 - `<currency>` is **required** (ISO 4217): the monolith stores none and its code falls back to USD,
   so the book's currency is stated by whoever runs the migration. There is no default.
 - Refuses to run while any monolith payment is INITIATED or PROCESSING.
+- Refuses to run while a row in the loan service holds a balance written under the old schedule rule
+  (`00_guard_old_schedule_balance.sql`, run first): a loan created here whose balance is not its principal
+  less its repayments, or a migrated loan the service changed (`version > 0`) whose balance is not its
+  principal less the principal part paid. The guard changes no data. **Environments holding such rows:
+  none.** Nothing is deployed yet, so no environment has written one (default answer). Confirm per
+  environment before cutover; if one holds any, its balances need a decision (recompute or reload) before
+  the backfill runs.
 - Exports `loans`, `loan_installments`, COMPLETED `payments` and their `payment_installments` in one
   read-only snapshot (no customer columns), stages and transforms them
   (`02_transform_into_loan_service.sql`, mapping listed at its top).
@@ -465,3 +472,32 @@ The release is never re-sent by this service, the sweep skips the row, and a dis
 
 Never clear `release_refused_code` while leaving `pending_compensation` set: that re-arms the same refused
 release, which the sweep and the next reservation re-send.
+
+## 9. Late loan payment after the loan was paid off through the API
+
+A `Payments.Payment.LoanPaymentCompleted.v1` record on `evt.pay.payment.v1` can arrive after the loan has already
+been paid off through `POST /api/v1/loans/{loanId}/payments` (or by an earlier payment). A FULLY_PAID loan refuses
+a payment. The consumer's transaction then rolls back: nothing is applied, the inbox row is not written, and after
+the retry back-off the record goes to `evt.ln.loan.dlq.v1` with the exception class in its `dlq-*` headers. The
+counter `consumer.dlq.messages{group=cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1}` rises (section 5).
+
+The loan stays FULLY_PAID at zero, and no repayment row is written for the late payment.
+
+**Decision recorded for the owner (round 12, S2):** the service does not apply a payment to a FULLY_PAID loan and does
+not reopen it. The DLQ record is the work item. The payment owner and customer operations decide how the money is
+returned to the customer; the loan squad records that decision in the incident. The runbook does not set that policy.
+
+Steps:
+
+1. Read the DLQ record's payment id and the loan id, and the exception class in its headers (no message is kept).
+2. Confirm the loan state:
+   ```sql
+   SELECT status, outstanding_balance FROM loan WHERE loan_id = '<loan id>';
+   ```
+   Expected: `FULLY_PAID`, `0.00`.
+3. Confirm in the payment service that the payment is COMPLETED and for the amount on the record.
+4. Do not replay the DLQ record into `evt.pay.payment.v1` or the loan consumer: it refuses again while the loan is
+   FULLY_PAID.
+5. Do not change `loan.status` or `loan.outstanding_balance` by SQL to make the record apply. A payment that should
+   count against the loan is a loan-squad decision and goes through the recorded decision above.
+6. Close the incident with the payment owner's decision and the refund reference, if any.

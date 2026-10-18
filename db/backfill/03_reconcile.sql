@@ -31,6 +31,20 @@ WITH owned AS (
     SELECT DISTINCT ON (loan_id) loan_id, amount FROM src_inst ORDER BY loan_id, due_date, id
 ), dst_first AS (
     SELECT loan_id, amount FROM dst_inst WHERE installment_number = 1
+), src_numbered AS (
+    SELECT i.loan_id, i.amount, i.is_paid, i.paid_amount, l.loan_amount, l.number_of_installments AS term,
+           row_number() OVER (PARTITION BY i.loan_id ORDER BY i.due_date, i.id) AS installment_number
+      FROM src_inst i
+      JOIN src_loans l ON l.id = i.loan_id
+), src_paid AS (
+    -- The monolith side is worked out from its own snapshot, not from installment_split, which the transform wrote.
+    SELECT loan_id, sum(greatest(paid - (amount - principal), 0)) AS principal_paid
+      FROM (SELECT loan_id, amount, CASE WHEN is_paid THEN amount ELSE paid_amount END AS paid,
+                   CASE WHEN installment_number = term
+                        THEN loan_amount - round(loan_amount / term, 2) * (term - 1)
+                        ELSE round(loan_amount / term, 2) END AS principal
+              FROM src_numbered) s
+     GROUP BY loan_id
 ), checks(name, monolith, service) AS (
     SELECT 'loans', (SELECT count(*)::text FROM src_loans), (SELECT count(*)::text FROM dst_loans)
     UNION ALL
@@ -51,7 +65,9 @@ WITH owned AS (
     SELECT 'settled_total', (SELECT coalesce(sum(CASE WHEN is_paid THEN amount ELSE paid_amount END), 0)::numeric(19,2)::text FROM src_inst),
                             (SELECT coalesce(sum(paid_amount), 0)::numeric(19,2)::text FROM dst_inst)
     UNION ALL
-    SELECT 'outstanding_total', (SELECT coalesce(sum(CASE WHEN is_paid THEN 0 ELSE amount - paid_amount END), 0)::numeric(19,2)::text FROM src_inst),
+    SELECT 'outstanding_total', (SELECT coalesce(sum(l.loan_amount - coalesce(p.principal_paid, 0)), 0)::numeric(19,2)::text
+                                   FROM src_loans l
+                                   LEFT JOIN src_paid p ON p.loan_id = l.id),
                                 (SELECT coalesce(sum(outstanding_balance), 0)::numeric(19,2)::text FROM dst_loans)
     UNION ALL
     SELECT 'repayments', (SELECT count(*)::text FROM src_pay), (SELECT count(*)::text FROM dst_pay)
@@ -71,10 +87,17 @@ WITH owned AS (
         SELECT l.loan_id
           FROM dst_loans l
           LEFT JOIN dst_inst i ON i.loan_id = l.loan_id
-         GROUP BY l.loan_id, l.term_months, l.outstanding_balance, l.principal_amount
+         GROUP BY l.loan_id, l.term_months, l.principal_amount
         HAVING count(i.*) <> l.term_months
-            OR l.outstanding_balance <> coalesce(sum(i.amount - i.paid_amount), 0)
             OR l.principal_amount <> coalesce(sum(i.principal_amount), 0)) broken)
+    UNION ALL
+    -- The balance is the principal still owed: the principal less the principal part of what is paid on each
+    -- installment (interest first). Never negative, and 0 exactly when the loan is FULLY_PAID.
+    SELECT 'balance_breaking_invariants', '0', (SELECT count(*)::text FROM dst_loans l
+     WHERE l.outstanding_balance < 0
+        OR l.outstanding_balance <> l.principal_amount - coalesce((SELECT sum(greatest(i.paid_amount - i.interest_amount, 0))
+                                                                     FROM dst_inst i WHERE i.loan_id = l.loan_id), 0)
+        OR (l.outstanding_balance = 0) <> (l.status = 'FULLY_PAID'))
     UNION ALL
     SELECT 'service_changed', (SELECT count(*)::text FROM sc_ln_loan_lifecycle.loan WHERE legacy_loan_id IS NOT NULL AND version > 0),
            (SELECT count(*)::text FROM sc_ln_loan_lifecycle.loan WHERE legacy_loan_id IS NOT NULL AND version > 0)

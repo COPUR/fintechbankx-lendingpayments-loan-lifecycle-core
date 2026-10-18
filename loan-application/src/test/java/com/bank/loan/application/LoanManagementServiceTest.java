@@ -193,7 +193,7 @@ class LoanManagementServiceTest {
 
     @Test
     void makePaymentShouldReleaseCreditOnlyWhenLoanBecomesFullyPaid() {
-        // 5,000.00 at 6% over 12 months: schedule total 5,163.99
+        // 5,000.00 at 6% over 12 months: the balance is the principal, paid off in one payment
         Loan fullPaymentLoan = loan("LOAN-SVC-005", "5000.00", 12);
         fullPaymentLoan.approve();
         fullPaymentLoan.disburse();
@@ -216,13 +216,13 @@ class LoanManagementServiceTest {
         Loan partialPaymentLoan = loan("LOAN-SVC-006", "6000.00", 12);
         partialPaymentLoan.approve();
         partialPaymentLoan.disburse();
-        Money scheduleTotal = partialPaymentLoan.getOutstandingBalance();
+        Money balanceBefore = partialPaymentLoan.getOutstandingBalance();
         when(loanRepository.findById(LoanId.of("LOAN-SVC-006"))).thenReturn(Optional.of(partialPaymentLoan));
         when(loanRepository.save(partialPaymentLoan)).thenReturn(partialPaymentLoan);
 
         Loan partial = service.repay(RepayLoanCommand.withoutKey(LoanId.of("LOAN-SVC-006"), Money.aed(new BigDecimal("1000.00"))));
 
-        assertThat(partial.getOutstandingBalance().getAmount()).isEqualByComparingTo(scheduleTotal.getAmount().subtract(new BigDecimal("1000.00")));
+        assertThat(partial.getOutstandingBalance().getAmount()).isEqualByComparingTo(balanceBefore.getAmount().subtract(new BigDecimal("1000.00")));
         verify(customerCreditService, never()).releaseCredit(
             eq(partialPaymentLoan.getId()),
             eq(partialPaymentLoan.getCustomerId()),

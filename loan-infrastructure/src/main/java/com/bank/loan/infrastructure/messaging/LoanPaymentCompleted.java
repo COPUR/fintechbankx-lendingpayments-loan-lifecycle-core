@@ -44,8 +44,14 @@ record LoanPaymentCompleted(UUID eventId, String correlationId, String paymentId
         JsonNode data = envelope.path("data");
         JsonNode amount = data.path("actualAmount");
         try {
-            Money actual = Money.of(new BigDecimal(required(amount, "amount")),
-                Currency.getInstance(required(amount, "currency")));
+            BigDecimal decimal = new BigDecimal(required(amount, "amount"));
+            Currency currency = Currency.getInstance(required(amount, "currency"));
+            // Money would round a finer amount HALF_UP and apply it without a word; refuse it instead.
+            int minorUnits = Math.max(currency.getDefaultFractionDigits(), 0);
+            if (decimal.stripTrailingZeros().scale() > minorUnits) {
+                throw new ContractViolationException("actualAmount.amount has more decimals than " + currency.getCurrencyCode());
+            }
+            Money actual = Money.of(decimal, currency);
             return new LoanPaymentCompleted(eventId, text(envelope, "correlationId"), required(data, "paymentId"),
                 required(data, "loanId"), actual);
         } catch (NumberFormatException badAmount) {

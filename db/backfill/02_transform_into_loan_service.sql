@@ -24,7 +24,10 @@
 --   installment interest       = amount - principal
 --   installment paid_amount    = amount once is_paid (early-payment discount / late penalty go to
 --                                repayment_allocation), else the monolith paid_amount
---   outstanding_balance        = sum of what is still due on unpaid installments
+--   outstanding_balance        = principal still owed: loan_amount less the principal part of what is paid on
+--                                each installment (paid less its interest, interest first), as the monolith
+--                                reports it; 0 exactly when every installment is paid. Never clamped: a
+--                                negative balance would show in the reconcile (balance_breaking_invariants)
 --   repayment                  = monolith COMPLETED payments (source MONOLITH, same id)
 --   repayment_allocation       = payment_installments, one row per installment the payment settled
 
@@ -32,11 +35,29 @@
 
 BEGIN;
 
-WITH unpaid AS (
-    SELECT loan_id, sum(CASE WHEN is_paid THEN 0 ELSE amount - paid_amount END) AS due
-      FROM backfill_stage.loan_installments
-     GROUP BY loan_id
+-- Each installment's principal, and the principal part of what is paid on it. Interest is paid first, so
+-- the principal paid is what is paid beyond the installment's interest. Only this transform reads it: 03_reconcile.sql
+-- works the monolith side out from the snapshot itself, so the check does not read what the transform wrote.
+CREATE TABLE backfill_stage.installment_split AS
+WITH numbered AS (
+    SELECT i.*,
+           l.loan_amount,
+           l.number_of_installments AS n,
+           row_number() OVER (PARTITION BY i.loan_id ORDER BY i.due_date, i.id) AS installment_number
+      FROM backfill_stage.loan_installments i
+      JOIN backfill_stage.loans l ON l.id = i.loan_id
+), split AS (
+    SELECT numbered.*,
+           CASE WHEN installment_number = n
+                THEN loan_amount - round(loan_amount / n, 2) * (n - 1)
+                ELSE round(loan_amount / n, 2) END AS principal
+      FROM numbered
 )
+SELECT s.*,
+       CASE WHEN s.is_paid THEN s.amount ELSE s.paid_amount END AS paid,
+       greatest(CASE WHEN s.is_paid THEN s.amount ELSE s.paid_amount END - (s.amount - s.principal), 0) AS principal_paid
+  FROM split s;
+
 INSERT INTO sc_ln_loan_lifecycle.loan AS t (
     loan_id, customer_id, principal_amount, currency, annual_interest_rate, rate_basis, legacy_flat_rate,
     term_months, status, application_date, approval_date, disbursement_date, maturity_date,
@@ -54,7 +75,7 @@ SELECT l.id,
        l.create_date::date,
        l.create_date::date,
        (l.create_date + make_interval(months => l.number_of_installments))::date,
-       coalesce(u.due, 0),
+       l.loan_amount - coalesce(p.principal_paid, 0),
        l.created_at,
        l.updated_at,
        0,
@@ -62,7 +83,9 @@ SELECT l.id,
        l.updated_at,
        now()
   FROM backfill_stage.loans l
-  LEFT JOIN unpaid u ON u.loan_id = l.id
+  LEFT JOIN (SELECT loan_id, sum(principal_paid) AS principal_paid
+               FROM backfill_stage.installment_split
+              GROUP BY loan_id) p ON p.loan_id = l.id
 ON CONFLICT (legacy_loan_id) DO UPDATE
    SET customer_id          = excluded.customer_id,
        principal_amount     = excluded.principal_amount,
@@ -82,20 +105,6 @@ ON CONFLICT (legacy_loan_id) DO UPDATE
        backfilled_at        = excluded.backfilled_at
  WHERE t.version = 0;
 
-WITH numbered AS (
-    SELECT i.*,
-           l.loan_amount,
-           l.number_of_installments AS n,
-           row_number() OVER (PARTITION BY i.loan_id ORDER BY i.due_date, i.id) AS installment_number
-      FROM backfill_stage.loan_installments i
-      JOIN backfill_stage.loans l ON l.id = i.loan_id
-), split AS (
-    SELECT numbered.*,
-           CASE WHEN installment_number = n
-                THEN loan_amount - round(loan_amount / n, 2) * (n - 1)
-                ELSE round(loan_amount / n, 2) END AS principal
-      FROM numbered
-)
 INSERT INTO sc_ln_loan_lifecycle.loan_installment AS t (
     installment_id, loan_id, installment_number, amount, principal_amount, interest_amount, paid_amount,
     currency, due_date, paid_at, status)
@@ -105,14 +114,14 @@ SELECT md5('elms-installment:' || s.id)::uuid,
        s.amount,
        s.principal,
        s.amount - s.principal,
-       CASE WHEN s.is_paid THEN s.amount ELSE s.paid_amount END,
+       s.paid,
        :'currency',
        s.due_date,
        s.payment_date,
        CASE WHEN s.is_paid THEN 'PAID'
             WHEN s.paid_amount > 0 THEN 'PARTIALLY_PAID'
             ELSE 'PENDING' END
-  FROM split s
+  FROM backfill_stage.installment_split s
   JOIN sc_ln_loan_lifecycle.loan l ON l.legacy_loan_id = s.loan_id
  WHERE l.version = 0
 ON CONFLICT (installment_id) DO UPDATE

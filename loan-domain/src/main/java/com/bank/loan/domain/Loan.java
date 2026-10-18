@@ -62,14 +62,14 @@ public class Loan extends AggregateRoot<LoanId> {
         
         validateLoanData();
         generateInstallments();
-        this.storedOutstandingBalance = getRemainingInstallmentAmount();
+        this.storedOutstandingBalance = principalAmount;
         
         addDomainEvent(new LoanCreatedEvent(loanId, customerId, principalAmount));
     }
     
     /**
-     * New loan with its amortised repayment schedule. The outstanding balance
-     * is the total of the schedule: principal plus scheduled interest.
+     * New loan. The outstanding balance starts at the principal, as the
+     * monolith reports it; the amortised schedule gives the regular installment.
      */
     public static Loan create(LoanId loanId, CustomerId customerId, Money principalAmount,
                              InterestRate interestRate, LoanTerm loanTerm) {
@@ -104,8 +104,8 @@ public class Loan extends AggregateRoot<LoanId> {
      * Rebuilds a loan from persisted state. Used by persistence adapters only:
      * it registers no domain events and skips creation-time validation so that
      * historical loans migrated from the monolith load as they were stored.
-     * When the loan has a schedule its outstanding balance is derived from it;
-     * outstandingBalance is used only for a loan without installments.
+     * outstandingBalance is the principal still owed as it was stored; the
+     * schedule does not derive it.
      */
     public static Loan rehydrate(LoanId loanId, CustomerId customerId, Money principalAmount,
                                  InterestRate interestRate, RateBasis rateBasis, LoanTerm loanTerm,
@@ -232,11 +232,12 @@ public class Loan extends AggregateRoot<LoanId> {
     }
     
     /**
-     * Total amount still due: the unpaid part of every installment
-     * (principal plus scheduled interest).
+     * Principal still owed, as the monolith reports it. A payment reduces it by
+     * its principal part for a migrated loan, and by the whole amount for a loan
+     * created here (see makePayment).
      */
     public Money getOutstandingBalance() {
-        return installments.isEmpty() ? storedOutstandingBalance : getRemainingInstallmentAmount();
+        return storedOutstandingBalance;
     }
     
     public LocalDateTime getCreatedAt() {
@@ -306,9 +307,14 @@ public class Loan extends AggregateRoot<LoanId> {
     }
 
     /**
-     * Applies a repayment to the schedule: installments in order, interest
-     * before principal within each installment. The loan is FULLY_PAID once
-     * every installment is paid.
+     * Applies a repayment and allocates it to the schedule, interest first in
+     * installment order, so each installment's paid amount stays true. The
+     * balance falls by the principal part of the payment. For a loan migrated
+     * from the monolith that is the payment less the interest it settles, so the
+     * balance follows the principal the monolith repays. For a loan created here
+     * the whole amount comes off the balance and the allocation is bookkeeping
+     * only, because the amortised schedule does not drive the balance (rejected
+     * for cut-over). The loan is FULLY_PAID once the balance reaches zero.
      *
      * @param paymentId id of the repayment (the payment service's id when it
      *                  comes from a completed loan payment)
@@ -318,18 +324,17 @@ public class Loan extends AggregateRoot<LoanId> {
         validatePaymentPreconditions(paymentAmount);
 
         Money previousBalance = getOutstandingBalance();
-        List<InstallmentAllocation> allocations = installments.isEmpty()
-            ? List.of()
-            : allocateAcrossInstallments(paymentAmount);
-        if (installments.isEmpty()) {
-            storedOutstandingBalance = storedOutstandingBalance.subtract(paymentAmount);
-        }
+        List<InstallmentAllocation> allocations = allocateAcrossInstallments(paymentAmount);
         Money zero = Money.zero(paymentAmount.getCurrency());
-        Money interest = allocations.stream().map(InstallmentAllocation::interest).reduce(zero, Money::add);
+        Money interest = rateBasis == RateBasis.FLAT_TOTAL
+            ? allocations.stream().map(InstallmentAllocation::interest).reduce(zero, Money::add)
+            : zero;
+        Money principal = paymentAmount.subtract(interest);
+        storedOutstandingBalance = previousBalance.subtract(principal);
 
         PaymentDistribution distribution = PaymentDistribution.builder()
             .totalPayment(paymentAmount)
-            .principalPayment(paymentAmount.subtract(interest))
+            .principalPayment(principal)
             .interestPayment(interest)
             .feePayment(zero)
             .previousBalance(previousBalance)
@@ -338,7 +343,7 @@ public class Loan extends AggregateRoot<LoanId> {
         distribution.validate();
 
         this.updatedAt = LocalDateTime.now();
-        boolean fullyPaid = installments.isEmpty() ? getOutstandingBalance().isZero() : isFullyPaid();
+        boolean fullyPaid = getOutstandingBalance().isZero();
         if (fullyPaid) {
             this.status = LoanStatus.FULLY_PAID;
         }
@@ -363,6 +368,11 @@ public class Loan extends AggregateRoot<LoanId> {
         return result;
     }
 
+    /**
+     * Installments in order, interest before principal within each. The payment
+     * is capped at what the schedule still owes (see validatePaymentPreconditions),
+     * so all of it is allocated.
+     */
     private List<InstallmentAllocation> allocateAcrossInstallments(Money paymentAmount) {
         List<InstallmentAllocation> allocations = new ArrayList<>();
         Money remaining = paymentAmount;
@@ -396,10 +406,12 @@ public class Loan extends AggregateRoot<LoanId> {
         if (paymentAmount.isNegative() || paymentAmount.isZero()) {
             throw new IllegalArgumentException("Payment amount must be positive");
         }
-        Money outstanding = getOutstandingBalance();
-        if (paymentAmount.compareTo(outstanding) > 0) {
+        // A migrated loan's payment also settles interest, so its cap is what the schedule still owes;
+        // for a loan created here the whole payment comes off the balance, so the balance is the cap.
+        Money owed = rateBasis == RateBasis.FLAT_TOTAL ? getRemainingInstallmentAmount() : getOutstandingBalance();
+        if (paymentAmount.compareTo(owed) > 0) {
             throw new IllegalArgumentException(String.format(
-                "Payment amount (%s) cannot exceed outstanding balance (%s)", paymentAmount, outstanding));
+                "Payment amount (%s) cannot exceed the amount still owed (%s)", paymentAmount, owed));
         }
     }
     
@@ -465,10 +477,13 @@ public class Loan extends AggregateRoot<LoanId> {
     }
     
     public boolean isFullyPaid() {
-        return !installments.isEmpty() && installments.stream().allMatch(LoanInstallment::isPaid);
+        return storedOutstandingBalance.isZero();
     }
     
     public List<LoanInstallment> getOverdueInstallments() {
+        if (status == LoanStatus.FULLY_PAID) {
+            return List.of();
+        }
         LocalDate today = LocalDate.now();
         return installments.stream()
             .filter(installment -> !installment.isPaid() && installment.getDueDate().isBefore(today))

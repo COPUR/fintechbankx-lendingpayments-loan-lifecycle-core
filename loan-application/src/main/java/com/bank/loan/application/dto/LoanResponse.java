@@ -16,8 +16,9 @@ import java.time.LocalDate;
  *   <li>flatTotalRate: FLAT_TOTAL loans only, the monolith's interest_rate as
  *       a fraction of the principal over the whole term (0.200 = 20%); null
  *       otherwise. Parity checks compare it with the monolith's interestRate.</li>
- *   <li>outstandingBalance: everything still due on the schedule (principal
- *       plus scheduled interest). monthlyPayment: the first installment.</li>
+ *   <li>outstandingBalance: the principal still owed, as the monolith reports
+ *       it; a payment reduces it by the whole amount paid. monthlyPayment: the
+ *       first scheduled installment.</li>
  * </ul>
  */
 public record LoanResponse(

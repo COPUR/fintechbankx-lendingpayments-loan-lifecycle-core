@@ -126,4 +126,12 @@ class ApiExceptionHandlerTest {
             .isEqualTo("CONCURRENT_UPDATE");
         assertThat(handler.badRequest(new IllegalArgumentException("bad amount")).getBody().message()).isEqualTo("bad amount");
     }
+
+    @Test
+    void aRefusedLoanStateAnswersAFixedMessageNotTheInternalDetail() {
+        var refused = handler.invalidTransition(new IllegalStateException("Loan cannot accept payments in current status: FULLY_PAID"));
+
+        assertThat(refused.getBody().code()).isEqualTo("INVALID_LOAN_STATE");
+        assertThat(refused.getBody().message()).doesNotContain("FULLY_PAID").doesNotContain("status");
+    }
 }

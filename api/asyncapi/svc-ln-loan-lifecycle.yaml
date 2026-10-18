@@ -121,7 +121,7 @@ channels:
     description: |-
       Consumed. The payment aggregate's topic, published by svc-pay-initiation-settlement (one topic per
       aggregate, ADR-019). This service handles only Payments.Payment.LoanPaymentCompleted.v1, recognised by the
-      eventType record header before the value is parsed, and applies it to the schedule once per eventId (inbox)
+      eventType record header before the value is parsed, and applies it to the principal balance once per eventId (inbox)
       and once per paymentId; every other event type of the payment aggregate is skipped (offset committed, never
       failed, never dead-lettered). Off until LOAN_REPAYMENT_CONSUMER_ENABLED=true (runbook step 3).
     messages:
@@ -199,7 +199,7 @@ operations:
   receivePaymentLoanPaymentCompleted:
     action: receive
     title: Receive Payments.Payment.LoanPaymentCompleted.v1
-    summary: The repayment consumer applies a settled loan repayment to the schedule; it skips the other event types
+    summary: The repayment consumer applies a settled loan repayment to the principal balance; it skips the other event types
       of evt.pay.payment.v1.
     channel:
       $ref: '#/channels/payment'

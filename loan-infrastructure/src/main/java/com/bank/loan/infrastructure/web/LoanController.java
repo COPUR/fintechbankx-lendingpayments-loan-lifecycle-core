@@ -102,7 +102,7 @@ public class LoanController {
     }
 
     /**
-     * FR-008: repayment, allocated to the schedule interest first. With
+     * FR-008: repayment, taken off the principal balance in full. With
      * x-idempotency-key, a repeated request is applied once (key scope: the caller).
      */
     @PostMapping("/{loanId}/payments")
@@ -114,7 +114,9 @@ public class LoanController {
             Authentication caller) {
         LoanId id = LoanId.of(loanId);
         LoanAccessPolicy.requireActsFor(caller, queries.findLoan(id).getCustomerId().getValue());
-        Money amount = Money.of(request.amount(), Currency.getInstance(request.currency()));
+        Currency currency = Currency.getInstance(request.currency());
+        requireMinorUnits(request.amount(), currency);
+        Money amount = Money.of(request.amount(), currency);
         Loan loan = repayments.repay(new RepayLoanCommand(id, amount, LoanAccessPolicy.idempotencyScope(caller), idempotencyKey));
         return ResponseEntity.ok(LoanResponse.from(loan));
     }
@@ -136,6 +138,18 @@ public class LoanController {
         @NotNull(message = "Amount is required") @Positive(message = "Amount must be positive") BigDecimal amount,
         @NotBlank(message = "Currency is required")
         @Pattern(regexp = "[A-Z]{3}", message = "Currency must be an ISO 4217 code") String currency) {}
+
+    /**
+     * Refuses an amount finer than the currency's minor unit. Money would round it
+     * HALF_UP, so a caller's 10.001 would otherwise be paid as 10.00 without a word.
+     */
+    private static void requireMinorUnits(BigDecimal amount, Currency currency) {
+        int minorUnits = Math.max(currency.getDefaultFractionDigits(), 0);
+        if (amount.stripTrailingZeros().scale() > minorUnits) {
+            throw new IllegalArgumentException(
+                "Amount has more than " + minorUnits + " decimal places for " + currency.getCurrencyCode());
+        }
+    }
 
     public record CancelLoanRequest(@Size(max = 500) String reason) {}
 }

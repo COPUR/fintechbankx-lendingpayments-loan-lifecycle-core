@@ -43,6 +43,9 @@ if [ "$in_flight" != "0" ]; then
   exit 1
 fi
 
+echo "Checking the loan service for balances written under the old schedule rule..."
+run "$target_db" -f "$here/00_guard_old_schedule_balance.sql"
+
 echo "Exporting from the monolith (read-only snapshot)..."
 run "$source_db" <<SQL
 BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;

@@ -172,13 +172,36 @@ class CustomerCreditHttpIT {
 
         mvc.perform(asCustomer(post("/api/v1/loans/{id}/payments", loanId))
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"amount\": 11360.78, \"currency\": \"AED\"}"))
+                .content("{\"amount\": 10967.20, \"currency\": \"AED\"}"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.status").value("FULLY_PAID"));
 
         Call release = only("POST", CREDIT + "/release");
         assertThat(release.idempotencyKey()).isEqualTo(loanId + ":release");
         assertThat(release.idleInTransaction()).isZero();
+    }
+
+    /**
+     * S1: a keyed final payment replayed after the payoff answers 200 from the
+     * first outcome, applies nothing twice and sends the credit release once.
+     */
+    @Test
+    void keyedReplayAfterPayoffAnswersTheFirstOutcomeAndReleasesOnce() throws Exception {
+        String loanId = approvedLoan();
+        mvc.perform(asBanker(post("/api/v1/loans/{id}/disburse", loanId))).andExpect(status().isOk());
+        responses.put("POST " + CREDIT + "/release", new Stubbed(200, POSITION));
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            mvc.perform(asCustomer(post("/api/v1/loans/{id}/payments", loanId))
+                    .header("x-idempotency-key", "final-payment-1")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"amount\": 12000.00, \"currency\": \"AED\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FULLY_PAID"));
+        }
+
+        assertThat(loanStatus(loanId)).isEqualTo("FULLY_PAID");
+        only("POST", CREDIT + "/release");
     }
 
     @Test
@@ -189,7 +212,7 @@ class CustomerCreditHttpIT {
 
         mvc.perform(asCustomer(post("/api/v1/loans/{id}/payments", loanId))
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"amount\": 12393.58, \"currency\": \"AED\"}"))
+                .content("{\"amount\": 12000.00, \"currency\": \"AED\"}"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.status").value("FULLY_PAID"));
 
