@@ -3,4 +3,15 @@ build/
 **/build/
 *.iml
 .idea/
-out/
+/out/
+# Hexagonal port packages are named "out"; never ignore source directories.
+!**/src/**/out/
+
+# Terraform working files
+**/.terraform/
+# The provider lock file is committed (reproducible provider versions).
+*.tfstate
+*.tfstate.*
+
+# AsyncAPI gate dependencies (npm ci --prefix scripts/ci)
+scripts/ci/node_modules/

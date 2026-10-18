@@ -1,0 +1,484 @@
+# Copied for loan's consumer contract test (AccountsLedgerHttpAdapterContractTest).
+# Source: neo-fintechbankx-corebanking-accounts-ledger-service, draft PR #1,
+# head 2db7a04, file api/openapi/accounts-ledger.yaml, unchanged. Journal entries are keyed by the body's
+# reference (no idempotency header); errors are {code, message, interactionId, timestamp} (ADR-030).
+openapi: 3.0.3
+info:
+  title: Core Banking Accounts Ledger API
+  version: 1.0.0
+  description: |-
+    svc-acc-accounts-ledger owns customer and internal accounts, their
+    balances and the double-entry journal that moves them. Payments,
+    mandates, bulk and loan services read accounts here and post journal
+    entries; nobody else stores balances.
+  license:
+    name: Proprietary
+    url: https://openfinance.example.com/license
+servers:
+  - url: https://api.sandbox.openfinance.ae
+    description: Sandbox
+
+tags:
+  - name: Accounts
+  - name: Journal
+
+paths:
+  /api/v1/accounts:
+    post:
+      tags: [Accounts]
+      summary: Open an account
+      operationId: openAccount
+      description: |-
+        Opens a customer account (customerId required) or an internal ledger
+        account (accountType INTERNAL, no customerId). Staff only (BANKER,
+        ADMIN). x-idempotency-key is required: a repeat with the same key and
+        the same body returns the account opened first (201 again); the same
+        key with another body is a 409.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpenAccountRequest'
+      responses:
+        '201':
+          description: Account opened (or the replay of the same request)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/accounts/{accountId}:
+    get:
+      tags: [Accounts]
+      summary: Read an account
+      operationId: getAccount
+      description: |-
+        The account read that payments and mandates make before moving money:
+        holder (customerId), status, currency, availableBalance, debitAllowed
+        and creditAllowed. A customer token sees only accounts it holds (the
+        token's customer_id claim); an account held by someone else, an
+        internal account and an unknown id all answer the same 404. BANKER,
+        ADMIN and SERVICE tokens see every account.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '200':
+          description: The account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/accounts/{accountId}/freeze:
+    post:
+      tags: [Accounts]
+      summary: Freeze an account
+      operationId: freezeAccount
+      description: Staff only. A frozen account takes no debits or credits. The reason is kept here and not published.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - $ref: '#/components/parameters/AccountId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FreezeRequest'
+      responses:
+        '200':
+          description: The frozen account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/accounts/{accountId}/unfreeze:
+    post:
+      tags: [Accounts]
+      summary: Unfreeze an account
+      operationId: unfreezeAccount
+      description: Staff only. Only a frozen account can be unfrozen (409 otherwise).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '200':
+          description: The active account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/accounts/{accountId}/close:
+    post:
+      tags: [Accounts]
+      summary: Close an account
+      operationId: closeAccount
+      description: Staff only. Only a zero-balance account can be closed (409 otherwise); closing twice is a no-op.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '200':
+          description: The closed account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/journal-entries:
+    post:
+      tags: [Journal]
+      summary: Post a journal entry
+      operationId: postJournalEntry
+      description: |-
+        Books one double entry and moves every account balance in it, all or
+        nothing. Lines share one currency, each amount is positive with no
+        more decimals than the currency allows, debits equal credits, and an
+        account appears on one side only. A customer account cannot go below
+        zero (422 INSUFFICIENT_FUNDS); a frozen or closed account takes no
+        postings (422 ACCOUNT_NOT_OPERATIONAL). The reference is the caller's
+        business key: the same reference with the same lines answers 200 with
+        the first booking (replay true); with other lines it is a 409.
+        Allowed for ADMIN and for SERVICE tokens whose client (azp) is on
+        SERVICE_CALLERS.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PostJournalEntryRequest'
+      responses:
+        '201':
+          description: Entry booked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JournalEntryResponse'
+        '200':
+          description: Replay of an entry already booked under this reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JournalEntryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/journal-entries/{journalEntryId}:
+    get:
+      tags: [Journal]
+      summary: Read a journal entry
+      operationId: getJournalEntry
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Authorization'
+        - $ref: '#/components/parameters/DPoP'
+        - $ref: '#/components/parameters/InteractionId'
+        - name: journalEntryId
+          in: path
+          required: true
+          schema:
+            type: string
+            maxLength: 64
+      responses:
+        '200':
+          description: The entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JournalEntryResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    Authorization:
+      name: Authorization
+      in: header
+      required: true
+      schema:
+        type: string
+    DPoP:
+      name: DPoP
+      in: header
+      required: false
+      description: |-
+        Optional DPoP proof. Not enforced by this service: per the platform
+        contract DPoP is required only for open-finance TPP clients; internal
+        service-to-service and first-party callers present bearer tokens
+        whose aud must contain svc-acc-accounts-ledger.
+      schema:
+        type: string
+    InteractionId:
+      name: X-FAPI-Interaction-ID
+      in: header
+      required: false
+      description: Correlation id; generated when absent and echoed on the response and in event envelopes.
+      schema:
+        type: string
+    IdempotencyKey:
+      name: x-idempotency-key
+      in: header
+      required: true
+      description: Client-chosen key that makes opening an account safe to retry.
+      schema:
+        type: string
+        maxLength: 128
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      schema:
+        type: string
+        maxLength: 64
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Missing or invalid bearer token
+    Forbidden:
+      description: The token's roles do not allow this operation
+    NotFound:
+      description: Unknown, or not visible to this caller (one fixed answer)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: Idempotency key or reference reused with other content, a concurrent change, or an invalid state change
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unprocessable:
+      description: The entry is well formed but cannot be booked (unbalanced, insufficient funds, account not operational)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    OpenAccountRequest:
+      type: object
+      required: [accountType, currency]
+      additionalProperties: false
+      properties:
+        customerId:
+          type: string
+          maxLength: 64
+          description: Holder. Required for every accountType except INTERNAL, where it must be absent.
+        accountType:
+          type: string
+          enum: [CURRENT, SAVINGS, INVESTMENT, BUSINESS, INTERNAL]
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        islamicCompliant:
+          type: boolean
+          description: Profit-sharing instead of interest. Not allowed on INTERNAL accounts.
+    FreezeRequest:
+      type: object
+      required: [reason]
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          maxLength: 256
+    AccountResponse:
+      type: object
+      required: [accountId, category, accountType, status, currency, availableBalance, bookedBalance,
+                 debitAllowed, creditAllowed, islamicCompliant, openedAt, updatedAt]
+      properties:
+        accountId:
+          type: string
+        customerId:
+          type: string
+          nullable: true
+          description: The holder; null for an internal account.
+        category:
+          type: string
+          enum: [CUSTOMER, INTERNAL]
+        accountType:
+          type: string
+          enum: [CURRENT, SAVINGS, INVESTMENT, BUSINESS, INTERNAL]
+        status:
+          type: string
+          enum: [ACTIVE, FROZEN, CLOSED]
+        currency:
+          type: string
+        availableBalance:
+          type: number
+          description: Decimal amount in currency. Holds are not modelled yet, so it equals bookedBalance.
+        bookedBalance:
+          type: number
+        debitAllowed:
+          type: boolean
+        creditAllowed:
+          type: boolean
+        islamicCompliant:
+          type: boolean
+        openedAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    PostJournalEntryRequest:
+      type: object
+      required: [reference, currency, lines]
+      additionalProperties: false
+      properties:
+        reference:
+          type: string
+          maxLength: 128
+          description: The caller's business key (payment id, mandate collection id); one booking per reference.
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        lines:
+          type: array
+          minItems: 2
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/PostingLine'
+        narrative:
+          type: string
+          maxLength: 256
+    PostingLine:
+      type: object
+      required: [accountId, side, amount]
+      additionalProperties: false
+      properties:
+        accountId:
+          type: string
+          maxLength: 64
+        side:
+          type: string
+          enum: [DEBIT, CREDIT]
+        amount:
+          type: number
+          description: Positive decimal amount in the entry currency.
+    JournalEntryResponse:
+      type: object
+      required: [journalEntryId, reference, currency, lines, bookedAt, replay]
+      properties:
+        journalEntryId:
+          type: string
+        reference:
+          type: string
+        currency:
+          type: string
+        lines:
+          type: array
+          items:
+            $ref: '#/components/schemas/PostingLine'
+        narrative:
+          type: string
+          nullable: true
+        bookedAt:
+          type: string
+          format: date-time
+        replay:
+          type: boolean
+    ErrorResponse:
+      type: object
+      required: [code, message, timestamp]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        interactionId:
+          type: string
+          nullable: true
+        timestamp:
+          type: string
+          format: date-time

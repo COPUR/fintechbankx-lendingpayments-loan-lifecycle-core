@@ -1,29 +1,72 @@
 package com.bank.loan.application;
 
 import com.bank.loan.application.dto.CreateLoanRequest;
-import com.bank.loan.application.dto.LoanResponse;
 import com.bank.loan.domain.InterestRate;
 import com.bank.loan.domain.Loan;
 import com.bank.loan.domain.LoanId;
-import com.bank.loan.domain.LoanRepository;
+import com.bank.loan.domain.port.out.LoanRepository;
 import com.bank.loan.domain.LoanTerm;
+import com.bank.loan.domain.LoanApprovedEvent;
+import com.bank.loan.domain.LoanCreatedEvent;
+import com.bank.loan.domain.port.in.RecordCompletedLoanPaymentCommand;
+import com.bank.loan.domain.port.in.RepayLoanCommand;
+import com.bank.loan.domain.port.out.CustomerCreditService;
+import com.bank.loan.domain.port.out.CustomerCreditService.CreditDecision;
+import com.bank.loan.domain.port.out.CustomerCreditService.UnusedReservation;
+import com.bank.loan.domain.port.out.CustomerCreditUnavailableException;
+import com.bank.loan.domain.port.out.AccountsLedgerUnavailableException;
+import com.bank.loan.domain.port.out.JournalEntry;
+import com.bank.loan.domain.port.out.JournalEntryReceipt;
+import com.bank.loan.domain.port.out.JournalEntryReferenceReusedException;
+import com.bank.loan.domain.port.out.JournalEntryRejectedException;
+import com.bank.loan.domain.port.out.LoanBookingAccounts;
+import com.bank.loan.domain.port.out.LoanBookingNotConfiguredException;
+import com.bank.loan.domain.InstallmentStatus;
+import com.bank.loan.domain.LoanInstallment;
+import com.bank.loan.domain.LoanStatus;
+import com.bank.loan.domain.RateBasis;
+import com.bank.loan.domain.PaymentId;
+import com.bank.loan.domain.Repayment;
+import com.bank.loan.domain.port.out.LoanEventPublisher;
+import com.bank.loan.domain.port.out.RepaymentBooking;
+import com.bank.loan.domain.port.out.RepaymentBookings;
+import com.bank.loan.domain.port.out.RepaymentLedger;
+import com.bank.loan.domain.port.out.UnresolvedBookingSignal;
+import com.bank.shared.kernel.domain.DomainEvent;
 import com.bank.shared.kernel.domain.CustomerId;
 import com.bank.shared.kernel.domain.Money;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionOperations;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.math.BigDecimal;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.Currency;
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -36,8 +79,58 @@ class LoanManagementServiceTest {
     @Mock
     private CustomerCreditService customerCreditService;
 
-    @InjectMocks
+    @Mock
+    private LoanEventPublisher eventPublisher;
+
+    @Mock
+    private RepaymentBookings repaymentBookings;
+
+    @Mock
+    private UnresolvedBookingSignal unresolvedBookings;
+
+    private final InMemoryRepaymentLedger ledger = new InMemoryRepaymentLedger();
+    private final FakeTransactions transactions = new FakeTransactions();
+    private final Clock clock = Clock.fixed(Instant.parse("2026-10-08T06:00:00Z"), ZoneOffset.UTC);
+    private final List<JournalEntry> journalled = new ArrayList<>();
+    private final List<Boolean> journalTransactionOpen = new ArrayList<>();
+    private final LoanBookingAccounts.Accounts bookingAccounts =
+        new LoanBookingAccounts.Accounts("LOAN-RECEIVABLE", "DISBURSEMENT-CLEARING");
+    private RuntimeException journalFailure;
+    private RuntimeException bookingFailure;
+    private RuntimeException interestFailure;
+    private final LoanBookingAccounts loanBookingAccounts = new LoanBookingAccounts() {
+        @Override
+        public Accounts forCurrency(Currency currency) {
+            if (bookingFailure != null) {
+                throw bookingFailure;
+            }
+            return bookingAccounts;
+        }
+
+        @Override
+        public String interestIncomeAccountId(Currency currency) {
+            if (interestFailure != null) {
+                throw interestFailure;
+            }
+            return "INTEREST-INCOME";
+        }
+    };
     private LoanManagementService service;
+
+    @BeforeEach
+    void setUp() {
+        service = new LoanManagementService(loanRepository, customerCreditService, eventPublisher, ledger,
+            repaymentBookings, this::journal, loanBookingAccounts, unresolvedBookings, transactions, clock);
+    }
+
+    private JournalEntryReceipt journal(JournalEntry entry) {
+        journalTransactionOpen.add(transactions.active);
+        journalled.add(entry);
+        if (journalFailure != null) {
+            throw journalFailure;
+        }
+        return new JournalEntryReceipt("JE-" + journalled.size(), false, clock.instant());
+    }
 
     @Test
     void createLoanApplicationShouldPersistWhenCreditIsAvailable() {
@@ -51,10 +144,11 @@ class LoanManagementServiceTest {
         when(customerCreditService.hasAvailableCredit(any(CustomerId.class), any(Money.class))).thenReturn(true);
         when(loanRepository.save(any(Loan.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
-        LoanResponse response = service.createLoanApplication(request);
+        Loan created = service.applyForLoan(request.toCommand());
 
-        assertThat(response.customerId()).isEqualTo("CUST-LOAN-001");
-        assertThat(response.status()).isEqualTo("CREATED");
+        assertThat(created.getCustomerId().getValue()).isEqualTo("CUST-LOAN-001");
+        assertThat(created.getStatus()).isEqualTo(LoanStatus.CREATED);
+        assertThat(created.getInstallments()).hasSize(24);
         verify(loanRepository).save(any(Loan.class));
     }
 
@@ -70,7 +164,7 @@ class LoanManagementServiceTest {
         when(customerCreditService.hasAvailableCredit(any(CustomerId.class), any(Money.class))).thenReturn(false);
         when(customerCreditService.getAvailableCredit(any(CustomerId.class))).thenReturn(Money.aed(new BigDecimal("1000.00")));
 
-        assertThatThrownBy(() -> service.createLoanApplication(request))
+        assertThatThrownBy(() -> service.applyForLoan(request.toCommand()))
             .isInstanceOf(InsufficientCreditException.class)
             .hasMessageContaining("insufficient credit");
 
@@ -83,20 +177,17 @@ class LoanManagementServiceTest {
         when(loanRepository.findById(LoanId.of("LOAN-SVC-001"))).thenReturn(Optional.of(loanToApprove));
         when(loanRepository.save(loanToApprove)).thenReturn(loanToApprove);
 
-        LoanResponse approved = service.approveLoan("LOAN-SVC-001");
-        assertThat(approved.status()).isEqualTo("APPROVED");
+        assertThat(service.approve(LoanId.of("LOAN-SVC-001")).getStatus()).isEqualTo(LoanStatus.APPROVED);
 
         Loan loanToReject = loan("LOAN-SVC-002", "12000.00", 12);
         when(loanRepository.findById(LoanId.of("LOAN-SVC-002"))).thenReturn(Optional.of(loanToReject));
         when(loanRepository.save(loanToReject)).thenReturn(loanToReject);
-        LoanResponse rejected = service.rejectLoan("LOAN-SVC-002", "Policy");
-        assertThat(rejected.status()).isEqualTo("REJECTED");
+        assertThat(service.reject(LoanId.of("LOAN-SVC-002"), "Policy").getStatus()).isEqualTo(LoanStatus.REJECTED);
 
         Loan loanToCancel = loan("LOAN-SVC-003", "12000.00", 12);
         when(loanRepository.findById(LoanId.of("LOAN-SVC-003"))).thenReturn(Optional.of(loanToCancel));
         when(loanRepository.save(loanToCancel)).thenReturn(loanToCancel);
-        LoanResponse cancelled = service.cancelLoan("LOAN-SVC-003", "Customer request");
-        assertThat(cancelled.status()).isEqualTo("CANCELLED");
+        assertThat(service.cancel(LoanId.of("LOAN-SVC-003"), "Customer request").getStatus()).isEqualTo(LoanStatus.CANCELLED);
     }
 
     @Test
@@ -105,41 +196,722 @@ class LoanManagementServiceTest {
         approvedLoan.approve();
         when(loanRepository.findById(LoanId.of("LOAN-SVC-004"))).thenReturn(Optional.of(approvedLoan));
         when(loanRepository.save(approvedLoan)).thenReturn(approvedLoan);
-        when(customerCreditService.reserveCredit(approvedLoan.getCustomerId(), approvedLoan.getPrincipalAmount())).thenReturn(true);
+        when(customerCreditService.reserveCredit(approvedLoan.getId(), approvedLoan.getCustomerId(), approvedLoan.getPrincipalAmount()))
+            .thenReturn(CreditDecision.ACCEPTED);
 
-        LoanResponse response = service.disburseLoan("LOAN-SVC-004");
+        Loan disbursed = service.disburse(LoanId.of("LOAN-SVC-004"));
 
-        assertThat(response.status()).isEqualTo("DISBURSED");
-        verify(customerCreditService).reserveCredit(approvedLoan.getCustomerId(), approvedLoan.getPrincipalAmount());
+        assertThat(disbursed.getStatus()).isEqualTo(LoanStatus.DISBURSED);
+        verify(customerCreditService).reserveCredit(approvedLoan.getId(), approvedLoan.getCustomerId(), approvedLoan.getPrincipalAmount());
         verify(loanRepository).save(approvedLoan);
     }
 
     @Test
+    void refusedReservationLeavesTheLoanApprovedWithoutSavingOrEvents() {
+        Loan approvedLoan = loan("LOAN-SVC-REF", "10000.00", 12);
+        approvedLoan.approve();
+        approvedLoan.clearDomainEvents();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-REF"))).thenReturn(Optional.of(approvedLoan));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.REFUSED);
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-REF")))
+            .isInstanceOf(InsufficientCreditException.class)
+            .hasMessageContaining("refused to reserve AED 10000.00")
+            .message().doesNotContain("LOAN-SVC-REF");
+
+        assertThat(approvedLoan.getStatus()).isEqualTo(LoanStatus.APPROVED);
+        assertThat(approvedLoan.getDomainEvents()).isEmpty();
+        verify(loanRepository, never()).save(any(Loan.class));
+        verifyNoInteractions(eventPublisher);
+    }
+
+    @Test
+    void unavailableCustomerServiceFailsTheDisbursementWithoutChangingTheLoan() {
+        Loan approvedLoan = loan("LOAN-SVC-503", "10000.00", 12);
+        approvedLoan.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-503"))).thenReturn(Optional.of(approvedLoan));
+        when(customerCreditService.reserveCredit(any(), any(), any()))
+            .thenThrow(new CustomerCreditUnavailableException("customer service down"));
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-503")))
+            .isInstanceOf(CustomerCreditUnavailableException.class);
+        assertThat(approvedLoan.getStatus()).isEqualTo(LoanStatus.APPROVED);
+        verify(loanRepository, never()).save(any(Loan.class));
+    }
+
+    @Test
+    void disbursingALoanThatIsNotApprovedNeverReservesCredit() {
+        Loan created = loan("LOAN-SVC-NEW", "10000.00", 12);
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-NEW"))).thenReturn(Optional.of(created));
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-NEW")))
+            .isInstanceOf(IllegalStateException.class);
+        verifyNoInteractions(customerCreditService);
+    }
+
+    @Test
+    void disbursementIsBookedBeforeTheLoanIsSavedWithNoTransactionOpen() {
+        Loan approvedLoan = loan("LOAN-SVC-BOOK", "10000.00", 12);
+        approvedLoan.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-BOOK"))).thenReturn(Optional.of(approvedLoan));
+        when(loanRepository.save(any(Loan.class))).thenAnswer(invocation -> {
+            assertThat(journalled).as("booked before the loan is saved").hasSize(1);
+            return invocation.getArgument(0);
+        });
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+
+        service.disburse(LoanId.of("LOAN-SVC-BOOK"));
+
+        Money principal = Money.aed(new BigDecimal("10000.00"));
+        assertThat(journalled).hasSize(1);
+        JournalEntry entry = journalled.get(0);
+        assertThat(entry.reference()).isEqualTo("loan-disbursement:LOAN-SVC-BOOK");
+        assertThat(entry.currency()).isEqualTo(Currency.getInstance("AED"));
+        assertThat(entry.lines()).containsExactly(
+            new JournalEntry.Line("LOAN-RECEIVABLE", JournalEntry.Side.DEBIT, principal),
+            new JournalEntry.Line("DISBURSEMENT-CLEARING", JournalEntry.Side.CREDIT, principal));
+        assertThat(journalTransactionOpen).containsExactly(false);
+    }
+
+    @Test
+    void ledgerThatCannotBookTheDisbursementFailsItWithTheLoanApprovedAndCreditReleased() {
+        Loan approvedLoan = loan("LOAN-SVC-LDG", "10000.00", 12);
+        approvedLoan.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-LDG"))).thenReturn(Optional.of(approvedLoan));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        when(customerCreditService.cancelReservation(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        journalFailure = new AccountsLedgerUnavailableException("ledger timed out");
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-LDG")))
+            .isInstanceOf(AccountsLedgerUnavailableException.class);
+
+        assertThat(approvedLoan.getStatus()).isEqualTo(LoanStatus.APPROVED);
+        verify(unresolvedBookings).raise(LoanId.of("LOAN-SVC-LDG"), "loan-disbursement:LOAN-SVC-LDG",
+            UnresolvedBookingSignal.Cause.LEDGER_UNANSWERED);
+        verify(loanRepository, never()).save(any(Loan.class));
+        verify(customerCreditService, never()).markReservationUsed(any());
+        verify(customerCreditService).cancelReservation(approvedLoan.getId(), approvedLoan.getCustomerId(),
+            Money.aed(new BigDecimal("10000.00")));
+    }
+
+    @Test
+    void ledgerRefusalFailsTheDisbursementTheSameWay() {
+        Loan approvedLoan = loan("LOAN-SVC-REJ", "10000.00", 12);
+        approvedLoan.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-REJ"))).thenReturn(Optional.of(approvedLoan));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        when(customerCreditService.cancelReservation(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        journalFailure = new JournalEntryRejectedException("ACCOUNT_NOT_OPERATIONAL", "account is frozen");
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-REJ")))
+            .isInstanceOf(JournalEntryRejectedException.class);
+
+        assertThat(approvedLoan.getStatus()).isEqualTo(LoanStatus.APPROVED);
+        verifyNoInteractions(unresolvedBookings);
+        verify(loanRepository, never()).save(any(Loan.class));
+        verify(customerCreditService).cancelReservation(approvedLoan.getId(), approvedLoan.getCustomerId(),
+            Money.aed(new BigDecimal("10000.00")));
+    }
+
+    @Test
+    void reusedReferenceIsRefusedButSignalledBecauseTheEntryExists() {
+        Loan approvedLoan = loan("LOAN-SVC-REUSE", "10000.00", 12);
+        approvedLoan.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-REUSE"))).thenReturn(Optional.of(approvedLoan));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        when(customerCreditService.cancelReservation(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        journalFailure = new JournalEntryReferenceReusedException("IDEMPOTENCY_KEY_REUSED", "other lines");
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-REUSE")))
+            .isInstanceOf(JournalEntryRejectedException.class);
+
+        assertThat(approvedLoan.getStatus()).isEqualTo(LoanStatus.APPROVED);
+        verify(unresolvedBookings).raise(LoanId.of("LOAN-SVC-REUSE"), "loan-disbursement:LOAN-SVC-REUSE",
+            UnresolvedBookingSignal.Cause.REFERENCE_REUSED);
+        verifyNoMoreInteractions(unresolvedBookings);
+        verify(loanRepository, never()).save(any(Loan.class));
+    }
+
+    @Test
+    void withoutBookingAccountsNothingIsBookedAndTheLoanStaysApproved() {
+        Loan approvedLoan = loan("LOAN-SVC-NOACC", "10000.00", 12);
+        approvedLoan.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-NOACC"))).thenReturn(Optional.of(approvedLoan));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        when(customerCreditService.cancelReservation(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        bookingFailure = new LoanBookingNotConfiguredException("No loan booking accounts are configured for AED");
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-NOACC")))
+            .isInstanceOf(LoanBookingNotConfiguredException.class);
+
+        assertThat(journalled).isEmpty();
+        assertThat(approvedLoan.getStatus()).isEqualTo(LoanStatus.APPROVED);
+        verifyNoInteractions(unresolvedBookings);
+        verify(customerCreditService).cancelReservation(approvedLoan.getId(), approvedLoan.getCustomerId(),
+            Money.aed(new BigDecimal("10000.00")));
+    }
+
+    @Test
+    void aRetryAfterAFailedStoreBooksUnderTheSameReference() {
+        Loan approvedLoan = loan("LOAN-SVC-RETRY", "10000.00", 12);
+        approvedLoan.approve();
+        Loan stillApproved = loan("LOAN-SVC-RETRY", "10000.00", 12);
+        stillApproved.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-RETRY")))
+            .thenReturn(Optional.of(approvedLoan), Optional.of(approvedLoan), Optional.of(stillApproved),
+                Optional.of(stillApproved), Optional.of(stillApproved));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        when(customerCreditService.cancelReservation(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        when(loanRepository.save(any(Loan.class)))
+            .thenThrow(new OptimisticLockingFailureException("version 3"))
+            .thenAnswer(invocation -> invocation.getArgument(0));
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-RETRY")))
+            .isInstanceOf(OptimisticLockingFailureException.class);
+        service.disburse(LoanId.of("LOAN-SVC-RETRY"));
+
+        assertThat(journalled).extracting(JournalEntry::reference)
+            .containsExactly("loan-disbursement:LOAN-SVC-RETRY", "loan-disbursement:LOAN-SVC-RETRY");
+        verify(customerCreditService).cancelReservation(LoanId.of("LOAN-SVC-RETRY"), approvedLoan.getCustomerId(),
+            Money.aed(new BigDecimal("10000.00")));
+    }
+
+    @Test
     void makePaymentShouldReleaseCreditOnlyWhenLoanBecomesFullyPaid() {
+        // 5,000.00 at 6% over 12 months: the balance is the principal, paid off in one payment
         Loan fullPaymentLoan = loan("LOAN-SVC-005", "5000.00", 12);
         fullPaymentLoan.approve();
         fullPaymentLoan.disburse();
         when(loanRepository.findById(LoanId.of("LOAN-SVC-005"))).thenReturn(Optional.of(fullPaymentLoan));
         when(loanRepository.save(fullPaymentLoan)).thenReturn(fullPaymentLoan);
+        when(customerCreditService.releaseCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
 
-        LoanResponse fullyPaid = service.makePayment("LOAN-SVC-005", Money.aed(new BigDecimal("5000.00")));
+        Loan fullyPaid = service.repay(RepayLoanCommand.withoutKey(LoanId.of("LOAN-SVC-005"), fullPaymentLoan.getOutstandingBalance()));
 
-        assertThat(fullyPaid.status()).isEqualTo("FULLY_PAID");
-        verify(customerCreditService).releaseCredit(fullPaymentLoan.getCustomerId(), fullPaymentLoan.getPrincipalAmount());
+        assertThat(fullyPaid.getStatus()).isEqualTo(LoanStatus.FULLY_PAID);
+        assertThat(fullyPaid.getOutstandingBalance().getAmount()).isEqualByComparingTo("0.00");
+        verify(customerCreditService).releaseCredit(fullPaymentLoan.getId(), fullPaymentLoan.getCustomerId(), fullPaymentLoan.getPrincipalAmount());
+        assertThat(ledger.recorded).singleElement().satisfies(repayment -> {
+            assertThat(repayment.loanFullyPaid()).isTrue();
+            assertThat(repayment.allocations()).hasSize(12);
+            assertThat(repayment.source()).isEqualTo(Repayment.Source.API);
+            assertThat(repayment.appliedAt()).isEqualTo(Instant.parse("2026-10-08T06:00:00Z"));
+        });
 
         Loan partialPaymentLoan = loan("LOAN-SVC-006", "6000.00", 12);
         partialPaymentLoan.approve();
         partialPaymentLoan.disburse();
+        Money balanceBefore = partialPaymentLoan.getOutstandingBalance();
         when(loanRepository.findById(LoanId.of("LOAN-SVC-006"))).thenReturn(Optional.of(partialPaymentLoan));
         when(loanRepository.save(partialPaymentLoan)).thenReturn(partialPaymentLoan);
 
-        LoanResponse partial = service.makePayment("LOAN-SVC-006", Money.aed(new BigDecimal("1000.00")));
+        Loan partial = service.repay(RepayLoanCommand.withoutKey(LoanId.of("LOAN-SVC-006"), Money.aed(new BigDecimal("1000.00"))));
 
-        assertThat(partial.outstandingBalance()).isEqualByComparingTo("5000.00");
+        assertThat(partial.getOutstandingBalance().getAmount()).isEqualByComparingTo(balanceBefore.getAmount().subtract(new BigDecimal("1000.00")));
         verify(customerCreditService, never()).releaseCredit(
+            eq(partialPaymentLoan.getId()),
             eq(partialPaymentLoan.getCustomerId()),
             eq(partialPaymentLoan.getPrincipalAmount())
         );
+    }
+
+    @Test
+    void refusedReleaseDoesNotUndoTheRepayment() {
+        Loan loan = disbursedLoan("LOAN-SVC-REL");
+        when(customerCreditService.releaseCredit(any(), any(), any())).thenReturn(CreditDecision.REFUSED);
+
+        Loan paid = service.repay(RepayLoanCommand.withoutKey(LoanId.of("LOAN-SVC-REL"), loan.getOutstandingBalance()));
+
+        assertThat(paid.getStatus()).isEqualTo(LoanStatus.FULLY_PAID);
+        assertThat(ledger.recorded).hasSize(1);
+    }
+
+    @Test
+    void sameIdempotencyKeyReturnsTheLoanWithoutApplyingTheMoneyTwice() {
+        Loan loan = disbursedLoan("LOAN-SVC-IDEM");
+        RepayLoanCommand request = new RepayLoanCommand(LoanId.of("LOAN-SVC-IDEM"), Money.aed(new BigDecimal("100.00")),
+            "CUST-SVC-IDEM", "key-1");
+
+        service.repay(request);
+        Loan replay = service.repay(request);
+
+        assertThat(ledger.recorded).hasSize(1);
+        assertThat(ledger.recorded.getFirst().idempotencyKey()).isEqualTo("key-1");
+        assertThat(replay.getOutstandingBalance()).isEqualTo(loan.getOutstandingBalance());
+        verify(loanRepository).save(loan);
+    }
+
+    @Test
+    void reusingAnIdempotencyKeyForAnotherAmountIsRefused() {
+        disbursedLoan("LOAN-SVC-IDEM2");
+        service.repay(new RepayLoanCommand(LoanId.of("LOAN-SVC-IDEM2"), Money.aed(new BigDecimal("100.00")), "CUST-SVC-IDEM2", "key-2"));
+
+        assertThatThrownBy(() -> service.repay(new RepayLoanCommand(LoanId.of("LOAN-SVC-IDEM2"),
+                Money.aed(new BigDecimal("200.00")), "CUST-SVC-IDEM2", "key-2")))
+            .isInstanceOf(IdempotencyKeyReusedException.class)
+            .hasMessageContaining("key-2");
+        assertThat(ledger.recorded).hasSize(1);
+    }
+
+    @Test
+    void completedLoanPaymentIsAppliedOnceUnderThePaymentServicesId() {
+        Loan loan = disbursedLoan("LOAN-SVC-EVT");
+        Money before = loan.getOutstandingBalance();
+
+        RecordCompletedLoanPaymentCommand completed = new RecordCompletedLoanPaymentCommand(PaymentId.of("PAY-EVT-1"),
+            LoanId.of("LOAN-SVC-EVT"), Money.aed(new BigDecimal("250.00")));
+        boolean first = service.recordCompletedLoanPayment(completed);
+        boolean second = service.recordCompletedLoanPayment(completed);
+
+        assertThat(first).isTrue();
+        assertThat(second).isFalse();
+        assertThat(loan.getOutstandingBalance()).isEqualTo(before.subtract(Money.aed(new BigDecimal("250.00"))));
+        assertThat(ledger.recorded).singleElement().satisfies(repayment -> {
+            assertThat(repayment.paymentId()).isEqualTo(PaymentId.of("PAY-EVT-1"));
+            assertThat(repayment.source()).isEqualTo(Repayment.Source.PAYMENT_EVENT);
+            assertThat(repayment.idempotencyKey()).isNull();
+        });
+    }
+
+    /**
+     * ADR-019 section 4: the loan events raised by a consumed payment event
+     * carry that event's correlationId, and its eventId as causationId, all
+     * the way to the outbox port (no new correlation id, no Kafka types).
+     */
+    @Test
+    void eventsOfACompletedLoanPaymentCarryTheConsumedEventsCorrelationAndCausation() {
+        Loan loan = disbursedLoan("LOAN-SVC-CAUSE");
+        org.mockito.Mockito.clearInvocations(eventPublisher);
+        com.bank.loan.domain.port.out.EventCausation causation = new com.bank.loan.domain.port.out.EventCausation(
+            "corr-pay-1", "6f1c3a3e-1a52-4f7e-9d43-0b8a3d9f0c11");
+
+        service.recordCompletedLoanPayment(new RecordCompletedLoanPaymentCommand(PaymentId.of("PAY-CAUSE-1"),
+            LoanId.of("LOAN-SVC-CAUSE"), Money.aed(new BigDecimal("250.00")), causation));
+
+        verify(eventPublisher).publish(eq(loan), org.mockito.ArgumentMatchers.anyList(), eq(causation));
+        verify(eventPublisher, never()).publish(any(Loan.class), org.mockito.ArgumentMatchers.anyList());
+    }
+
+    @Test
+    void completedLoanPaymentForAnUnknownLoanFails() {
+        when(loanRepository.findById(any(LoanId.class))).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.recordCompletedLoanPayment(new RecordCompletedLoanPaymentCommand(
+                PaymentId.of("PAY-X"), LoanId.of("LOAN-NONE"), Money.aed(BigDecimal.TEN))))
+            .isInstanceOf(LoanNotFoundException.class);
+    }
+
+    // --- no database transaction around customer-service calls ------------------
+
+    @Test
+    void creditCheckAndReservationAreAnsweredWithNoTransactionOpen() {
+        Loan approvedLoan = loan("LOAN-SVC-NOTX", "10000.00", 12);
+        approvedLoan.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-NOTX"))).thenReturn(Optional.of(approvedLoan));
+        when(loanRepository.save(any(Loan.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        List<Boolean> transactionOpenAtCall = new ArrayList<>();
+        when(customerCreditService.hasAvailableCredit(any(), any())).thenAnswer(invocation -> {
+            transactionOpenAtCall.add(transactions.active);
+            return true;
+        });
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenAnswer(invocation -> {
+            transactionOpenAtCall.add(transactions.active);
+            return CreditDecision.ACCEPTED;
+        });
+
+        service.applyForLoan(new com.bank.loan.domain.port.in.ApplyForLoanCommand(CustomerId.of("CUST-NOTX"),
+            Money.aed(new BigDecimal("1000.00")), InterestRate.of(new BigDecimal("6.0")), LoanTerm.ofMonths(12)));
+        service.disburse(LoanId.of("LOAN-SVC-NOTX"));
+
+        assertThat(transactionOpenAtCall).containsExactly(false, false);
+        assertThat(transactions.commits).isEqualTo(3); // save application; read; disburse
+    }
+
+    @Test
+    void reservationIsCancelledWhenTheDisbursementCannotBeStored() {
+        Loan approvedLoan = loan("LOAN-SVC-COMP", "10000.00", 12);
+        approvedLoan.approve();
+        Loan stillApproved = loan("LOAN-SVC-COMP", "10000.00", 12);
+        stillApproved.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-COMP")))
+            .thenReturn(Optional.of(approvedLoan), Optional.of(approvedLoan), Optional.of(stillApproved));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        when(loanRepository.save(any(Loan.class))).thenThrow(new OptimisticLockingFailureException("version 3"));
+        when(customerCreditService.cancelReservation(any(), any(), any())).thenAnswer(invocation -> {
+            assertThat(transactions.active).isFalse();
+            return CreditDecision.ACCEPTED;
+        });
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-COMP")))
+            .isInstanceOf(OptimisticLockingFailureException.class);
+
+        verify(customerCreditService).cancelReservation(approvedLoan.getId(), approvedLoan.getCustomerId(),
+            Money.aed(new BigDecimal("10000.00")));
+        assertThat(transactions.rollbacks).isEqualTo(1);
+        verifyNoInteractions(eventPublisher);
+        verify(unresolvedBookings).raise(LoanId.of("LOAN-SVC-COMP"), "loan-disbursement:LOAN-SVC-COMP",
+            UnresolvedBookingSignal.Cause.NOT_STORED);
+    }
+
+    @Test
+    void reservationIsKeptWhenAConcurrentRequestDisbursedTheLoan() {
+        Loan approvedLoan = loan("LOAN-SVC-RACE", "10000.00", 12);
+        approvedLoan.approve();
+        Loan disbursedElsewhere = loan("LOAN-SVC-RACE", "10000.00", 12);
+        disbursedElsewhere.approve();
+        disbursedElsewhere.disburse();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-RACE")))
+            .thenReturn(Optional.of(approvedLoan), Optional.of(disbursedElsewhere), Optional.of(disbursedElsewhere));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-RACE")))
+            .isInstanceOf(IllegalStateException.class);
+
+        verify(customerCreditService, never()).cancelReservation(any(), any(), any());
+    }
+
+    @Test
+    void failedCancellationIsAttachedToTheOriginalFailure() {
+        Loan approvedLoan = loan("LOAN-SVC-COMP2", "10000.00", 12);
+        approvedLoan.approve();
+        Loan stillApproved = loan("LOAN-SVC-COMP2", "10000.00", 12);
+        stillApproved.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-COMP2")))
+            .thenReturn(Optional.of(approvedLoan), Optional.of(approvedLoan), Optional.of(stillApproved));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        when(loanRepository.save(any(Loan.class))).thenThrow(new OptimisticLockingFailureException("version 3"));
+        when(customerCreditService.cancelReservation(any(), any(), any()))
+            .thenThrow(new CustomerCreditUnavailableException("down"));
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-COMP2")))
+            .isInstanceOf(OptimisticLockingFailureException.class)
+            .satisfies(failure -> assertThat(failure.getSuppressed()).singleElement()
+                .isInstanceOf(CustomerCreditUnavailableException.class));
+    }
+
+    @Test
+    void creditIsReleasedOnlyAfterTheFullRepaymentCommitted() {
+        Loan loan = disbursedLoan("LOAN-SVC-AFTER");
+        when(customerCreditService.releaseCredit(any(), any(), any())).thenAnswer(invocation -> {
+            assertThat(transactions.active).isFalse();
+            assertThat(transactions.commits).isEqualTo(1);
+            assertThat(ledger.recorded).hasSize(1);
+            return CreditDecision.ACCEPTED;
+        });
+
+        service.repay(RepayLoanCommand.withoutKey(LoanId.of("LOAN-SVC-AFTER"), loan.getOutstandingBalance()));
+
+        var order = inOrder(loanRepository, customerCreditService);
+        order.verify(loanRepository).save(loan);
+        order.verify(customerCreditService).releaseCredit(loan.getId(), loan.getCustomerId(), loan.getPrincipalAmount());
+    }
+
+    @Test
+    void noReleaseWhenTheFullRepaymentLosesAnOptimisticLock() {
+        Loan loan = disbursedLoan("LOAN-SVC-LOCK");
+        when(loanRepository.save(loan)).thenThrow(new OptimisticLockingFailureException("version 2"));
+
+        assertThatThrownBy(() -> service.repay(RepayLoanCommand.withoutKey(LoanId.of("LOAN-SVC-LOCK"),
+                loan.getOutstandingBalance())))
+            .isInstanceOf(OptimisticLockingFailureException.class);
+
+        verify(customerCreditService, never()).releaseCredit(any(), any(), any());
+        assertThat(ledger.recorded).isEmpty();
+        assertThat(transactions.rollbacks).isEqualTo(1);
+    }
+
+    @Test
+    void failedReleaseDoesNotFailTheCommittedRepayment() {
+        Loan loan = disbursedLoan("LOAN-SVC-RELFAIL");
+        when(customerCreditService.releaseCredit(any(), any(), any()))
+            .thenThrow(new CustomerCreditUnavailableException("down"));
+
+        Loan paid = service.repay(RepayLoanCommand.withoutKey(LoanId.of("LOAN-SVC-RELFAIL"), loan.getOutstandingBalance()));
+
+        assertThat(paid.getStatus()).isEqualTo(LoanStatus.FULLY_PAID);
+        assertThat(ledger.recorded).hasSize(1);
+    }
+
+    @Test
+    void completedPaymentJoinsTheCallersTransactionAndReleasesAfterItCommits() {
+        Loan loan = disbursedLoan("LOAN-SVC-JOIN");
+        when(customerCreditService.releaseCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        RecordCompletedLoanPaymentCommand completed = new RecordCompletedLoanPaymentCommand(PaymentId.of("PAY-JOIN"),
+            LoanId.of("LOAN-SVC-JOIN"), loan.getOutstandingBalance());
+
+        transactions.execute(status -> {
+            service.recordCompletedLoanPayment(completed);
+            verify(customerCreditService, never()).releaseCredit(any(), any(), any());
+            return null;
+        });
+
+        assertThat(transactions.commits).isEqualTo(1);
+        verify(customerCreditService).releaseCredit(loan.getId(), loan.getCustomerId(), loan.getPrincipalAmount());
+    }
+
+    // --- review 5460235552: a loan closed before disbursement releases what it still holds ------------
+
+    @Test
+    void cancellingAnApprovedLoanReleasesItsUnusedReservationAfterTheCancellationCommitted() {
+        Loan approved = loan("LOAN-SVC-CXL", "25000.00", 24);
+        approved.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-CXL"))).thenReturn(Optional.of(approved));
+        when(loanRepository.save(approved)).thenReturn(approved);
+        when(customerCreditService.releaseUnusedReservation(any(), any(), any())).thenAnswer(invocation -> {
+            assertThat(transactions.active).isFalse();
+            assertThat(transactions.commits).isEqualTo(1);
+            return UnusedReservation.RELEASED;
+        });
+
+        Loan cancelled = service.cancel(LoanId.of("LOAN-SVC-CXL"), "Customer withdrew");
+
+        assertThat(cancelled.getStatus()).isEqualTo(LoanStatus.CANCELLED);
+        verify(customerCreditService).releaseUnusedReservation(LoanId.of("LOAN-SVC-CXL"), approved.getCustomerId(),
+            Money.aed(new BigDecimal("25000.00")));
+    }
+
+    @Test
+    void rejectingALoanAlsoReleasesAnUnusedReservation() {
+        Loan created = loan("LOAN-SVC-REJ", "8000.00", 12);
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-REJ"))).thenReturn(Optional.of(created));
+        when(loanRepository.save(created)).thenReturn(created);
+        when(customerCreditService.releaseUnusedReservation(any(), any(), any())).thenReturn(UnusedReservation.NONE);
+
+        service.reject(LoanId.of("LOAN-SVC-REJ"), "Policy");
+
+        verify(customerCreditService).releaseUnusedReservation(LoanId.of("LOAN-SVC-REJ"), created.getCustomerId(),
+            Money.aed(new BigDecimal("8000.00")));
+    }
+
+    @Test
+    void aReleaseThatFailsOrIsUnconfirmedDoesNotUndoTheCancellation() {
+        Loan first = loan("LOAN-SVC-CXL2", "25000.00", 24);
+        first.approve();
+        Loan second = loan("LOAN-SVC-CXL3", "25000.00", 24);
+        second.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-CXL2"))).thenReturn(Optional.of(first));
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-CXL3"))).thenReturn(Optional.of(second));
+        when(loanRepository.save(any(Loan.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(customerCreditService.releaseUnusedReservation(eq(LoanId.of("LOAN-SVC-CXL2")), any(), any()))
+            .thenThrow(new CustomerCreditUnavailableException("down"));
+        when(customerCreditService.releaseUnusedReservation(eq(LoanId.of("LOAN-SVC-CXL3")), any(), any()))
+            .thenReturn(UnusedReservation.UNCONFIRMED);
+
+        assertThat(service.cancel(LoanId.of("LOAN-SVC-CXL2"), "Customer withdrew").getStatus()).isEqualTo(LoanStatus.CANCELLED);
+        assertThat(service.cancel(LoanId.of("LOAN-SVC-CXL3"), "Customer withdrew").getStatus()).isEqualTo(LoanStatus.CANCELLED);
+        assertThat(transactions.rollbacks).isZero();
+    }
+
+    @Test
+    void theDisbursementMarksItsReservationUsedInsideItsTransaction() {
+        Loan approved = loan("LOAN-SVC-USED", "10000.00", 12);
+        approved.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-USED"))).thenReturn(Optional.of(approved));
+        when(loanRepository.save(approved)).thenReturn(approved);
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        List<Boolean> transactionOpen = new ArrayList<>();
+        org.mockito.Mockito.doAnswer(invocation -> transactionOpen.add(transactions.active))
+            .when(customerCreditService).markReservationUsed(LoanId.of("LOAN-SVC-USED"));
+
+        service.disburse(LoanId.of("LOAN-SVC-USED"));
+
+        assertThat(transactionOpen).containsExactly(true);
+    }
+
+    @Test
+    void aReservationReleasedMeanwhileRollsTheDisbursementBack() {
+        Loan approved = loan("LOAN-SVC-GONE", "10000.00", 12);
+        approved.approve();
+        Loan stillApproved = loan("LOAN-SVC-GONE", "10000.00", 12);
+        stillApproved.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-GONE")))
+            .thenReturn(Optional.of(approved), Optional.of(approved), Optional.of(stillApproved));
+        when(loanRepository.save(any(Loan.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        org.mockito.Mockito.doThrow(new CustomerCreditUnavailableException("released meanwhile"))
+            .when(customerCreditService).markReservationUsed(any());
+        when(customerCreditService.cancelReservation(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-GONE")))
+            .isInstanceOf(CustomerCreditUnavailableException.class);
+
+        assertThat(transactions.rollbacks).isEqualTo(1);
+        verify(customerCreditService).cancelReservation(any(), any(), any());
+    }
+
+    @Test
+    void reservationIsCancelledWhenTheLoanWasCancelledWhileItWasBeingDisbursed() {
+        Loan approved = loan("LOAN-SVC-CXLRACE", "10000.00", 12);
+        approved.approve();
+        Loan cancelledMeanwhile = loan("LOAN-SVC-CXLRACE", "10000.00", 12);
+        cancelledMeanwhile.approve();
+        cancelledMeanwhile.cancel("Customer withdrew");
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-CXLRACE")))
+            .thenReturn(Optional.of(approved), Optional.of(cancelledMeanwhile), Optional.of(cancelledMeanwhile));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        when(customerCreditService.cancelReservation(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-CXLRACE")))
+            .isInstanceOf(IllegalStateException.class);
+
+        verify(customerCreditService).cancelReservation(LoanId.of("LOAN-SVC-CXLRACE"), approved.getCustomerId(),
+            Money.aed(new BigDecimal("10000.00")));
+    }
+
+    /**
+     * Stands in for Spring's TransactionTemplate: nested calls join the outer
+     * transaction, synchronizations run afterCommit once the outermost commits.
+     */
+    static final class FakeTransactions implements TransactionOperations {
+        boolean active;
+        int commits;
+        int rollbacks;
+
+        @Override
+        public <T> T execute(TransactionCallback<T> action) {
+            if (active) {
+                return action.doInTransaction(null);
+            }
+            active = true;
+            TransactionSynchronizationManager.initSynchronization();
+            T result;
+            List<TransactionSynchronization> synchronizations;
+            try {
+                result = action.doInTransaction(null);
+                synchronizations = TransactionSynchronizationManager.getSynchronizations();
+            } catch (RuntimeException failure) {
+                rollbacks++;
+                throw failure;
+            } finally {
+                TransactionSynchronizationManager.clearSynchronization();
+                active = false;
+            }
+            commits++;
+            synchronizations.forEach(TransactionSynchronization::afterCommit);
+            return result;
+        }
+    }
+
+    /** A monolith loan (FLAT_TOTAL): 12 x 1,200.00 of 1,000.00 principal and 200.00 interest, none paid yet. */
+    private Loan migratedFlatRateLoan(String loanId) {
+        LoanId id = LoanId.of(loanId);
+        CustomerId customer = CustomerId.of("CUST-SVC-FLAT");
+        List<LoanInstallment> schedule = new ArrayList<>();
+        for (int n = 1; n <= 12; n++) {
+            schedule.add(LoanInstallment.rehydrate(id, customer, n, Money.aed(new BigDecimal("1200.00")),
+                Money.aed(new BigDecimal("1000.00")), Money.aed(new BigDecimal("200.00")),
+                LocalDate.of(2025, 7, 1).plusMonths(n - 1), Money.aed(new BigDecimal("0.00")), null,
+                InstallmentStatus.PENDING));
+        }
+        Loan loan = Loan.rehydrate(id, customer, Money.aed(new BigDecimal("12000.00")),
+            InterestRate.of(new BigDecimal("20.0")), RateBasis.FLAT_TOTAL, LoanTerm.ofMonths(12), LoanStatus.DISBURSED,
+            LocalDate.of(2025, 6, 1), LocalDate.of(2025, 6, 1), LocalDate.of(2025, 6, 1), LocalDate.of(2026, 6, 1),
+            Money.aed(new BigDecimal("12000.00")), schedule,
+            LocalDateTime.of(2025, 6, 1, 9, 30), LocalDateTime.of(2025, 6, 1, 9, 30), 0L);
+        org.mockito.Mockito.lenient().when(loanRepository.findById(id)).thenReturn(Optional.of(loan));
+        org.mockito.Mockito.lenient().when(loanRepository.save(loan)).thenReturn(loan);
+        return loan;
+    }
+
+    private Loan disbursedLoan(String loanId) {
+        Loan loan = loan(loanId, "5000.00", 12);
+        loan.approve();
+        loan.disburse();
+        loan.clearDomainEvents();
+        org.mockito.Mockito.lenient().when(loanRepository.findById(LoanId.of(loanId))).thenReturn(Optional.of(loan));
+        org.mockito.Mockito.lenient().when(loanRepository.save(loan)).thenReturn(loan);
+        return loan;
+    }
+
+    private static final class InMemoryRepaymentLedger implements RepaymentLedger {
+        final List<Repayment> recorded = new ArrayList<>();
+
+        @Override
+        public boolean contains(PaymentId paymentId) {
+            return recorded.stream().anyMatch(r -> r.paymentId().equals(paymentId));
+        }
+
+        @Override
+        public Optional<Repayment> findByIdempotencyKey(String requestScope, String idempotencyKey) {
+            return recorded.stream()
+                .filter(r -> requestScope.equals(r.requestScope()) && idempotencyKey.equals(r.idempotencyKey()))
+                .findFirst();
+        }
+
+        @Override
+        public void record(Repayment repayment) {
+            recorded.add(repayment);
+        }
+    }
+
+    @Test
+    void repaymentIsBookedInItsOwnTransactionUnderThePaymentReference() {
+        disbursedLoan("LOAN-SVC-BOOK");
+        List<Boolean> transactionOpenAtBooking = new ArrayList<>();
+        doAnswer(invocation -> {
+            transactionOpenAtBooking.add(transactions.active);
+            return null;
+        }).when(repaymentBookings).record(any(RepaymentBooking.class));
+
+        RepayLoanCommand request = new RepayLoanCommand(LoanId.of("LOAN-SVC-BOOK"), Money.aed(new BigDecimal("100.00")),
+            "CUST-SVC-BOOK", "key-book");
+        service.repay(request);
+        service.repay(request);
+
+        ArgumentCaptor<RepaymentBooking> booking = ArgumentCaptor.forClass(RepaymentBooking.class);
+        verify(repaymentBookings).record(booking.capture());
+        RepaymentBooking recorded = booking.getValue();
+        assertThat(recorded.reference())
+            .isEqualTo("loan-repayment:" + ledger.recorded.getFirst().paymentId().getValue());
+        assertThat(recorded.principal().getAmount()).isEqualByComparingTo("100.00");
+        assertThat(recorded.interest().isZero()).isTrue();
+        assertThat(recorded.receivableAccountId()).isEqualTo("LOAN-RECEIVABLE");
+        assertThat(recorded.clearingAccountId()).isEqualTo("DISBURSEMENT-CLEARING");
+        assertThat(recorded.interestIncomeAccountId()).isNull();
+        assertThat(transactionOpenAtBooking).containsExactly(true);
+    }
+
+    @Test
+    void repaymentWithInterestBooksTheInterestToItsIncomeAccount() {
+        migratedFlatRateLoan("LOAN-SVC-INT");
+
+        service.repay(RepayLoanCommand.withoutKey(LoanId.of("LOAN-SVC-INT"), Money.aed(new BigDecimal("1200.00"))));
+
+        ArgumentCaptor<RepaymentBooking> booking = ArgumentCaptor.forClass(RepaymentBooking.class);
+        verify(repaymentBookings).record(booking.capture());
+        assertThat(booking.getValue().principal().getAmount()).isEqualByComparingTo("1000.00");
+        assertThat(booking.getValue().interest().getAmount()).isEqualByComparingTo("200.00");
+        assertThat(booking.getValue().interestIncomeAccountId()).isEqualTo("INTEREST-INCOME");
+    }
+
+    @Test
+    void repaymentWithInterestWithoutAnIncomeAccountIsRefusedAndRolledBack() {
+        migratedFlatRateLoan("LOAN-SVC-NOINC");
+        interestFailure = new LoanBookingNotConfiguredException("No loan interest income account is configured");
+
+        assertThatThrownBy(() -> service.repay(RepayLoanCommand.withoutKey(LoanId.of("LOAN-SVC-NOINC"),
+                Money.aed(new BigDecimal("1200.00")))))
+            .isInstanceOf(LoanBookingNotConfiguredException.class);
+
+        verify(loanRepository, never()).save(any(Loan.class));
+        assertThat(ledger.recorded).isEmpty();
+        verifyNoInteractions(repaymentBookings);
+        assertThat(transactions.rollbacks).isEqualTo(1);
+    }
+
+    @Test
+    void repaymentWithoutBookingAccountsIsRefusedBeforeAnythingIsWritten() {
+        disbursedLoan("LOAN-SVC-NOACC");
+        bookingFailure = new LoanBookingNotConfiguredException("No loan booking accounts are configured for AED");
+
+        assertThatThrownBy(() -> service.repay(RepayLoanCommand.withoutKey(LoanId.of("LOAN-SVC-NOACC"),
+                Money.aed(new BigDecimal("100.00")))))
+            .isInstanceOf(LoanBookingNotConfiguredException.class);
+
+        verify(loanRepository, never()).save(any(Loan.class));
+        assertThat(ledger.recorded).isEmpty();
+        verifyNoInteractions(repaymentBookings, eventPublisher);
+        assertThat(transactions.rollbacks).isEqualTo(1);
     }
 
     @Test
@@ -147,29 +919,23 @@ class LoanManagementServiceTest {
         Loan loan = loan("LOAN-SVC-007", "9000.00", 12);
         when(loanRepository.findById(LoanId.of("LOAN-SVC-007"))).thenReturn(Optional.of(loan));
 
-        LoanResponse found = service.findLoanById("LOAN-SVC-007");
-        String customerId = service.getCustomerIdForLoan("LOAN-SVC-007");
+        Loan found = service.findLoan(LoanId.of("LOAN-SVC-007"));
 
-        assertThat(found.loanId()).isEqualTo("LOAN-SVC-007");
-        assertThat(customerId).isEqualTo(loan.getCustomerId().getValue());
+        assertThat(found).isSameAs(loan);
     }
 
     @Test
     void methodsShouldThrowLoanNotFoundWhenMissing() {
         when(loanRepository.findById(any(LoanId.class))).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> service.approveLoan("MISSING"))
+        LoanId missing = LoanId.of("MISSING");
+        assertThatThrownBy(() -> service.approve(missing)).isInstanceOf(LoanNotFoundException.class);
+        assertThatThrownBy(() -> service.reject(missing, "reason")).isInstanceOf(LoanNotFoundException.class);
+        assertThatThrownBy(() -> service.disburse(missing)).isInstanceOf(LoanNotFoundException.class);
+        assertThatThrownBy(() -> service.repay(RepayLoanCommand.withoutKey(missing, Money.aed(new BigDecimal("1.00")))))
             .isInstanceOf(LoanNotFoundException.class);
-        assertThatThrownBy(() -> service.rejectLoan("MISSING", "reason"))
-            .isInstanceOf(LoanNotFoundException.class);
-        assertThatThrownBy(() -> service.disburseLoan("MISSING"))
-            .isInstanceOf(LoanNotFoundException.class);
-        assertThatThrownBy(() -> service.makePayment("MISSING", Money.aed(new BigDecimal("1.00"))))
-            .isInstanceOf(LoanNotFoundException.class);
-        assertThatThrownBy(() -> service.findLoanById("MISSING"))
-            .isInstanceOf(LoanNotFoundException.class);
-        assertThatThrownBy(() -> service.cancelLoan("MISSING", "reason"))
-            .isInstanceOf(LoanNotFoundException.class);
+        assertThatThrownBy(() -> service.findLoan(missing)).isInstanceOf(LoanNotFoundException.class);
+        assertThatThrownBy(() -> service.cancel(missing, "reason")).isInstanceOf(LoanNotFoundException.class);
     }
 
     @Test
@@ -184,7 +950,7 @@ class LoanManagementServiceTest {
         when(customerCreditService.hasAvailableCredit(any(CustomerId.class), any(Money.class))).thenReturn(true);
         when(loanRepository.save(any(Loan.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
-        service.createLoanApplication(request);
+        service.applyForLoan(request.toCommand());
 
         ArgumentCaptor<CustomerId> customerIdCaptor = ArgumentCaptor.forClass(CustomerId.class);
         ArgumentCaptor<Money> moneyCaptor = ArgumentCaptor.forClass(Money.class);
@@ -201,5 +967,43 @@ class LoanManagementServiceTest {
             InterestRate.of(new BigDecimal("6.0")),
             LoanTerm.ofMonths(termMonths)
         );
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void createLoanApplicationShouldHandCreatedEventToOutboxAndClearIt() {
+        CreateLoanRequest request = new CreateLoanRequest(
+            "CUST-LOAN-EVT",
+            new BigDecimal("25000.00"),
+            "AED",
+            new BigDecimal("6.5"),
+            24
+        );
+        when(customerCreditService.hasAvailableCredit(any(CustomerId.class), any(Money.class))).thenReturn(true);
+        ArgumentCaptor<Loan> saved = ArgumentCaptor.forClass(Loan.class);
+        when(loanRepository.save(saved.capture())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.applyForLoan(request.toCommand());
+
+        ArgumentCaptor<List<DomainEvent>> events = ArgumentCaptor.forClass(List.class);
+        verify(eventPublisher).publish(eq(saved.getValue()), events.capture());
+        assertThat(events.getValue()).singleElement().isInstanceOf(LoanCreatedEvent.class);
+        assertThat(saved.getValue().getDomainEvents()).isEmpty();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void approveLoanShouldPublishOnlyTheApprovalEvent() {
+        Loan loan = Loan.create(LoanId.of("LOAN-EVT-2"), CustomerId.of("CUST-EVT-2"),
+            Money.aed(new BigDecimal("12000.00")), InterestRate.of(new BigDecimal("5.0")), LoanTerm.ofMonths(12));
+        loan.clearDomainEvents();
+        when(loanRepository.findById(LoanId.of("LOAN-EVT-2"))).thenReturn(Optional.of(loan));
+        when(loanRepository.save(any(Loan.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.approve(LoanId.of("LOAN-EVT-2"));
+
+        ArgumentCaptor<List<DomainEvent>> events = ArgumentCaptor.forClass(List.class);
+        verify(eventPublisher).publish(eq(loan), events.capture());
+        assertThat(events.getValue()).singleElement().isInstanceOf(LoanApprovedEvent.class);
     }
 }

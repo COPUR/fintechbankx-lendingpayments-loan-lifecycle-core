@@ -1,0 +1,639 @@
+# RUNBOOK-EXTRACT-ln-loan-lifecycle
+
+Extraction of the Loan aggregate from `enterprise-loan-management-system` into
+`svc-ln-loan-lifecycle` (this repository), following the strangler-fig steps of
+`fbx-monolith-extraction`. Status: **Proposed**.
+
+| Field | Value |
+|---|---|
+| Context / service | `ln` / `svc-ln-loan-lifecycle` (`app.ln.loan-lifecycle`) |
+| Slice | Loan aggregate: application, approval, disbursement, repayment, schedule, repayment history |
+| Owned data | `db_ln_loan_lifecycle_<env>`, schema `sc_ln_loan_lifecycle`: `loan`, `loan_installment`, `repayment`, `repayment_allocation`, `inbox_message`, `credit_reservation_generation`, `outbox_event` |
+| Publishes | `evt.ln.loan.v1`, one topic for the Loan aggregate (ADR-019, owner decision 2026-10-08): `Lending.Loan.{Created,Approved,Rejected,Disbursed,Cancelled,PaymentMade,FullyPaid}.v1`, named by the `eventType` header, key = loanId; DLQ `evt.ln.loan.dlq.v1` (`api/asyncapi/svc-ln-loan-lifecycle.yaml`; **catalog PR pending**, relay off until it merges) |
+| Consumes | `evt.pay.payment.v1` (payment aggregate topic), handles only `Payments.Payment.LoanPaymentCompleted.v1` by the `eventType` header and skips every other type (offset committed, never dead-lettered); group `cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1` (off until step 3) |
+| Depends on | `svc-cus-profile-kyc`: `GET /api/v1/customers/{id}/credit`, `POST .../credit/reserve`, `POST .../credit/release` |
+
+## 1. Data ownership split
+
+| Monolith object | Owner after the split | Notes |
+|---|---|---|
+| `loans` (V2) | this service, `loan` | FK to `customers` dropped; `customer_id` kept as text; flat rate kept (`rate_basis = FLAT_TOTAL`, `legacy_flat_rate`) |
+| `loan_installments` (V3) | this service, `loan_installment` | split into principal and interest; triggers replaced by aggregate logic |
+| `payments` (V4), COMPLETED rows | this service, `repayment` | the loan context owns how a repayment was applied; source `MONOLITH`, same id |
+| `payment_installments` (V4) | this service, `repayment_allocation` | one row per installment settled; early-payment discount and late penalty per row |
+| `payments` (V4), money movement and in-flight rows | `svc-pay-initiation-settlement` / stays in the monolith | INITIATED or PROCESSING payments finish in the monolith and are **not migrated** (step 2 refuses to run while any exist) |
+| `update_updated_at_column`, `check_loan_fully_paid` triggers | removed | `Loan` keeps `updated_at` and status |
+| `customers`, `customer_management` schema (V1) | `svc-cus-profile-kyc` | not copied; loans keep the id only |
+| `loan_origination` schema (V2__Create_loan_origination_schema) | not in this slice | origination workflow tables (applications, monthly rates); owner to be decided with the Architecture Board; nothing is copied and nothing here reads it |
+| `loan_applications`, `underwriters`, `loan_officers` (V10-V12) | not in this slice | origination workflow; same decision as above |
+| `credit_reports`, `risk_assessments` (V14-V15) | `svc-rsk-decisioning` | separate slice |
+| `compliance_reports` (V13) | `svc-cmp-evidence` | separate slice |
+| `loan_service.*` (loan/V1) | not migrated | parallel schema from an earlier split attempt; confirm it has no rows before the cutover |
+
+Migrations: `loan-infrastructure/src/main/resources/db/migration/V1..V12`. The service never reads
+monolith tables and the monolith must not read `sc_ln_loan_lifecycle`.
+
+### Database roles
+
+| Role | Secret (`{"username","password"}`) | Used by | Privileges |
+|---|---|---|---|
+| schema owner `loan_lifecycle_owner` | `<env>/loan-lifecycle-service/db-migration` (Terraform output `migration_db_secret_name`, Helm `migration.remoteSecretName`) | Flyway only, in the Helm pre-install/pre-upgrade Job (`migrate`) | owns `sc_ln_loan_lifecycle` and its tables; needs `CREATE` on the database |
+| runtime `loan_lifecycle_app` (`DB_USERNAME`) | `<env>/loan-lifecycle-service/db-app` (Terraform output `app_db_secret_name`, Helm `externalSecret.remoteSecretName`) | the service pods | granted by V4 (Flyway placeholder `runtime_role`): `USAGE` on the schema; `SELECT, INSERT, UPDATE` on `loan`, `credit_reservation_generation`; `SELECT, INSERT, UPDATE, DELETE` on `loan_installment`, `outbox_event`; `SELECT, INSERT` on `repayment`, `repayment_allocation`, `inbox_message`. No DDL, no `TRUNCATE` (`LoanLifecycleServiceIT.theRuntimeRoleCannotRunDdlOrRewriteTheRepaymentLedger`) |
+
+**DBA bootstrap, per environment, before the first deploy** (with the RDS master credential, Terraform
+output `master_user_secret_arn`):
+
+1. `CREATE ROLE loan_lifecycle_owner LOGIN PASSWORD '<generated>'; GRANT CREATE ON DATABASE db_ln_loan_lifecycle_<env> TO loan_lifecycle_owner;`
+2. `CREATE ROLE loan_lifecycle_app LOGIN PASSWORD '<generated>';` (no membership in the owner, no `CREATE`)
+3. Write both `{"username","password"}` documents to the two secrets Terraform created; set the Helm values
+   `migration.remoteSecretName` and `externalSecret.remoteSecretName` to their names.
+4. `helm upgrade --install` runs the migration Job first (it waits for External Secrets to sync the owner
+   credential), then the pods start with `SPRING_FLYWAY_ENABLED=false`. Both hook resources are deleted once
+   they succeed, which removes the owner credential's Kubernetes Secret.
+
+If an environment was ever migrated with a single role, V4 recorded a no-op; grant the runtime role by hand
+with the statements in `V4__grant_runtime_role_least_privilege.sql` before switching the pods to it.
+
+## 2. Backfill and reconciliation
+
+`db/backfill/run-backfill.sh "<monolith conninfo>" "<loan service conninfo>" <currency>`
+
+- `<loan service conninfo>` connects as the schema owner (`db-migration` secret): the backfill stages
+  and upserts rows the runtime role may not write.
+- `<currency>` is **required** (ISO 4217): the monolith stores none and its code falls back to USD,
+  so the book's currency is stated by whoever runs the migration. There is no default.
+- Refuses to run while any monolith payment is INITIATED or PROCESSING.
+- Refuses to run while a row in the loan service holds a balance written under the old schedule rule
+  (`00_guard_old_schedule_balance.sql`, run first): a loan created here whose balance is not its principal
+  less its repayments, or a migrated loan the service changed (`version > 0`) whose balance is not its
+  principal less the principal part paid. The guard changes no data.
+- **Per-environment check, must pass before cutover.** For each environment, run the guard against that
+  environment's loan service database and require exit 0:
+  `PGOPTIONS='-c default_transaction_read_only=on' psql "<loan service conninfo>" -v ON_ERROR_STOP=1 -f db/backfill/00_assert_read_only_session.sql -f db/backfill/00_guard_old_schedule_balance.sql`.
+  The read-only setting keeps the check from writing even on the schema owner's credential. The first file
+  stops the check if the session is not read-only: an `options=` keyword in the conninfo replaces PGOPTIONS,
+  so without that assertion the command would run on a writable session. It is a session
+  default, not a privilege boundary: once Platform provides a read-only role for the loan service database,
+  connect as that role instead. A refusal ("BACKFILL REFUSED: <n> loan(s) hold a balance written under the
+  old schedule rule") gives the row count; those rows need a decision (recompute or reload) before the
+  backfill runs. Record each environment's result (environment, date, the service role it ran as, not a
+  personal login, the change-ticket reference, exit code, output) in the acceptance checklist in section 6. No environment has been checked yet, so none is recorded as clean.
+- Exports `loans`, `loan_installments`, COMPLETED `payments` and their `payment_installments` in one
+  read-only snapshot (no customer columns), stages and transforms them
+  (`02_transform_into_loan_service.sql`, mapping listed at its top).
+- **Delta-safe**: every run upserts the monolith-owned columns of loans the service has not changed
+  since they were backfilled (`version = 0`; `source_updated_at`, `backfilled_at` record the run).
+  Loans the service changed are never overwritten.
+- Reconciles only monolith-owned rows (`03_reconcile.sql`): loan, installment, repayment and
+  allocation counts and totals, flat rates, outstanding totals, per-loan invariants, and the
+  **monthly payment the API reports against the monolith's first installment**. Any difference fails.
+
+Rehearsal: `scripts/migration/verify-backfill.sh <currency>` (CI passes `XTS`): refusal without a
+currency and with an in-flight payment, first run, then a monolith change plus a service-changed
+loan, second run, delta checks.
+
+## 3. Preconditions
+
+| Precondition | Before | Why |
+|---|---|---|
+| Customer cutover (`RUNBOOK-EXTRACT-cus-profile-kyc`, customer-profile-kyc-core 8794365) through its step 5; its step 5 routes the monolith's credit writes to the customer service and switches this service to `CUSTOMER_CREDIT_ADAPTER=http` | loan step 2 | one credit ledger: otherwise the monolith and the customer service both move `used_credit` |
+| Customer release by reference live: a release whose reference matches no reservation is 422 `RESERVATION_NOT_FOUND` and never touches untracked credit (customer CRC decision 2026-10-10, customer-profile-kyc-core PR #13 `a6ebe01`, not merged), and the customer's step 3a backfilled one reservation per open monolith loan (reference = loan id) | `CUSTOMER_CREDIT_ADAPTER=http` with the sweep on | the recovery sweep releases unanswered reserves by reference (section 8); without the customer change such a release could free other loans' or migrated credit. Without step 3a, the release of a fully repaid migrated loan (`<loanId>:release`) is answered `RESERVATION_NOT_FOUND` and logged as not released |
+| Payments slice ready to cut over in the same window, publishing `Payments.Payment.LoanPaymentCompleted.v1` on `evt.pay.payment.v1` | loan step 2 | loan and payments writes move together; repayments must land in exactly one place |
+| `evt.ln.loan.v1`, `evt.ln.loan.dlq.v1`, `evt.pay.payment.v1` in the asyncapi catalog and created on the cluster (catalog PR pending; event-streaming-kafka PR #12, c4b69b0, adds `evt.ln.loan.v1` and `evt.pay.payment.v1` to the topic provisioning) | step 3 (consumer), step 4 (relay) | the service never creates topics |
+| ConfigMap `rds-ca-bundle` (key `global-bundle.pem`) published in namespace `lending` by trust-manager (mesh repo `k8s/platform/cert-manager/bundle-rds-ca.yaml`); `DB_URL` = Terraform output `jdbc_url` (`sslmode=verify-full&sslrootcert=/etc/fintechbankx/rds-ca/global-bundle.pem`, chart `databaseCa.mountPath`) | step 1 | the pods mount the bundle to verify Aurora's certificate; without it they do not start |
+| Install order: cert-manager, trust-manager and the `rds-ca-bundle` Bundle (mesh 5e756f0, `k8s/platform/cert-manager/bundle-rds-ca.yaml`) are installed before any service chart. Note: `scripts/istio/install-mesh.sh` at mesh 4bf3906 installs Istio and the kustomize policies only; the cert-manager and trust-manager step is the mesh team's to confirm | step 1 | the `database-ca` volume is not optional: a pod scheduled earlier stays `ContainerCreating` until the ConfigMap appears. That includes the pre-install migration Job, so `helm install` waits and then fails on its hook timeout |
+| Mesh team has applied the requests in "Requests to the mesh team" below (A: gateway route, B: Aurora and MSK egress, C: callee ALLOW rules, plus the README "Callers" ALLOW rules) | step 1 (B), step 2 (A, C) | namespace `lending` is default-deny and outbound traffic is `REGISTRY_ONLY`: without B the readiness check (`db`) fails and the pods never become ready |
+| No INITIATED / PROCESSING monolith payments | step 2 final delta | in-flight repayments finish in the monolith |
+| Monolith anti-corruption client sends `currency` (ISO 4217) on loan creation and payment, and reads `rateBasis` from loan responses, in the same window as step 2 (d) | step 2 (d) | `currency` is required and `rateBasis` replaces the monolith's flat-rate assumption (`api/openapi/loan-context.accepted-breaking.txt`); a client without them is refused (400) or misreads the rate. The accepted-breaking file stays until that client change merges in enterprise-loan-management-system |
+
+### Requests to the mesh team
+
+Raise these in `fintechbankx-platform-mesh-security-service-mesh` (owner: platform mesh squad) before step 1.
+The chart ships no Istio objects; everything below is theirs to add.
+
+**A. Gateway route (public paths).** Host: the API host of the environment. Route
+`/api/v1/loans` and `/api/v1/loans/*` (methods `GET`, `POST`) to
+`loan-lifecycle-service.lending.svc.cluster.local:8080`, with the platform's forwarded-header rules and
+Keycloak `RequestAuthentication` (first-party web, mobile and staff tokens; `aud` must contain
+`svc-ln-loan-lifecycle`). No other path of this service is public; `8081` (actuator) never is.
+
+**B. Egress under `REGISTRY_ONLY` (ServiceEntry, `MESH_EXTERNAL`, `resolution: DNS`, exported to `lending`).**
+
+| Destination | Hosts | Port / protocol | Why |
+|---|---|---|---|
+| Aurora PostgreSQL | cluster writer endpoint and reader endpoint (Terraform outputs; `jdbc_url` host and `reader_endpoint`) | 5432 `TLS` (the service does its own TLS, `sslmode=verify-full`) | JDBC; readiness group includes `db`, so without it the pods never become ready |
+| Amazon MSK | the broker hostnames of the IAM listener (`KAFKA_BOOTSTRAP_SERVERS`) | 9098 `TLS` | outbox relay and repayment consumer (IAM auth via IRSA) |
+| AWS STS (regional endpoint) | `sts.<region>.amazonaws.com` | 443 `TLS` | IRSA web-identity exchange used by the MSK IAM client |
+
+The Flyway migration Job (Helm pre-install/pre-upgrade hook) needs egress to Aurora on 5432 as well. It runs
+without a sidecar by default (`migration.istioSidecar: false`), so the Istio egress policy does not apply to it,
+but the mesh repo's NetworkPolicies do: they grant Aurora egress by `app.kubernetes.io/name` only, so the Job
+pod carries `app.kubernetes.io/name=loan-lifecycle-service` like the service pods, and
+`app.kubernetes.io/component=db-migration` (service pods: `service`, platform convention cicd-templates 335a345) keeps it out of the Service, PDB and
+Deployment selectors. Ask the mesh team to keep the 5432 egress rule keyed on that label (not on the
+component) and tell them if the cluster runs native sidecars, then turn the sidecar on.
+
+**Selector labels must land before any deploy.** A Deployment's `spec.selector` is immutable, so the
+`app.kubernetes.io/component=service` selector (and the Job pod's `db-migration`) must be in the chart before the
+first install of this release in any environment. No release exists yet; if one did, changing the selector would
+need the Deployment deleted and recreated (a full outage of this service), not a `helm upgrade`. The Job pod gets
+no exemption from the mesh or admission policies: it is selected by the 5432 egress rule through its name label,
+and CI (`scripts/ci/helm-selector-check.py`) fails if any Service, PDB, NetworkPolicy, topology spread or
+Deployment selector would select it, or if it carries `fintechbankx.io/service-id`.
+
+**C. Callee ALLOW rules (this service as the caller, principal `cluster.local/ns/lending/sa/loan-lifecycle-service`).**
+
+| Callee namespace / workload | Port | Paths | Why |
+|---|---|---|---|
+| `customer` / `customer-profile-kyc-service` | 8080 | `GET /api/v1/customers/*/credit`, `POST /api/v1/customers/*/credit/reserve`, `POST /api/v1/customers/*/credit/release` | credit position, reserve, release (`CUSTOMER_CREDIT_ADAPTER=http`) |
+| `identity` / `keycloak` | 8080 | `POST /realms/fintechbankx/protocol/openid-connect/token` and the realm's `certs` (JWKS) | client-credentials token and JWT validation |
+| `observability` / `otel-collector` | 4317, 4318 | OTLP | traces |
+
+Inbound ALLOW rules for this service's own callers are listed in README "Callers".
+
+## 4. Cutover plan
+
+| Step | Action | Rollback |
+|---|---|---|
+| 1 | Deploy with `OUTBOX_RELAY_ENABLED=false`, `LOAN_REPAYMENT_CONSUMER_ENABLED=false`; run the backfill; reconcile. Repeat any time before step 2 (delta-safe) | drop `sc_ln_loan_lifecycle`; nothing else changed |
+| 2 | One window, loan and payments together: (a) **write freeze**: monolith loan and payment writes off (maintenance flag), wait until no payment is INITIATED or PROCESSING; (b) **final delta**: run the backfill; (c) **reconcile**: must pass; (d) **flip**: the monolith's anti-corruption client sends loan writes to this API, payments to `svc-pay-initiation-settlement` | before (d): lift the freeze, nothing moved. After (d): see section 5 |
+| 3 | Enable the repayment consumer (`LOAN_REPAYMENT_CONSUMER_ENABLED=true`) in the same window as step 2 (d) | consumer off; unprocessed events wait on the topic (committed offsets) |
+| 4 | Enable the outbox relay; consumers read `evt.ln.loan.v1` and route on the `eventType` header | relay off; events stay in the outbox |
+| 5 | Monolith stops writing `loans` / `loan_installments` / `payments` for good | flag back; monolith tables are intact but stale since step 2 (section 5) |
+| 6 | After the payment cutover is final and one full month-end cycle passed: drop the monolith FKs first (`fk_payments_loan` on `payments`, `fk_payment_installments_installment`, then `fk_loans_customer`), then `payment_installments`, `loan_installments`, `loans` | restore from snapshot |
+
+## 5. Rollback after step 2
+
+The service is the system of record from step 2 (d). Rollback is a **forward fix** by default. If the
+service has to be abandoned, it is a **reverse replay**: rebuild the monolith rows from
+`evt.ln.loan.v1` (loan state and `Lending.Loan.PaymentMade.v1` with `paymentId`) and `repayment` /
+`repayment_allocation`, under a new write freeze; the outbox keeps every event since step 1 even
+while the relay is off. Never simply flip the flag back: writes made in the service after the flip
+would be lost.
+
+Rollback triggers (measured from the start of step 2 (d), any one):
+
+| Trigger | Threshold |
+|---|---|
+| 5xx rate on `/api/v1/loans/**` | > 1 % over 10 minutes |
+| `CUSTOMER_SERVICE_UNAVAILABLE` (503) on disburse | > 5 % over 10 minutes |
+| `consumer.dlq.messages{group=cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1}` | > 0 in the window |
+| Platform alert `OutboxEventsParked` (`outbox_parked_events_total`, 15 minutes) | fires for this service |
+| Platform alert `OutboxRelayStalled` (`outbox_oldest_pending_age_seconds` above 900 s for 5 minutes, once the relay is on) | fires for this service |
+| Reconcile re-run against the frozen monolith snapshot | any `|f` line |
+
+## 6. Acceptance checklist
+
+- [x] Service builds and checks standalone (`ci/test` runs `./gradlew check` with PostgreSQL; ArchUnit rules; coverage)
+- [x] Own schema and migrations; Hibernate validates entities against them at startup
+- [x] Events written through a transactional outbox, relayed in order; a parked row holds back its loan's later rows until it is replayed (V12); ADR-021 decision 4 (adr-runbooks #10 e6dd76a): payload errors park the row at once and the batch continues; every other error (retryable, authorization, unclassified) parks nothing however long it lasts: the batch stops, nothing is marked, the relay backs off, and only an operator parks a row, with a recorded reason (section 7)
+- [x] Customer credit through the customer service API (no shared table); consumer contract test against customer-context.yaml
+- [x] Delta backfill rehearsed with reconciliation in CI
+- [ ] Monolith anti-corruption client and write-freeze flag (enterprise-loan-management-system)
+- [ ] asyncapi catalog PR for `svc-ln-loan-lifecycle.yaml`; topics created (fintechbankx-platform-event-streaming-kafka)
+- [x] Runtime role separated from the schema owner: V4 grants, Flyway as the owner in a Helm hook Job only, pods without the owner credential (`DatabaseMigrationIT`, `LoanLifecycleServiceIT`)
+- [ ] DBA bootstrap of `loan_lifecycle_owner` and `loan_lifecycle_app` per environment, secrets filled
+- [ ] Mesh team requests A (gateway route), B (Aurora, MSK, STS egress), C (callee ALLOW rules) applied, plus the ALLOW rules for the callers in README
+- [ ] Production backfill and reconciliation report attached here
+- [ ] Old-schedule-balance guard passed per environment before cutover (section 2): one line per environment with date, the service role it ran as (not a personal login), the change-ticket reference, exit code and output. No environment has been checked yet.
+
+## 7. Parked outbox events
+
+ADR-021 decision 4 (adr-runbooks #10, e6dd76a), the rule for every service's outbox relay:
+
+- **Payload errors** (`RecordTooLargeException`, `SerializationException`, `InvalidTopicException`): the row
+  can never be sent as it is. The relay parks it at once (`parked_at`, `park_reason = 'payload error: ...'`,
+  `last_error`), counts it in `outbox_parked_events_total{exception="<simple class name>"}` (platform alert
+  `OutboxEventsParked`) and the batch continues.
+- **Every other error** (Kafka retryable errors such as timeouts, not enough replicas, leader or network errors;
+  the relay's own send timeout; SASL or topic authorization; a producer that cannot be built; anything
+  unclassified) never parks a row, however long it lasts. The batch stops, **nothing is marked** (no attempt,
+  no `last_error`), the relay backs off (1 s doubling to 5 min) and counts the failure in
+  `outbox_send_failures_total{exception="<simple class name>"}`. There is no time ceiling: the row stays at the
+  head until the cause is fixed or an operator parks it.
+
+A parked row holds back its loan. With one topic per aggregate (`evt.ln.loan.v1`) the loan's sagas rely on its
+events arriving in order, so every later row of the same loan waits until the parked row is replayed: the relay
+skips them for the rest of the run in which it parked the row, and its pending query skips every loan with a
+parked row (payload park or operator park) in later runs (V12, partial index `ix_outbox_parked_aggregate`; the
+same rule as bulk-orchestration). Rows of other loans are not held back. The held-back rows stay in
+`outbox_pending_events` and in `outbox_oldest_pending_age_seconds`, so `OutboxRelayStalled` fires for them too
+if the parked row is not replayed within 15 minutes; `outbox_parked_rows` above 0 at the same time tells the two
+causes apart. That is intended (platform decision, round 5): rows held behind a parked row keep
+`outbox_oldest_pending_age_seconds` rising, by design, until the parked row is replayed; the age gauge is not
+adjusted for them, and the alert is the prompt to replay or close the parked row. Replaying the parked row (SQL
+below) releases its loan: the next run sends the loan's rows in their order.
+
+Alerts. The squad acts on the platform alerts (observability `prometheus/rules/kafka-outbox.rules.yml`,
+PR #11 head eca7aa0, routed by the `squad` label); this chart ships no outbox alert rule:
+- `OutboxRelayStalled` (critical): `outbox_oldest_pending_age_seconds{service_id="svc-ln-loan-lifecycle"}` above 900 s for
+  5 minutes, a stalled relay or a Kafka/MSK outage. `rate(outbox_send_failures_total[5m])` by `exception` says why
+  (authorization classes point at the IRSA role's MSK policy, topic existence or ACLs); `OutboxSendFailures` (warning)
+  fires on those failures.
+- `OutboxEventsParked` (warning): any increase of `outbox_parked_events_total` over 15 minutes; its `exception` label
+  is a payload error class or `OperatorPark`.
+
+`outbox_parked_rows` shows the rows parked now and `outbox_pending_events` the backlog.
+
+Find the head of the queue and the parked rows, and the rows each parked row holds back:
+
+```sql
+SELECT event_id, created_seq, topic, attempts, last_error, parked_at, park_reason
+FROM sc_ln_loan_lifecycle.outbox_event
+WHERE published_at IS NULL
+ORDER BY created_seq
+LIMIT 20;
+
+SELECT p.aggregate_id AS loan_id, p.event_id AS parked_event, p.park_reason, count(h.event_id) AS held_back
+FROM sc_ln_loan_lifecycle.outbox_event p
+LEFT JOIN sc_ln_loan_lifecycle.outbox_event h
+  ON h.aggregate_id = p.aggregate_id AND h.published_at IS NULL AND h.parked_at IS NULL
+WHERE p.parked_at IS NOT NULL
+GROUP BY p.aggregate_id, p.event_id, p.park_reason;
+```
+
+Operator park (only when the head row itself is the problem and the incident lead agrees; the relay never
+does this for a non-payload error). The reason is mandatory and goes into the incident record too. The
+relay counts the park once on its next run, `outbox_parked_events_total{exception="OperatorPark"}` (column
+`park_counted`, V8):
+
+```sql
+UPDATE sc_ln_loan_lifecycle.outbox_event
+SET parked_at = now(), park_reason = 'operator: <incident id> <why>'
+WHERE event_id = '<event id>' AND published_at IS NULL AND parked_at IS NULL;
+```
+
+Replay, after fixing the cause:
+
+```sql
+UPDATE sc_ln_loan_lifecycle.outbox_event
+SET parked_at = NULL, park_reason = NULL, park_counted = false, attempts = 0, last_error = NULL
+WHERE event_id = '<event id>' AND published_at IS NULL AND parked_at IS NOT NULL;
+```
+
+## 8. Credit reservations needing an operator
+
+Status: **Proposed** (merged from loan-review-r4: V9 `reservation_state`, V10 `release_refused_code`,
+`CreditReservationSweep`). Applies only with `CUSTOMER_CREDIT_ADAPTER=http`.
+
+Every credit reservation is recorded in `sc_ln_loan_lifecycle.credit_reservation_generation` (one row per loan)
+before it is sent to `svc-cus-profile-kyc`. The customer service records each movement in its own table
+(`credit_movement`: customer, idempotency key, `RESERVE` or `RELEASE`, amount, currency, reference). This service
+never reads that table: every check below is a request to the customer squad (owner of
+`fintechbankx-customer-profile-kyc-core`), quoting the customer id, the loan id (the movement's `reference`) and
+the idempotency keys. Keys: reserve `<loanId>:reserve` at generation 0, `<loanId>:reserve:g<n>` at generation n;
+compensating release `<reserve key>:compensation`; repayment release `<loanId>:release`.
+
+### What the API answers for a held loan
+
+| Situation | `POST /api/v1/loans/{loanId}/disburse` | Retry? |
+|---|---|---|
+| Customer service did not answer (down, timeout, token refused, kept reporting concurrent updates) | 503 `CUSTOMER_SERVICE_UNAVAILABLE` | yes, nothing changed |
+| Loan's compensating release was refused with `RELEASE_EXCEEDS_RESERVATION` (row has `release_refused_code`) | 409 `CREDIT_RESERVATION_HELD_FOR_OPERATOR`; no request is sent to the customer service | no: the same answer until an operator closes the row (procedure below) |
+| Customer service refused the reserve (not enough credit) | 422 `INSUFFICIENT_CREDIT` | only after the customer's credit changes |
+
+The first disbursement that meets the refusal gets the 409 too, once the refusal is recorded. If the refusal
+could not be recorded (database error), that one answer is a 503 and the release is re-sent next time.
+Cancel and reject still answer 200: the closure commits and the held release is logged, never re-sent.
+
+### Recovery sweep
+
+`CreditReservationSweep` runs on start-up and then `CREDIT_RESERVATION_SWEEP_INTERVAL` (default `PT1M`) after the
+previous run ended, on one replica at a time (PostgreSQL advisory lock). It looks only at loans never disbursed
+(`CREATED`, `PENDING_APPROVAL`, `APPROVED`, `REJECTED`, `CANCELLED`) whose row has not changed for
+`CREDIT_RESERVATION_SWEEP_GRACE` (default `PT10M`). Every release it sends goes under the reservation's
+compensation key `<reserve key>:compensation`, with the loan id as `reference`, the reference the reserve carried.
+It:
+
+- re-sends a pending compensation;
+- releases a reservation recorded `RESERVED` (on a still `APPROVED` loan a later disbursement then fails because
+  its reservation is gone);
+- handles a reserve that was sent but never answered (`RESERVING`, or `UNCONFIRMED` written by an earlier
+  release) according to `CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED` (`loan.credit-reservation.sweep.release-unanswered`,
+  default `"false"`):
+  - **`"false"` (default):** never released blind. A `RESERVING` row older than the grace period is marked
+    `UNCONFIRMED` and left for an operator (`loan_credit_reservations_operator{reason="unconfirmed"}`, procedure
+    below); `UNCONFIRMED` rows are not read by the sweep at all. This is the behaviour before the release by
+    reference and is safe against a customer service without customer-profile-kyc-core #13;
+  - **`"true"`:** released by its reference. The sweep first records the intent (generation n+1,
+    `pending_compensation = n`) with a compare-and-set on the row's age, then sends the release. A disbursement
+    retry that re-sent the reserve meanwhile refreshes the row, so the sweep leaves it; once the sweep has
+    recorded its intent, a retry cannot re-send the old reserve and reserves at generation n+1 instead;
+- skips any row with `release_refused_code` set.
+
+What the customer service answers decides the outcome:
+
+| Answer to the release | Meaning | What happens to the row | Metric |
+|---|---|---|---|
+| 200 | the reservation held credit and it is released | cleared (`pending_compensation` NULL, state NULL, generation n+1) | none |
+| 422 `RESERVATION_NOT_FOUND` | nothing is held under the reference: nothing was ever reserved (for an unanswered reserve: it was never applied), or the reservation holds 0 because it was already released (customer CRC, round 5: a zero-holding reservation answers `RESERVATION_NOT_FOUND`). Either way the reservation counts as already released | cleared, as above | `loan_credit_releases_unmatched_total` +1 |
+| 422 `RELEASE_EXCEEDS_RESERVATION` | the reference has a reservation that holds more than 0 but less than the loan's principal | kept: `pending_compensation = n`, `release_refused_code` set; never re-sent | `loan_credit_reservations_operator{reason="release_exceeds_reservation"}` |
+| anything else (5xx, timeout, 409 retries exhausted, 400, 404) | no usable answer | kept as a pending compensation; re-sent under the same key once the grace period has passed again | `loan_credit_reservations_pending` stays above 0 |
+
+**Precondition (customer contract) and rollout order.** Releasing a reserve that was never answered is safe only
+because the customer service answers a release whose reference matches no reservation with 422
+`RESERVATION_NOT_FOUND` and never takes it from untracked or migrated credit (customer CRC decision 2026-10-10;
+customer-profile-kyc-core PR #13, commit `a6ebe01`, branch head `4a8f468`, **not merged yet**). Before that change
+such a release could free credit held by the customer's other loans or credit migrated from the monolith. Per
+environment, in this order:
+
+1. `CREDIT_RESERVATION_SWEEP_ENABLED` stays `"false"` until customer-profile-kyc-core #13 (`a6ebe01` or later) is
+   deployed to that environment's customer service. Recovery then waits for the next reservation or cancellation
+   of the same loan.
+2. Once #13 is deployed, set `CREDIT_RESERVATION_SWEEP_ENABLED: "true"`. With
+   `CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED` still `"false"` the sweep re-sends pending compensations, releases
+   `RESERVED` reservations and marks unanswered reserves `UNCONFIRMED` for an operator.
+3. Only then turn `CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED` to `"true"`: the sweep releases unanswered reserves by
+   reference, the first run also settles the rows left `UNCONFIRMED` in step 2, and the `reason="unconfirmed"`
+   gauge is no longer exported.
+
+Never turn `CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED` on against a customer service without #13.
+
+The grace period is also the safety margin against a reserve still in flight: the service refuses to start
+unless `CREDIT_RESERVATION_SWEEP_GRACE` is longer than `loan.customer-credit.max-attempts` (3) times
+(`connect-timeout` + `read-timeout`, 1 s + 2 s in `application.yml`), 9 s with the shipped settings.
+
+The chart sets `CREDIT_RESERVATION_SWEEP_ENABLED` (default `"true"` in `values.yaml`; the per-environment
+values follow the rollout order above), `CREDIT_RESERVATION_SWEEP_INTERVAL`, `CREDIT_RESERVATION_SWEEP_GRACE` and
+`CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED` (default `"false"`) in `values.yaml` `config`. Switching the sweep off
+stops recovery: compensations are then only re-sent by the next reservation or cancellation of the same loan, and
+unanswered reserves stay `RESERVING`.
+
+### Metrics
+
+| Micrometer name (Prometheus name) | Type | Meaning |
+|---|---|---|
+| `loan.credit.reservations.pending` (`loan_credit_reservations_pending`) | gauge | never-disbursed loans with a pending compensation or an outstanding reservation (`RESERVING`, `RESERVED`, and `UNCONFIRMED` rows left by an earlier release until the sweep settles them). Short-lived during a disbursement; a value that stays above zero for longer than the grace period plus one interval means the sweep cannot settle a row (customer service down or rejecting the release): see the sweep's warnings for the loan |
+| `loan.credit.reservations.operator{reason="release_exceeds_reservation"}` (`loan_credit_reservations_operator{reason="release_exceeds_reservation"}`) | gauge | rows whose release the customer service refused with `RELEASE_EXCEEDS_RESERVATION`: a compensation of an accepted reservation, or the sweep's release of a reserve that was never answered. Any value above zero needs the procedure below |
+| `loan.credit.reservations.operator{reason="unconfirmed"}` (`loan_credit_reservations_operator{reason="unconfirmed"}`) | gauge, only while `CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED` is `"false"` | rows in `UNCONFIRMED`: reserves sent but never answered that the sweep will not release blind. Any value above zero needs the procedure below. With `CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED: "true"` the gauge is not exported (the sweep settles such rows by reference); the series then disappears and an alert on it stops firing rather than reading 0 |
+| `loan.credit.releases.unmatched` (`loan_credit_releases_unmatched_total`) | counter | releases answered `RESERVATION_NOT_FOUND`: nothing was held under the reference, the row is cleared automatically. Expected now and then for reserves that timed out before the customer service applied them; a rising rate means reserves are being recorded that the customer service never applies |
+
+This service ships no alert rules. Observability (`fintechbankx-platform-observability-sre-operations`) owns any
+alert on these metrics; the squad's ask is: `loan_credit_reservations_operator` above 0 for any `reason`
+(warning; `release_exceeds_reservation` always, `unconfirmed` while `CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED`
+is `"false"`), and `loan_credit_reservations_pending` above 0 for longer than the grace period plus one interval
+(warning). Select the `reason` label as a whole rather than one value, so the rule survives the switch.
+
+Find the rows:
+
+```sql
+SELECT r.loan_id, l.customer_id, l.status, l.principal_amount, l.currency, r.generation,
+       r.reservation_state, r.pending_compensation, r.release_refused_code, r.updated_at
+FROM sc_ln_loan_lifecycle.credit_reservation_generation r
+JOIN sc_ln_loan_lifecycle.loan l ON l.loan_id = r.loan_id
+WHERE r.release_refused_code IS NOT NULL
+   OR (l.status IN ('CREATED', 'PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'CANCELLED')
+       AND (r.pending_compensation IS NOT NULL OR r.reservation_state IN ('RESERVING', 'RESERVED', 'UNCONFIRMED'))
+       AND r.updated_at < now() - interval '15 minutes')
+ORDER BY r.updated_at;
+```
+
+Every change below runs under an incident id, with the incident lead's agreement, and the customer squad's
+answer is attached to the incident record.
+
+### UNCONFIRMED: a reserve sent but never answered
+
+The reserve under key `<loanId>:reserve[:g<n>]` (n = `generation`) was sent and no answer was recorded, so this
+service does not know whether the customer service applied it. What happens next depends on
+`CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED`.
+
+**With `CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED: "true"`** there is no operator procedure. The row stays
+`RESERVING`; once it is older than the grace period the recovery sweep releases it by its reference (table
+above): the customer service either releases what the reserve holds, answers `RESERVATION_NOT_FOUND` because the
+reserve never reached it or holds nothing any more (row cleared, counted unmatched), or answers
+`RELEASE_EXCEEDS_RESERVATION` (operator, next section). Rows marked `UNCONFIRMED` while the flag was off are
+settled the same way by the first sweep after the switch; until then they count in
+`loan_credit_reservations_pending`. Look at a row only if it stays in `loan_credit_reservations_pending` for longer
+than the grace period plus one interval: the sweep then logs, for the loan id, why the release failed (customer
+service down, 400, 404). Fix the cause; the sweep re-sends the release under the same key. Do not change the row
+by hand.
+
+**With `CREDIT_RESERVATION_SWEEP_RELEASE_UNANSWERED: "false"` (default)** the sweep marks the row `UNCONFIRMED`
+once it is older than the grace period and **never releases it blind**: against a customer service without
+customer-profile-kyc-core #13 the release does not check that a reservation exists for the reference, and the
+customer's `used_credit` includes credit migrated from the monolith with no movement behind it, so a release for
+a reserve that was never applied would free credit held by the customer's other loans or untracked migrated
+credit. The row counts in `loan_credit_reservations_operator{reason="unconfirmed"}` until an operator closes it:
+
+1. Ask the customer squad: for customer `<customer_id>`, is there a `credit_movement` with idempotency key
+   `<reserve key>`, and what are its type, amount, currency and reference? List every movement with reference
+   `<loan_id>` too.
+2. **The reserve was applied** (a `RESERVE` under that key, amount and currency equal to the loan's
+   `principal_amount` and `currency`, reference the loan id, and no `RELEASE` under `<reserve key>:compensation`):
+   record it as accepted. On an `APPROVED` loan a disbursement can then use it; otherwise the sweep releases it
+   under its compensation key after the grace period, and `loan_credit_reservations_pending` returns to 0.
+
+   ```sql
+   UPDATE sc_ln_loan_lifecycle.credit_reservation_generation
+   SET reservation_state = 'RESERVED', updated_at = now()
+   WHERE loan_id = '<loan id>' AND generation = <n> AND reservation_state = 'UNCONFIRMED'
+     AND pending_compensation IS NULL;
+   ```
+
+3. **The reserve was never applied** (no movement under that key): nothing is held; close the row the way a
+   refused reserve is closed. The generation stays, so a later reserve of an `APPROVED` loan reuses the key,
+   which the customer service has never seen.
+
+   ```sql
+   UPDATE sc_ln_loan_lifecycle.credit_reservation_generation
+   SET reservation_state = NULL, updated_at = now()
+   WHERE loan_id = '<loan id>' AND generation = <n> AND reservation_state = 'UNCONFIRMED';
+   ```
+
+4. **Anything else** (amount, currency or reference differ, or a movement under the key exists for another
+   customer): change nothing, escalate to the loan squad's engineers and the customer squad.
+
+In both modes a retry of the disbursement of an `APPROVED` loan re-sends the reserve under the same key first
+(the customer service replays it if it was applied, or applies it now), and the row becomes `RESERVING` and then
+`RESERVED`. That is safe; a blind release is not.
+
+### RELEASE_EXCEEDS_RESERVATION: a compensating release refused
+
+Requires the customer service's release by reference (customer-profile-kyc-core PR #13, `a6ebe01`). The row
+has `pending_compensation = <n>` and `release_refused_code = 'RELEASE_EXCEEDS_RESERVATION'`: the release under
+`<reserve key of n>:compensation` asked for more than the customer service holds for reference `<loan_id>`.
+
+Two ways to get here: the compensation of a reservation this service recorded as accepted (a bug signal), or
+the sweep's release of a reserve that was never answered. Either way the reference holds more than 0 and less
+than the loan's principal: a reservation that holds 0 (already released, for example under an earlier
+generation's key) answers `RESERVATION_NOT_FOUND`, not "exceeds" (customer CRC, round 5), and the sweep clears
+such a row itself as already released (`CustomerProfileHttpAdapterTest.aReleaseOfAReservationTheCustomerServiceDoesNotHoldCompletesTheIntent`).
+The release is never re-sent by this service, the sweep skips the row, and a disbursement of the loan answers
+409 `CREDIT_RESERVATION_HELD_FOR_OPERATOR` without calling the customer service until the row is closed.
+
+1. Ask the customer squad for every movement of customer `<customer_id>` with reference `<loan_id>`, and the
+   amount it still holds for that reference (reserves minus releases).
+2. **Nothing is held** for the reference (it was already released, for example under an earlier key): close the
+   intent.
+
+   ```sql
+   UPDATE sc_ln_loan_lifecycle.credit_reservation_generation
+   SET pending_compensation = NULL, release_refused_code = NULL, updated_at = now()
+   WHERE loan_id = '<loan id>' AND pending_compensation = <n> AND release_refused_code = 'RELEASE_EXCEEDS_RESERVATION';
+   ```
+
+3. **Part of the amount is held** (more than 0, less than the loan's `principal_amount`): the customer squad
+   releases exactly the held amount for reference `<loan_id>` as a staff movement under a new key,
+   `<reserve key of n>:compensation:operator`, recorded in the incident; then close the intent with the SQL of
+   step 2. Raise a bug for the loan squad: the amounts disagree.
+4. **The full amount or more is held**: the refusal contradicts the customer's own records. Change nothing and
+   escalate to the customer squad as a provider defect.
+
+Never clear `release_refused_code` while leaving `pending_compensation` set: that re-arms the same refused
+release, which the sweep and the next reservation re-send.
+
+## 9. Late loan payment after the loan was paid off through the API
+
+A `Payments.Payment.LoanPaymentCompleted.v1` record on `evt.pay.payment.v1` can arrive after the loan has already
+been paid off through `POST /api/v1/loans/{loanId}/payments` (or by an earlier payment). A FULLY_PAID loan refuses
+a payment. The consumer's transaction then rolls back: nothing is applied, the inbox row is not written, and after
+the retry back-off the record goes to `evt.ln.loan.dlq.v1` with the exception class in its `dlq-*` headers. The
+counter `consumer.dlq.messages{group=cg.svc-ln-loan-lifecycle.loan-repayment-allocation.v1}` rises (section 5).
+
+The loan stays FULLY_PAID at zero, and no repayment row is written for the late payment.
+
+**Decision recorded for the owner (round 12, S2):** the service does not apply a payment to a FULLY_PAID loan and does
+not reopen it. The DLQ record is the work item. The payment owner and customer operations decide how the money is
+returned to the customer; the loan squad records that decision in the incident. The runbook does not set that policy.
+
+Steps:
+
+1. Read the DLQ record's payment id and the loan id, and the exception class in its headers (no message is kept).
+2. Confirm the loan state:
+   ```sql
+   SELECT status, outstanding_balance FROM loan WHERE loan_id = '<loan id>';
+   ```
+   Expected: `FULLY_PAID`, `0.00`.
+3. Confirm in the payment service that the payment is COMPLETED and for the amount on the record.
+4. Do not replay the DLQ record into `evt.pay.payment.v1` or the loan consumer: it refuses again while the loan is
+   FULLY_PAID.
+5. Do not change `loan.status` or `loan.outstanding_balance` by SQL to make the record apply. A payment that should
+   count against the loan is a loan-squad decision and goes through the recorded decision above.
+6. Close the incident with the payment owner's decision and the refund reference, if any.
+
+## 10. Loan bookings in the accounts ledger
+
+A disbursement reserves credit, books `loan-disbursement:<loanId>` in the accounts ledger (debit the loan receivable,
+credit the disbursement clearing account), and only then stores the loan as DISBURSED. Nothing is booked for a loan
+that is not disbursed by this service. A ledger that gives no usable answer fails the disbursement with the loan
+APPROVED, and the entry may still have been booked (see "Signals" and "Booked but not disbursed" below).
+
+### Configuration
+
+Set all three together (`journal.loan.*`, env `LOAN_BOOKING_CURRENCY`, `LOAN_RECEIVABLE_ACCOUNT_ID`,
+`LOAN_DISBURSEMENT_CLEARING_ACCOUNT_ID`). Both accounts are INTERNAL ledger accounts that operations opens with
+`POST /api/v1/accounts` and that are operational before the first disbursement. The chart renders only when the three
+are all set or all unset. Set partly, the service does not start. Unset, every disbursement and every repayment is
+refused with 422 `BOOKING_NOT_CONFIGURED`: nothing is sent to the ledger, and retrying cannot succeed until operations
+configure the service.
+
+Deploy order: the ledger accounts exist and the three values are set, then this service's image with the booking.
+`LOAN_INTEREST_INCOME_ACCOUNT_ID` is set before any repayment with interest is applied (section "Repayments").
+
+A deployed service never books in memory: `journal.adapter` is `http`, and the service refuses `journal.adapter=in-memory`
+unless `fintechbankx.journal.allow-in-memory` is set. Only the local profile and the tests set it, and the chart refuses
+both settings.
+
+### What a caller sees
+
+| Answer | Meaning | Retry? |
+|---|---|---|
+| 503 `ACCOUNTS_LEDGER_UNAVAILABLE` | not disbursed. The ledger gave no usable answer: down, timeout, 5xx, an unreadable answer, or 401/403. The entry may have been booked. | yes; a retry replays the same entry |
+| 422 `JOURNAL_ENTRY_REJECTED` | the ledger refused the entry as sent (for example an account is not operational). Nothing was booked. | no, until the ledger's side is fixed |
+| 422 `JOURNAL_ENTRY_REJECTED`, ledger code `IDEMPOTENCY_KEY_REUSED` | the ledger already holds an entry under `loan-disbursement:<loanId>` with other lines, for example from an earlier attempt that timed out before the booking accounts were changed. An entry exists. Signalled (`cause="reference_reused"`). | no; reconcile the loan |
+| 422 `BOOKING_NOT_CONFIGURED` | no booking accounts for the loan's currency. Nothing was sent. | no, until the configuration is set |
+| 409 `CONCURRENT_UPDATE` or `INVALID_LOAN_STATE` after a booking | the entry was booked, then the disbursement could not be stored (a store conflict, or the loan was cancelled meanwhile) | yes, if the loan is still APPROVED; the replay books nothing new |
+| 503 `CUSTOMER_SERVICE_UNAVAILABLE` / 422 `INSUFFICIENT_CREDIT` | the credit step (section 8 and earlier) | as before |
+
+In every row the loan stays APPROVED and the credit reservation is released. Only the 422 rows without a signal
+(`JOURNAL_ENTRY_REJECTED` with any other ledger code, and `BOOKING_NOT_CONFIGURED`) are certain that nothing was booked.
+
+### Signals
+
+A disbursement whose entry may exist while the loan is not disbursed raises one signal. It writes a WARN line and counts
+`loan_disbursement_booking_unresolved_total{cause}`:
+
+- `cause="ledger_unanswered"`: the ledger gave no usable answer (the 503 row above). A 401 or 403 from the ledger fails
+  closed and counts here too, so an alert can be a false alarm; reconciliation settles it.
+- `cause="not_stored"`: the entry was booked, then the loan could not be stored (an optimistic-lock conflict, or the
+  loan was cancelled meanwhile). Two disbursements racing on one loan can also raise it; reconciliation settles it by
+  the loan's status.
+- `cause="reference_reused"`: the ledger answered 409 `IDEMPOTENCY_KEY_REUSED`, so an entry with this reference and
+  other lines exists. The caller gets 422; reconciliation compares the ledger's entry with the loan.
+
+Each signal carries the loan id and the reference only: never an account id, an amount or the ledger's text. A refused
+entry raises no signal, because nothing was booked.
+
+### Booked but not disbursed
+
+Trigger:
+
+- any increase of `loan_disbursement_booking_unresolved_total`;
+- a 503 `ACCOUNTS_LEDGER_UNAVAILABLE` or a 409 after a booking, reported by a customer or by the loan squad;
+- any deploy that changes the disbursement booking.
+
+Cadence: a reconciliation run each working day at 09:00 (Europe/Istanbul), and one run within the working day of each
+trigger. The loan squad runs it with the ledger owner.
+
+Procedure:
+
+1. List the loans that were approved and are not disbursed (a read-only query on this service's database):
+   ```sql
+   SELECT loan_id, status
+   FROM sc_ln_loan_lifecycle.loan
+   WHERE approval_date IS NOT NULL AND status <> 'DISBURSED';
+   ```
+2. For each loan id, ask the accounts ledger whether its disbursement was booked, by reference:
+   `GET /api/v1/journal-entries?reference=loan-disbursement:<loanId>` (the ledger contract). `200` returns the entry;
+   `404 JOURNAL_ENTRY_NOT_FOUND` means nobody booked that reference. Do not read the ledger's journal table.
+3. Decide per loan, and record the decision on the incident:
+   - not booked: nothing to do;
+   - booked and still APPROVED: the loan squad either retries the disbursement (the replay books nothing new) or cancels
+     the loan;
+   - booked and CANCELLED or REJECTED: the ledger owner posts a reversing entry. Never delete or edit the entry.
+
+The lookup by reference is part of the ledger contract. The ledger owner deploys it before the first run; until then the
+run waits and does not read the ledger's table.
+
+### Repayments
+
+Every applied repayment is booked as `loan-repayment:<paymentId>`: the amount comes off the disbursement clearing account,
+the principal reduces the loan receivable and the interest is credited to the interest income account. The booking is
+written in the repayment's own transaction, so it exists exactly when the repayment does, and it never waits on the
+ledger. The booking sweep posts it at start-up and then every `LOAN_REPAYMENT_BOOKING_INTERVAL` (default `PT1M`), one
+replica at a time.
+
+Configuration: `LOAN_INTEREST_INCOME_ACCOUNT_ID` (`journal.loan.interest-income-account-id`), an INTERNAL income account
+that operations opens and makes operational before the first repayment with interest. Repayments of loans created here
+(nominal rate) carry no interest and need no income account. The three booking values of the disbursement are needed for
+every repayment too, so set them before this image takes repayments.
+
+| Answer | Where | What happens |
+|---|---|---|
+| 422 `BOOKING_NOT_CONFIGURED` on the repayment | request path, with the booking accounts or the interest income account unset | nothing applied; not retryable until configured |
+| booked | sweep | `booked_at` and the journal entry id are set |
+| not answered by the ledger | sweep | the row stays pending, `attempts` grows, `last_error = ACCOUNTS_LEDGER_UNAVAILABLE`; the sweep stops and retries on its next run. A repayment needs no reconciliation: its replay is the sweep's own retry |
+| refused as sent | sweep | the row is parked (`parked = TRUE`), `last_error` holds the ledger's code; it is not sent again |
+| failed in the sweep for another reason | sweep | the row is parked with `last_error = SWEEP_FAILED` (an ERROR line names the reference and the exception class), so it cannot hold up the bookings after it. It may have been booked; clearing it replays it |
+| cannot be read back as a booking | sweep | the row is parked with `last_error = UNREADABLE_BOOKING` (for example an amount with more decimals than its currency); the ledger owner and the loan squad decide on it |
+
+Signals: `loan_repayment_bookings_parked` (alert on any value above zero) and
+`loan_repayment_bookings_oldest_pending_age_seconds` (alert when it stays above a few sweep intervals: the ledger does
+not answer, or the sweep does not run).
+
+Parked bookings, read only:
+
+```sql
+SELECT reference, loan_id, last_error, attempts, created_at
+FROM repayment_booking
+WHERE parked AND booked_at IS NULL
+ORDER BY created_at;
+```
+
+To send a parked booking again, the ledger owner first confirms that the account or entry is fixed; only then does an
+operator clear the flag (`UPDATE repayment_booking SET parked = FALSE WHERE reference = '<reference>';`). The next run
+posts the same entry under the same reference, so the ledger replays or books it once. A booking that is wrong in its
+amount or accounts is never edited: the ledger owner reverses it, and the loan squad decides on it, as in the
+disbursement case above.
+
+The booking sweep books repayments only; a repayment that the service has not stored is never booked.

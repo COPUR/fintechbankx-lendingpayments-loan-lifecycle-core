@@ -22,7 +22,9 @@ class LoanAggregateTest {
         );
 
         assertThat(loan.getStatus()).isEqualTo(LoanStatus.CREATED);
+        // 10,000.00 at 5% over 12 months: the balance is the principal; the schedule's regular installment is 856.07
         assertThat(loan.getOutstandingBalance()).isEqualTo(Money.aed(new BigDecimal("10000.00")));
+        assertThat(loan.getInstallments()).hasSize(12);
         assertThat(loan.getApplicationDate()).isNotNull();
         assertThat(loan.getDomainEvents())
             .anySatisfy(event -> assertThat(event).isInstanceOf(LoanCreatedEvent.class));
@@ -86,9 +88,9 @@ class LoanAggregateTest {
         assertThatThrownBy(() -> disbursed.makePayment(Money.aed(BigDecimal.ZERO)))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("must be positive");
-        assertThatThrownBy(() -> disbursed.makePayment(Money.aed(new BigDecimal("20000.00"))))
+        assertThatThrownBy(() -> disbursed.makePayment(Money.aed(new BigDecimal("10272.90"))))
             .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("cannot exceed outstanding balance");
+            .hasMessageContaining("cannot exceed the amount still owed");
     }
 
     @Test
@@ -99,6 +101,7 @@ class LoanAggregateTest {
         PaymentResult result = disbursed.makePayment(Money.aed(new BigDecimal("1000.00")));
 
         assertThat(result.isSuccess()).isTrue();
+        // A loan created here: the whole 1,000.00 comes off the balance; the schedule split is bookkeeping.
         assertThat(result.getPaymentDistribution().getPrincipalPayment().getAmount()).isEqualByComparingTo("1000.00");
         assertThat(result.getPaymentDistribution().getInterestPayment().getAmount()).isEqualByComparingTo("0.00");
         assertThat(disbursed.getOutstandingBalance().getAmount())
@@ -138,7 +141,8 @@ class LoanAggregateTest {
         );
 
         assertThat(zeroInterest.calculateMonthlyPayment().getAmount()).isEqualByComparingTo("1000.00");
-        assertThat(oneMonth.calculateMonthlyPayment().getAmount()).isEqualByComparingTo("5000.00");
+        // one month at 6%: 5,000.00 principal + 25.00 interest
+        assertThat(oneMonth.calculateMonthlyPayment().getAmount()).isEqualByComparingTo("5025.00");
     }
 
     @Test
@@ -159,9 +163,11 @@ class LoanAggregateTest {
         assertThat(loan.getOverdueInstallments()).isEmpty();
         assertThat(loan.isFullyPaid()).isFalse();
 
+        // Paying the schedule does not move the principal balance, so it does not pay the loan off.
         loan.getInstallments().forEach(installment -> installment.makePayment(installment.getAmount()));
-        assertThat(loan.isFullyPaid()).isTrue();
         assertThat(loan.getRemainingInstallments()).isZero();
+        assertThat(loan.getOutstandingBalance()).isEqualTo(Money.aed(new BigDecimal("12000.00")));
+        assertThat(loan.isFullyPaid()).isFalse();
     }
 
     @Test

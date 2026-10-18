@@ -98,4 +98,12 @@ class LoanValueObjectsTest {
         assertThat(LoanStatus.ACTIVE.isTerminalStatus()).isFalse();
         assertThat(LoanStatus.DEFAULTED.getDisplayName()).isEqualTo("Defaulted");
     }
+
+    /** Credit reserved for such a loan is not backed by a disbursement and may be released. */
+    @Test
+    void onlyStatusesBeforeOrInsteadOfADisbursementAreNeverDisbursed() {
+        assertThat(java.util.EnumSet.allOf(LoanStatus.class).stream().filter(LoanStatus::isNeverDisbursed))
+            .containsExactlyInAnyOrder(LoanStatus.CREATED, LoanStatus.PENDING_APPROVAL, LoanStatus.APPROVED,
+                LoanStatus.REJECTED, LoanStatus.CANCELLED);
+    }
 }

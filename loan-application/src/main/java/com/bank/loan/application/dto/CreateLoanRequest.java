@@ -1,5 +1,9 @@
 package com.bank.loan.application.dto;
 
+import com.bank.loan.domain.InterestRate;
+import com.bank.loan.domain.LoanTerm;
+import com.bank.loan.domain.port.in.ApplyForLoanCommand;
+import com.bank.shared.kernel.domain.CustomerId;
 import com.bank.shared.kernel.domain.Money;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -23,6 +27,7 @@ public record CreateLoanRequest(
     @Positive(message = "Principal amount must be positive")
     BigDecimal principalAmount,
     
+    @NotBlank(message = "Currency is required (ISO 4217, e.g. AED)")
     String currency,
     
     @NotNull(message = "Annual interest rate is required")
@@ -35,12 +40,23 @@ public record CreateLoanRequest(
 ) {
     
     public Money getPrincipalAsMoney() {
-        Currency curr = currency != null ? Currency.getInstance(currency) : Currency.getInstance("USD");
-        return Money.of(principalAmount, curr);
+        // No default: the loan currency must be stated, never assumed.
+        if (currency == null || currency.isBlank()) {
+            throw new IllegalArgumentException("Currency is required (ISO 4217, e.g. AED)");
+        }
+        return Money.of(principalAmount, Currency.getInstance(currency));
     }
     
+    /** Validates the request and turns it into the use-case command. */
+    public ApplyForLoanCommand toCommand() {
+        validate();
+        return new ApplyForLoanCommand(CustomerId.of(customerId), getPrincipalAsMoney(),
+            InterestRate.of(annualInterestRate), LoanTerm.ofMonths(termInMonths));
+    }
+
     // Business validation
     public void validate() {
+        getPrincipalAsMoney();
         if (principalAmount.compareTo(BigDecimal.valueOf(1000)) < 0) {
             throw new IllegalArgumentException("Minimum loan amount is $1,000");
         }

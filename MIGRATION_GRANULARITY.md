@@ -16,4 +16,5 @@
 - This is an extraction seed for bounded-context split migration.
 - Follow-up refactoring may be needed to remove residual cross-context coupling.
 - Build artifacts and local machine files are excluded by policy.
+- 2026-10-07: seed turned into a runnable service. The service owns `sc_ln_loan_lifecycle` with its own Flyway migrations; the monolith's loan rows move with `db/backfill/run-backfill.sh` (see `docs/migration/RUNBOOK-EXTRACT-ln-loan-lifecycle.md`). `legacy/loan-service` remains read-only reference.
 

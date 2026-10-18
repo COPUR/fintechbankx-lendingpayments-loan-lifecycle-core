@@ -1,6 +1,15 @@
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        // The Spring Boot plugin's own dependencies are only on Maven Central.
+        mavenCentral()
+    }
+}
+
 rootProject.name = 'fintechbankx-lending-loan-lifecycle-service'
 
 include 'shared-kernel'
 include 'loan-domain'
 include 'loan-application'
 include 'loan-infrastructure'
+include 'loan-bootstrap'

@@ -1,0 +1,8 @@
+# Accepted 2026-10-08 with the loan data split (PR #14 review): every amount must say its currency.
+# The monolith has no currency column and fell back to USD; the service never assumes one, so
+# currency becomes required on loan creation and must be an ISO 4217 code on creation and payment.
+# Callers: first-party web and mobile clients and staff tools, migrated together with this service.
+# Delete this file in the first PR after this one merges (scripts/ci/oasdiff-breaking.sh enforces it).
+POST /api/v1/loans the request property 'currency' became required
+POST /api/v1/loans added the pattern '^[A-Z]{3}$' to the request property 'currency'
+POST /api/v1/loans/{loanId}/payments added the pattern '^[A-Z]{3}$' to the request property 'currency'
