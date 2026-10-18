@@ -64,6 +64,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest(properties = {
     "loan.customer-credit.adapter=in-memory",
     "loan.customer-credit.ledger-currency=AED",
+    "journal.adapter=in-memory",
+    "journal.loan.currency=AED",
+    "journal.loan.receivable-account-id=LOAN-RECEIVABLE",
+    "journal.loan.clearing-account-id=DISBURSEMENT-CLEARING",
     "loan.outbox.relay.enabled=false"
 })
 @AutoConfigureMockMvc

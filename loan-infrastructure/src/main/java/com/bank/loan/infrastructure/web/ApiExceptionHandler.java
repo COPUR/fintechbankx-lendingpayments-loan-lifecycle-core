@@ -1,10 +1,12 @@
 package com.bank.loan.infrastructure.web;
 
+import com.bank.loan.domain.port.out.AccountsLedgerUnavailableException;
 import com.bank.loan.domain.port.out.CreditCurrencyMismatchException;
 import com.bank.loan.domain.port.out.CreditCustomerNotFoundException;
 import com.bank.loan.domain.port.out.CreditMovementRejectedException;
 import com.bank.loan.domain.port.out.CreditReservationNeedsOperatorException;
 import com.bank.loan.domain.port.out.CustomerCreditUnavailableException;
+import com.bank.loan.domain.port.out.JournalEntryRejectedException;
 import com.bank.loan.application.IdempotencyKeyReusedException;
 import com.bank.loan.application.InsufficientCreditException;
 import com.bank.loan.application.LoanNotFoundException;
@@ -48,6 +50,29 @@ public class ApiExceptionHandler {
         log.warn("Customer service unavailable: {}", ex.getMessage());
         return error(HttpStatus.SERVICE_UNAVAILABLE, "CUSTOMER_SERVICE_UNAVAILABLE",
             "Customer credit could not be checked; retry later");
+    }
+
+    /**
+     * The accounts ledger did not book the disbursement (or no booking accounts
+     * are configured): nothing changed, the loan stays APPROVED, retry later.
+     */
+    @ExceptionHandler(AccountsLedgerUnavailableException.class)
+    ResponseEntity<ErrorResponse> ledgerUnavailable(AccountsLedgerUnavailableException ex) {
+        log.warn("Accounts ledger unavailable for a disbursement: {}", ex.getMessage());
+        return error(HttpStatus.SERVICE_UNAVAILABLE, "ACCOUNTS_LEDGER_UNAVAILABLE",
+            "The disbursement could not be booked in the accounts ledger; nothing changed, retry later");
+    }
+
+    /**
+     * The accounts ledger refused the disbursement entry as sent (for example an
+     * account is not operational): the loan stays APPROVED, and a retry gets the
+     * same answer until the ledger's side is fixed. The ledger's text is not returned.
+     */
+    @ExceptionHandler(JournalEntryRejectedException.class)
+    ResponseEntity<ErrorResponse> journalRejected(JournalEntryRejectedException ex) {
+        log.warn("Accounts ledger refused the disbursement entry: {}", ex.getCode());
+        return error(HttpStatus.UNPROCESSABLE_ENTITY, "JOURNAL_ENTRY_REJECTED",
+            "The accounts ledger refused the disbursement; the loan stays APPROVED");
     }
 
     /**

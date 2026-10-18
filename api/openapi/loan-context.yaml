@@ -269,13 +269,13 @@ paths:
                     interactionId: 6f1c2a9e-3b4d-4e8f-9a7b-1c2d3e4f5a6b
                     timestamp: '2026-10-10T09:00:00Z'
         '422':
-          description: INSUFFICIENT_CREDIT (the customer service refused the reservation; the loan stays APPROVED), CURRENCY_MISMATCH, CUSTOMER_NOT_FOUND or CREDIT_MOVEMENT_REJECTED (the customer service rejected the reservation as invalid; the loan stays APPROVED)
+          description: INSUFFICIENT_CREDIT (the customer service refused the reservation; the loan stays APPROVED), CURRENCY_MISMATCH, CUSTOMER_NOT_FOUND, CREDIT_MOVEMENT_REJECTED (the customer service rejected the reservation as invalid; the loan stays APPROVED) or JOURNAL_ENTRY_REJECTED (the accounts ledger refused the disbursement entry; the loan stays APPROVED and the reservation is released, so do not retry until the ledger's side is fixed)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '503':
-          description: CUSTOMER_SERVICE_UNAVAILABLE - the credit could not be reserved; the loan stays APPROVED, retry
+          description: CUSTOMER_SERVICE_UNAVAILABLE - the credit could not be reserved; ACCOUNTS_LEDGER_UNAVAILABLE - the disbursement could not be booked in the accounts ledger (or no booking accounts are configured for the currency); in both the loan stays APPROVED and nothing changed, retry
           content:
             application/json:
               schema:
@@ -568,7 +568,7 @@ components:
             Stable machine-readable code: INVALID_REQUEST, FORBIDDEN, LOAN_NOT_FOUND, INVALID_LOAN_STATE,
             CONCURRENT_UPDATE, DUPLICATE_REQUEST, INSUFFICIENT_CREDIT, CURRENCY_MISMATCH, CUSTOMER_NOT_FOUND,
             CREDIT_MOVEMENT_REJECTED, CREDIT_RESERVATION_HELD_FOR_OPERATOR, IDEMPOTENCY_KEY_REUSED,
-            CUSTOMER_SERVICE_UNAVAILABLE, INTERNAL_ERROR.
+            CUSTOMER_SERVICE_UNAVAILABLE, ACCOUNTS_LEDGER_UNAVAILABLE, JOURNAL_ENTRY_REJECTED, INTERNAL_ERROR.
         message:
           type: string
         interactionId:

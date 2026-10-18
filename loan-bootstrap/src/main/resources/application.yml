@@ -212,7 +212,7 @@ loan:
 journal:
   # Journal entries to the accounts ledger (svc-acc-accounts-ledger, ADR-030,
   # POST /api/v1/journal-entries): http or in-memory (local runs and tests only).
-  # No business flow calls the port yet; the wiring is a separate change.
+  # A disbursement is booked through this port; repayments are not booked yet.
   adapter: ${JOURNAL_ADAPTER:http}
   base-url: ${ACCOUNTS_SERVICE_BASE_URL:http://accounts-ledger-service.corebanking.svc.cluster.local:8080}
   client-registration-id: accounts-ledger
@@ -221,6 +221,14 @@ journal:
   read-timeout: PT2S
   max-attempts: 3
   retry-backoff: PT0.2S
+  loan:
+    # Booking accounts of a disbursement: the loan receivable is debited and the
+    # disbursement clearing account credited, both INTERNAL ledger accounts that
+    # operations opens. Set all three together. Unset, every disbursement is
+    # refused with 503 ACCOUNTS_LEDGER_UNAVAILABLE (fail closed).
+    currency: ${LOAN_BOOKING_CURRENCY:}
+    receivable-account-id: ${LOAN_RECEIVABLE_ACCOUNT_ID:}
+    clearing-account-id: ${LOAN_DISBURSEMENT_CLEARING_ACCOUNT_ID:}
 
 fintechbankx:
   tls:

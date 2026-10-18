@@ -17,6 +17,9 @@ import com.bank.loan.domain.port.out.CustomerCreditService;
 import com.bank.loan.domain.port.out.CustomerCreditService.CreditDecision;
 import com.bank.loan.domain.port.out.CustomerCreditService.UnusedReservation;
 import com.bank.loan.domain.port.out.EventCausation;
+import com.bank.loan.domain.port.out.JournalEntry;
+import com.bank.loan.domain.port.out.JournalEntryPort;
+import com.bank.loan.domain.port.out.LoanBookingAccounts;
 import com.bank.loan.domain.port.out.LoanEventPublisher;
 import com.bank.loan.domain.port.out.LoanRepository;
 import com.bank.loan.domain.port.out.RepaymentLedger;
@@ -68,6 +71,8 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
     private final CustomerCreditService customerCreditService;
     private final LoanEventPublisher eventPublisher;
     private final RepaymentLedger repaymentLedger;
+    private final JournalEntryPort journal;
+    private final LoanBookingAccounts bookingAccounts;
     private final TransactionOperations transactions;
     private final Clock clock;
 
@@ -75,12 +80,16 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
                                  CustomerCreditService customerCreditService,
                                  LoanEventPublisher eventPublisher,
                                  RepaymentLedger repaymentLedger,
+                                 JournalEntryPort journal,
+                                 LoanBookingAccounts bookingAccounts,
                                  TransactionOperations transactions,
                                  Clock clock) {
         this.loanRepository = loanRepository;
         this.customerCreditService = customerCreditService;
         this.eventPublisher = eventPublisher;
         this.repaymentLedger = repaymentLedger;
+        this.journal = journal;
+        this.bookingAccounts = bookingAccounts;
         this.transactions = transactions;
         this.clock = clock;
     }
@@ -154,9 +163,13 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
     }
 
     /**
-     * Credit is reserved before the loan changes. A refusal leaves the loan
-     * APPROVED and raises no LoanDisbursed. If the disbursement cannot be
-     * stored after a successful reservation, the reservation is cancelled.
+     * Credit is reserved, then the disbursement is booked in the accounts
+     * ledger, both before the loan changes. A refusal leaves the loan APPROVED
+     * and raises no LoanDisbursed. A ledger that cannot book the disbursement,
+     * or refuses it, fails it the same way: the loan stays APPROVED and the
+     * reservation is cancelled. If the disbursement cannot be stored after the
+     * booking, the reservation is cancelled too; the booking stays under the
+     * loan's reference, so a retry replays it rather than booking again.
      */
     @Override
     public Loan disburse(LoanId loanId) {
@@ -169,6 +182,7 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
                 "Customer service refused to reserve %s for the loan", approved.getPrincipalAmount()));
         }
         try {
+            book(approved);
             return inTransaction(() -> {
                 Loan loan = load(loanId);
                 loan.disburse();
@@ -181,6 +195,23 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
             cancelReservationUnlessDisbursed(approved, failure);
             throw failure;
         }
+    }
+
+    /**
+     * The disbursement's double entry: the principal is debited to the loan
+     * receivable and credited to the clearing account. The reference is the
+     * loan id, so a retried disbursement replays this booking instead of making
+     * a second one. Runs with no transaction open: the ledger is a remote call.
+     */
+    private void book(Loan approved) {
+        Money principal = approved.getPrincipalAmount();
+        LoanBookingAccounts.Accounts accounts = bookingAccounts.forCurrency(principal.getCurrency());
+        journal.post(new JournalEntry(
+            "loan-disbursement:" + approved.getId().getValue(),
+            principal.getCurrency(),
+            "Loan disbursement " + approved.getId().getValue(),
+            List.of(new JournalEntry.Line(accounts.receivableAccountId(), JournalEntry.Side.DEBIT, principal),
+                new JournalEntry.Line(accounts.clearingAccountId(), JournalEntry.Side.CREDIT, principal))));
     }
 
     private void cancelReservationUnlessDisbursed(Loan approved, RuntimeException failure) {

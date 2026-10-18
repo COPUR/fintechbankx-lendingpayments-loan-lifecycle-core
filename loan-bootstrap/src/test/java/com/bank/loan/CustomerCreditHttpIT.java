@@ -45,6 +45,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest(properties = {
     "loan.customer-credit.adapter=http",
     "loan.customer-credit.ledger-currency=AED",
+    "journal.adapter=in-memory",
+    "journal.loan.currency=AED",
+    "journal.loan.receivable-account-id=LOAN-RECEIVABLE",
+    "journal.loan.clearing-account-id=DISBURSEMENT-CLEARING",
     "loan.outbox.relay.enabled=false",
     "spring.security.oauth2.client.registration.customer-service.client-secret=stub",
     "spring.datasource.hikari.data-source-properties.ApplicationName=loan-http-it"

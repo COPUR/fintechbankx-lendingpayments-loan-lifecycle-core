@@ -14,6 +14,11 @@ import com.bank.loan.domain.port.out.CustomerCreditService;
 import com.bank.loan.domain.port.out.CustomerCreditService.CreditDecision;
 import com.bank.loan.domain.port.out.CustomerCreditService.UnusedReservation;
 import com.bank.loan.domain.port.out.CustomerCreditUnavailableException;
+import com.bank.loan.domain.port.out.AccountsLedgerUnavailableException;
+import com.bank.loan.domain.port.out.JournalEntry;
+import com.bank.loan.domain.port.out.JournalEntryReceipt;
+import com.bank.loan.domain.port.out.JournalEntryRejectedException;
+import com.bank.loan.domain.port.out.LoanBookingAccounts;
 import com.bank.loan.domain.LoanStatus;
 import com.bank.loan.domain.PaymentId;
 import com.bank.loan.domain.Repayment;
@@ -39,6 +44,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Currency;
 import java.util.List;
 import java.util.Optional;
 
@@ -67,11 +73,34 @@ class LoanManagementServiceTest {
     private final InMemoryRepaymentLedger ledger = new InMemoryRepaymentLedger();
     private final FakeTransactions transactions = new FakeTransactions();
     private final Clock clock = Clock.fixed(Instant.parse("2026-10-08T06:00:00Z"), ZoneOffset.UTC);
+    private final List<JournalEntry> journalled = new ArrayList<>();
+    private final List<Boolean> journalTransactionOpen = new ArrayList<>();
+    private final LoanBookingAccounts.Accounts bookingAccounts =
+        new LoanBookingAccounts.Accounts("LOAN-RECEIVABLE", "DISBURSEMENT-CLEARING");
+    private RuntimeException journalFailure;
+    private RuntimeException bookingFailure;
     private LoanManagementService service;
 
     @BeforeEach
     void setUp() {
-        service = new LoanManagementService(loanRepository, customerCreditService, eventPublisher, ledger, transactions, clock);
+        service = new LoanManagementService(loanRepository, customerCreditService, eventPublisher, ledger,
+            this::journal, currency -> bookingAccounts(), transactions, clock);
+    }
+
+    private JournalEntryReceipt journal(JournalEntry entry) {
+        journalTransactionOpen.add(transactions.active);
+        journalled.add(entry);
+        if (journalFailure != null) {
+            throw journalFailure;
+        }
+        return new JournalEntryReceipt("JE-" + journalled.size(), false, clock.instant());
+    }
+
+    private LoanBookingAccounts.Accounts bookingAccounts() {
+        if (bookingFailure != null) {
+            throw bookingFailure;
+        }
+        return bookingAccounts;
     }
 
     @Test
@@ -189,6 +218,110 @@ class LoanManagementServiceTest {
         assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-NEW")))
             .isInstanceOf(IllegalStateException.class);
         verifyNoInteractions(customerCreditService);
+    }
+
+    @Test
+    void disbursementIsBookedBeforeTheLoanIsSavedWithNoTransactionOpen() {
+        Loan approvedLoan = loan("LOAN-SVC-BOOK", "10000.00", 12);
+        approvedLoan.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-BOOK"))).thenReturn(Optional.of(approvedLoan));
+        when(loanRepository.save(any(Loan.class))).thenAnswer(invocation -> {
+            assertThat(journalled).as("booked before the loan is saved").hasSize(1);
+            return invocation.getArgument(0);
+        });
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+
+        service.disburse(LoanId.of("LOAN-SVC-BOOK"));
+
+        Money principal = Money.aed(new BigDecimal("10000.00"));
+        assertThat(journalled).hasSize(1);
+        JournalEntry entry = journalled.get(0);
+        assertThat(entry.reference()).isEqualTo("loan-disbursement:LOAN-SVC-BOOK");
+        assertThat(entry.currency()).isEqualTo(Currency.getInstance("AED"));
+        assertThat(entry.lines()).containsExactly(
+            new JournalEntry.Line("LOAN-RECEIVABLE", JournalEntry.Side.DEBIT, principal),
+            new JournalEntry.Line("DISBURSEMENT-CLEARING", JournalEntry.Side.CREDIT, principal));
+        assertThat(journalTransactionOpen).containsExactly(false);
+    }
+
+    @Test
+    void ledgerThatCannotBookTheDisbursementFailsItWithTheLoanApprovedAndCreditReleased() {
+        Loan approvedLoan = loan("LOAN-SVC-LDG", "10000.00", 12);
+        approvedLoan.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-LDG"))).thenReturn(Optional.of(approvedLoan));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        when(customerCreditService.cancelReservation(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        journalFailure = new AccountsLedgerUnavailableException("ledger timed out");
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-LDG")))
+            .isInstanceOf(AccountsLedgerUnavailableException.class);
+
+        assertThat(approvedLoan.getStatus()).isEqualTo(LoanStatus.APPROVED);
+        verify(loanRepository, never()).save(any(Loan.class));
+        verify(customerCreditService, never()).markReservationUsed(any());
+        verify(customerCreditService).cancelReservation(approvedLoan.getId(), approvedLoan.getCustomerId(),
+            Money.aed(new BigDecimal("10000.00")));
+    }
+
+    @Test
+    void ledgerRefusalFailsTheDisbursementTheSameWay() {
+        Loan approvedLoan = loan("LOAN-SVC-REJ", "10000.00", 12);
+        approvedLoan.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-REJ"))).thenReturn(Optional.of(approvedLoan));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        when(customerCreditService.cancelReservation(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        journalFailure = new JournalEntryRejectedException("ACCOUNT_NOT_OPERATIONAL", "account is frozen");
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-REJ")))
+            .isInstanceOf(JournalEntryRejectedException.class);
+
+        assertThat(approvedLoan.getStatus()).isEqualTo(LoanStatus.APPROVED);
+        verify(loanRepository, never()).save(any(Loan.class));
+        verify(customerCreditService).cancelReservation(approvedLoan.getId(), approvedLoan.getCustomerId(),
+            Money.aed(new BigDecimal("10000.00")));
+    }
+
+    @Test
+    void withoutBookingAccountsNothingIsBookedAndTheLoanStaysApproved() {
+        Loan approvedLoan = loan("LOAN-SVC-NOACC", "10000.00", 12);
+        approvedLoan.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-NOACC"))).thenReturn(Optional.of(approvedLoan));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        when(customerCreditService.cancelReservation(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        bookingFailure = new AccountsLedgerUnavailableException("No loan booking accounts are configured");
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-NOACC")))
+            .isInstanceOf(AccountsLedgerUnavailableException.class);
+
+        assertThat(journalled).isEmpty();
+        assertThat(approvedLoan.getStatus()).isEqualTo(LoanStatus.APPROVED);
+        verify(customerCreditService).cancelReservation(approvedLoan.getId(), approvedLoan.getCustomerId(),
+            Money.aed(new BigDecimal("10000.00")));
+    }
+
+    @Test
+    void aRetryAfterAFailedStoreBooksUnderTheSameReference() {
+        Loan approvedLoan = loan("LOAN-SVC-RETRY", "10000.00", 12);
+        approvedLoan.approve();
+        Loan stillApproved = loan("LOAN-SVC-RETRY", "10000.00", 12);
+        stillApproved.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-RETRY")))
+            .thenReturn(Optional.of(approvedLoan), Optional.of(approvedLoan), Optional.of(stillApproved),
+                Optional.of(stillApproved), Optional.of(stillApproved));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        when(customerCreditService.cancelReservation(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        when(loanRepository.save(any(Loan.class)))
+            .thenThrow(new OptimisticLockingFailureException("version 3"))
+            .thenAnswer(invocation -> invocation.getArgument(0));
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-RETRY")))
+            .isInstanceOf(OptimisticLockingFailureException.class);
+        service.disburse(LoanId.of("LOAN-SVC-RETRY"));
+
+        assertThat(journalled).extracting(JournalEntry::reference)
+            .containsExactly("loan-disbursement:LOAN-SVC-RETRY", "loan-disbursement:LOAN-SVC-RETRY");
+        verify(customerCreditService).cancelReservation(LoanId.of("LOAN-SVC-RETRY"), approvedLoan.getCustomerId(),
+            Money.aed(new BigDecimal("10000.00")));
     }
 
     @Test

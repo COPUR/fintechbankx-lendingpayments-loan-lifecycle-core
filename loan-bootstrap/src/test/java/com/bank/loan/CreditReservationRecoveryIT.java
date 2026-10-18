@@ -52,6 +52,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SpringBootTest(properties = {
     "loan.customer-credit.adapter=http",
     "loan.customer-credit.ledger-currency=AED",
+    "journal.adapter=in-memory",
+    "journal.loan.currency=AED",
+    "journal.loan.receivable-account-id=LOAN-RECEIVABLE",
+    "journal.loan.clearing-account-id=DISBURSEMENT-CLEARING",
     "loan.outbox.relay.enabled=false",
     "loan.credit-reservation.sweep.grace=PT10S",
     "loan.credit-reservation.sweep.interval=PT1S",

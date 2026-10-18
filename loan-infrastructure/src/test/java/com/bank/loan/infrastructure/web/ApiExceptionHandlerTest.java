@@ -19,6 +19,20 @@ class ApiExceptionHandlerTest {
     private final ApiExceptionHandler handler = new ApiExceptionHandler();
 
     @Test
+    void anUnbookedDisbursementIsA503AndALedgerRefusalIsA422WithTheirOwnCodes() {
+        var unbooked = handler.ledgerUnavailable(new com.bank.loan.domain.port.out.AccountsLedgerUnavailableException(
+            "No loan booking accounts are configured; nothing was booked"));
+        var refused = handler.journalRejected(new com.bank.loan.domain.port.out.JournalEntryRejectedException(
+            "ACCOUNT_NOT_OPERATIONAL", "account LOAN-RECEIVABLE is frozen"));
+
+        assertThat(unbooked.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(unbooked.getBody().code()).isEqualTo("ACCOUNTS_LEDGER_UNAVAILABLE");
+        assertThat(refused.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+        assertThat(refused.getBody().code()).isEqualTo("JOURNAL_ENTRY_REJECTED");
+        assertThat(refused.getBody().message()).doesNotContain("LOAN-RECEIVABLE", "frozen", "ACCOUNT_NOT_OPERATIONAL");
+    }
+
+    @Test
     void customerServiceOutagesAreA503WithAStableCode() {
         var unavailable = handler.dependencyUnavailable(new CustomerCreditUnavailableException("down"));
         var restClient = handler.dependencyUnavailable(new ResourceAccessException("timeout"));

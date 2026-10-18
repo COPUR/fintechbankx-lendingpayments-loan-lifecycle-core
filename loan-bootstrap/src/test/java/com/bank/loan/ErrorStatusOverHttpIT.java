@@ -42,6 +42,10 @@ import static org.mockito.Mockito.when;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
     "loan.customer-credit.adapter=in-memory",
     "loan.customer-credit.ledger-currency=AED",
+    "journal.adapter=in-memory",
+    "journal.loan.currency=AED",
+    "journal.loan.receivable-account-id=LOAN-RECEIVABLE",
+    "journal.loan.clearing-account-id=DISBURSEMENT-CLEARING",
     "loan.outbox.relay.enabled=false"
 })
 class ErrorStatusOverHttpIT {

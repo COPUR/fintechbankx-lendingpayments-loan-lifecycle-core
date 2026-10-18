@@ -510,3 +510,45 @@ Steps:
 5. Do not change `loan.status` or `loan.outstanding_balance` by SQL to make the record apply. A payment that should
    count against the loan is a loan-squad decision and goes through the recorded decision above.
 6. Close the incident with the payment owner's decision and the refund reference, if any.
+
+## 10. Disbursement booking in the accounts ledger
+
+A disbursement reserves credit, books `loan-disbursement:<loanId>` in the accounts ledger (debit the loan receivable,
+credit the disbursement clearing account), and only then stores the loan as DISBURSED. Nothing is booked for a loan
+that is not disbursed by this service, and a ledger that does not answer fails the disbursement with the loan APPROVED.
+
+### Configuration
+
+Set all three together (`journal.loan.*`, env `LOAN_BOOKING_CURRENCY`, `LOAN_RECEIVABLE_ACCOUNT_ID`,
+`LOAN_DISBURSEMENT_CLEARING_ACCOUNT_ID`). Both accounts are INTERNAL ledger accounts that operations opens with
+`POST /api/v1/accounts` and that are operational before the first disbursement. Unset, every disbursement is refused with
+503 `ACCOUNTS_LEDGER_UNAVAILABLE`. The service does not start when only some of the three are set.
+
+Deploy order: the ledger accounts exist and the three values are set, then this service's image with the booking.
+
+### What a caller sees
+
+| Answer | Meaning | Retry? |
+|---|---|---|
+| 503 `ACCOUNTS_LEDGER_UNAVAILABLE` | not booked (ledger down, timeout, no booking accounts for the currency) | yes, nothing changed |
+| 422 `JOURNAL_ENTRY_REJECTED` | the ledger refused the entry (for example an account is not operational) | no, until the ledger's side is fixed |
+| 503 `CUSTOMER_SERVICE_UNAVAILABLE` / 422 `INSUFFICIENT_CREDIT` | the credit step (section 8 and earlier) | as before |
+
+Both booking answers leave the loan APPROVED and the credit reservation released.
+
+### Booked but not disbursed
+
+A disbursement that books and then cannot store the loan (for example an optimistic-lock conflict) leaves a booking
+under `loan-disbursement:<loanId>` while the loan is still APPROVED. A retry of the disbursement replays that booking
+under the same reference, so nothing is booked twice. If the loan is never disbursed (cancelled or rejected after
+such a failure), the booking stays in the ledger and is reversed with a reversing entry, a decision for the loan
+squad and the ledger owner; it is never deleted or edited.
+
+1. The ledger owner lists the journal entries whose reference starts with `loan-disbursement:` (the ledger contract
+   has no lookup by reference yet, so this is a query on the ledger's own journal table, not an API call).
+2. For each loan id in that list, check its status in this service:
+   ```sql
+   SELECT status FROM loan WHERE loan_id = '<loan id>';
+   ```
+   `DISBURSED` is correct and needs nothing. Any other status is a booking to reverse: the ledger owner posts the
+   reversing entry, with the loan squad's decision recorded on the incident.

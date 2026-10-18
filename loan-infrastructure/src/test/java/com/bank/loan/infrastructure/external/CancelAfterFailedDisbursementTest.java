@@ -70,8 +70,9 @@ class CancelAfterFailedDisbursementTest {
         Currency.getInstance("AED"), generations, 3);
     private final Loans loans = new Loans();
     private final LoanManagementService service = new LoanManagementService(loans, adapter, mock(LoanEventPublisher.class),
-        mock(RepaymentLedger.class), TransactionOperations.withoutTransaction(),
-        Clock.fixed(Instant.parse("2026-10-08T06:00:00Z"), ZoneOffset.UTC));
+        mock(RepaymentLedger.class), new InMemoryJournalEntryAdapter(),
+        new ConfiguredLoanBookingAccounts("AED", "LOAN-RECEIVABLE", "DISBURSEMENT-CLEARING"),
+        TransactionOperations.withoutTransaction(), Clock.fixed(Instant.parse("2026-10-08T06:00:00Z"), ZoneOffset.UTC));
 
     @Test
     void cancellingAfterAFailedDisbursementReleasesTheHeldReservationUnderTheCompensationKeyOnce() {
