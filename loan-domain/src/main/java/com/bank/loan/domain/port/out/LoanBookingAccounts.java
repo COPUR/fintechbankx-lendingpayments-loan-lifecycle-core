@@ -18,6 +18,13 @@ public interface LoanBookingAccounts {
     /** The accounts for a disbursement in the given currency. Never returns on failure. */
     Accounts forCurrency(Currency currency);
 
+    /**
+     * The income account interest of a repayment is booked to, in the given
+     * currency. Asked only for a repayment that has interest; without one
+     * configured it throws {@link AccountsLedgerUnavailableException}.
+     */
+    String interestIncomeAccountId(Currency currency);
+
     /** The two ledger accounts of one disbursement; their ids are never the same. */
     record Accounts(String receivableAccountId, String clearingAccountId) {
 

@@ -2,6 +2,7 @@ package com.bank.loan.application;
 
 import com.bank.loan.domain.Loan;
 import com.bank.loan.domain.LoanId;
+import com.bank.loan.domain.PaymentDistribution;
 import com.bank.loan.domain.PaymentId;
 import com.bank.loan.domain.PaymentResult;
 import com.bank.loan.domain.Repayment;
@@ -22,6 +23,8 @@ import com.bank.loan.domain.port.out.JournalEntryPort;
 import com.bank.loan.domain.port.out.LoanBookingAccounts;
 import com.bank.loan.domain.port.out.LoanEventPublisher;
 import com.bank.loan.domain.port.out.LoanRepository;
+import com.bank.loan.domain.port.out.RepaymentBooking;
+import com.bank.loan.domain.port.out.RepaymentBookings;
 import com.bank.loan.domain.port.out.RepaymentLedger;
 import com.bank.shared.kernel.domain.DomainEvent;
 import com.bank.shared.kernel.domain.Money;
@@ -71,6 +74,7 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
     private final CustomerCreditService customerCreditService;
     private final LoanEventPublisher eventPublisher;
     private final RepaymentLedger repaymentLedger;
+    private final RepaymentBookings repaymentBookings;
     private final JournalEntryPort journal;
     private final LoanBookingAccounts bookingAccounts;
     private final TransactionOperations transactions;
@@ -80,6 +84,7 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
                                  CustomerCreditService customerCreditService,
                                  LoanEventPublisher eventPublisher,
                                  RepaymentLedger repaymentLedger,
+                                 RepaymentBookings repaymentBookings,
                                  JournalEntryPort journal,
                                  LoanBookingAccounts bookingAccounts,
                                  TransactionOperations transactions,
@@ -88,6 +93,7 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
         this.customerCreditService = customerCreditService;
         this.eventPublisher = eventPublisher;
         this.repaymentLedger = repaymentLedger;
+        this.repaymentBookings = repaymentBookings;
         this.journal = journal;
         this.bookingAccounts = bookingAccounts;
         this.transactions = transactions;
@@ -283,12 +289,32 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
     private Loan applyRepayment(Loan loan, PaymentId paymentId, Money amount, Repayment.Source source,
                                 String requestScope, String idempotencyKey, EventCausation causation) {
         PaymentResult result = loan.makePayment(paymentId, amount);
+        // Before anything is written: without its booking accounts the repayment is refused and rolls back.
+        RepaymentBooking booking = bookingOf(loan, result, paymentId);
         Loan saved = saveAndPublish(loan, causation);
         repaymentLedger.record(Repayment.of(result, amount, Instant.now(clock), source, requestScope, idempotencyKey));
+        // Same transaction as the repayment: the booking exists exactly when the repayment does.
+        repaymentBookings.record(booking);
         if (result.isLoanFullyPaid()) {
             afterCommit(() -> releaseCredit(saved));
         }
         return saved;
+    }
+
+    /**
+     * The repayment's ledger booking, split as the loan applied it: the
+     * principal reduces the receivable and the interest is income. It runs
+     * inside the repayment's transaction, so it reads configuration only and
+     * never calls the ledger.
+     */
+    private RepaymentBooking bookingOf(Loan loan, PaymentResult result, PaymentId paymentId) {
+        PaymentDistribution split = result.getPaymentDistribution();
+        Money principal = split.getPrincipalPayment();
+        Money interest = split.getInterestPayment();
+        LoanBookingAccounts.Accounts accounts = bookingAccounts.forCurrency(principal.getCurrency());
+        String interestIncome = interest.isPositive() ? bookingAccounts.interestIncomeAccountId(principal.getCurrency()) : null;
+        return new RepaymentBooking("loan-repayment:" + paymentId.getValue(), loan.getId(), principal, interest,
+            accounts.receivableAccountId(), accounts.clearingAccountId(), interestIncome);
     }
 
     /**

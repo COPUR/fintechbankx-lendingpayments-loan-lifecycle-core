@@ -68,6 +68,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
     "journal.loan.currency=AED",
     "journal.loan.receivable-account-id=LOAN-RECEIVABLE",
     "journal.loan.clearing-account-id=DISBURSEMENT-CLEARING",
+    "journal.loan.interest-income-account-id=INTEREST-INCOME",
     "loan.outbox.relay.enabled=false"
 })
 @AutoConfigureMockMvc
@@ -104,6 +105,7 @@ class LoanLifecycleServiceIT {
         PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.repayment");
         PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.credit_reservation_generation");
         PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.outbox_event");
+        PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.repayment_booking");
         PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.loan");
     }
 
@@ -116,7 +118,8 @@ class LoanLifecycleServiceIT {
             """, String.class);
 
         assertThat(tables).containsExactly("credit_reservation_generation", "inbox_message", "loan", "loan_installment",
-            "outbox_event", "repayment", "repayment_allocation");
+            "outbox_event", "repayment", "repayment_allocation",
+            "repayment_booking");
     }
 
     /**
@@ -182,6 +185,12 @@ class LoanLifecycleServiceIT {
 
         // Repayments come off the principal balance whole. The schedule allocation is bookkeeping: the
         // first payment's 67.20 beyond installment 1 goes to installment 2, interest first.
+        // Each applied repayment carries its ledger booking, written in the same transaction.
+        assertThat(jdbc.queryForList("select reference from sc_ln_loan_lifecycle.repayment_booking where loan_id = ?",
+                String.class, loanId))
+            .hasSize(2)
+            .allSatisfy(reference -> assertThat(reference).startsWith("loan-repayment:"));
+
         List<java.util.Map<String, Object>> firstAllocations = jdbc.queryForList("""
             select a.installment_number, a.amount, a.principal, a.interest
               from sc_ln_loan_lifecycle.repayment_allocation a

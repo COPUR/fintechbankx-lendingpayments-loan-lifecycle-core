@@ -53,14 +53,16 @@ public class ApiExceptionHandler {
     }
 
     /**
-     * The accounts ledger did not book the disbursement (or no booking accounts
-     * are configured): nothing changed, the loan stays APPROVED, retry later.
+     * The accounts ledger could not take the booking of a disbursement or a
+     * repayment (or no booking accounts are configured for it): nothing changed,
+     * retry later. Only a request path answers this; a repayment booked later by
+     * the sweep never does.
      */
     @ExceptionHandler(AccountsLedgerUnavailableException.class)
     ResponseEntity<ErrorResponse> ledgerUnavailable(AccountsLedgerUnavailableException ex) {
-        log.warn("Accounts ledger unavailable for a disbursement: {}", ex.getMessage());
+        log.warn("Accounts ledger unavailable for a loan operation: {}", ex.getMessage());
         return error(HttpStatus.SERVICE_UNAVAILABLE, "ACCOUNTS_LEDGER_UNAVAILABLE",
-            "The disbursement could not be booked in the accounts ledger; nothing changed, retry later");
+            "The loan operation could not be booked in the accounts ledger; nothing changed, retry later");
     }
 
     /**

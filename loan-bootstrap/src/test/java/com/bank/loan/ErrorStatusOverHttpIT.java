@@ -46,6 +46,7 @@ import static org.mockito.Mockito.when;
     "journal.loan.currency=AED",
     "journal.loan.receivable-account-id=LOAN-RECEIVABLE",
     "journal.loan.clearing-account-id=DISBURSEMENT-CLEARING",
+    "journal.loan.interest-income-account-id=INTEREST-INCOME",
     "loan.outbox.relay.enabled=false"
 })
 class ErrorStatusOverHttpIT {
@@ -72,6 +73,7 @@ class ErrorStatusOverHttpIT {
     void customerToken() {
         PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.credit_reservation_generation");
         PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.outbox_event");
+        PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.repayment_booking");
         PostgresTestDatabase.owner().update("delete from sc_ln_loan_lifecycle.loan");
         when(jwtDecoder.decode(anyString())).thenReturn(Jwt.withTokenValue("t").header("alg", "RS256")
             .subject("5f0c2b7e-8d1a-4c3e-9b6f-2a7d4e1c9b30").claim("customer_id", "CUST-12345678")

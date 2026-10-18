@@ -208,11 +208,17 @@ loan:
     # exist and the payments cutover window opens.
     enabled: ${LOAN_REPAYMENT_CONSUMER_ENABLED:false}
     concurrency: 1
+  repayment-booking:
+    # The sweep that books applied repayments in the ledger (runbook section 10).
+    sweep:
+      batch-size: ${LOAN_REPAYMENT_BOOKING_BATCH_SIZE:50}
+      interval: ${LOAN_REPAYMENT_BOOKING_INTERVAL:PT1M}
+      initial-delay: PT0S
 
 journal:
   # Journal entries to the accounts ledger (svc-acc-accounts-ledger, ADR-030,
   # POST /api/v1/journal-entries): http or in-memory (local runs and tests only).
-  # A disbursement is booked through this port; repayments are not booked yet.
+  # A disbursement and a repayment are booked through this port.
   adapter: ${JOURNAL_ADAPTER:http}
   base-url: ${ACCOUNTS_SERVICE_BASE_URL:http://accounts-ledger-service.corebanking.svc.cluster.local:8080}
   client-registration-id: accounts-ledger
@@ -229,6 +235,9 @@ journal:
     currency: ${LOAN_BOOKING_CURRENCY:}
     receivable-account-id: ${LOAN_RECEIVABLE_ACCOUNT_ID:}
     clearing-account-id: ${LOAN_DISBURSEMENT_CLEARING_ACCOUNT_ID:}
+    # Income account of the interest in a repayment (a flat-rate loan migrated from the monolith).
+    # Unset, a repayment with interest is not booked and the sweep keeps it pending.
+    interest-income-account-id: ${LOAN_INTEREST_INCOME_ACCOUNT_ID:}
 
 fintechbankx:
   tls:

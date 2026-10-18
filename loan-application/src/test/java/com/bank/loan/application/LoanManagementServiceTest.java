@@ -19,10 +19,15 @@ import com.bank.loan.domain.port.out.JournalEntry;
 import com.bank.loan.domain.port.out.JournalEntryReceipt;
 import com.bank.loan.domain.port.out.JournalEntryRejectedException;
 import com.bank.loan.domain.port.out.LoanBookingAccounts;
+import com.bank.loan.domain.InstallmentStatus;
+import com.bank.loan.domain.LoanInstallment;
 import com.bank.loan.domain.LoanStatus;
+import com.bank.loan.domain.RateBasis;
 import com.bank.loan.domain.PaymentId;
 import com.bank.loan.domain.Repayment;
 import com.bank.loan.domain.port.out.LoanEventPublisher;
+import com.bank.loan.domain.port.out.RepaymentBooking;
+import com.bank.loan.domain.port.out.RepaymentBookings;
 import com.bank.loan.domain.port.out.RepaymentLedger;
 import com.bank.shared.kernel.domain.DomainEvent;
 import com.bank.shared.kernel.domain.CustomerId;
@@ -42,6 +47,8 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Currency;
@@ -52,6 +59,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -70,6 +78,9 @@ class LoanManagementServiceTest {
     @Mock
     private LoanEventPublisher eventPublisher;
 
+    @Mock
+    private RepaymentBookings repaymentBookings;
+
     private final InMemoryRepaymentLedger ledger = new InMemoryRepaymentLedger();
     private final FakeTransactions transactions = new FakeTransactions();
     private final Clock clock = Clock.fixed(Instant.parse("2026-10-08T06:00:00Z"), ZoneOffset.UTC);
@@ -79,12 +90,30 @@ class LoanManagementServiceTest {
         new LoanBookingAccounts.Accounts("LOAN-RECEIVABLE", "DISBURSEMENT-CLEARING");
     private RuntimeException journalFailure;
     private RuntimeException bookingFailure;
+    private RuntimeException interestFailure;
+    private final LoanBookingAccounts loanBookingAccounts = new LoanBookingAccounts() {
+        @Override
+        public Accounts forCurrency(Currency currency) {
+            if (bookingFailure != null) {
+                throw bookingFailure;
+            }
+            return bookingAccounts;
+        }
+
+        @Override
+        public String interestIncomeAccountId(Currency currency) {
+            if (interestFailure != null) {
+                throw interestFailure;
+            }
+            return "INTEREST-INCOME";
+        }
+    };
     private LoanManagementService service;
 
     @BeforeEach
     void setUp() {
         service = new LoanManagementService(loanRepository, customerCreditService, eventPublisher, ledger,
-            this::journal, currency -> bookingAccounts(), transactions, clock);
+            repaymentBookings, this::journal, loanBookingAccounts, transactions, clock);
     }
 
     private JournalEntryReceipt journal(JournalEntry entry) {
@@ -94,13 +123,6 @@ class LoanManagementServiceTest {
             throw journalFailure;
         }
         return new JournalEntryReceipt("JE-" + journalled.size(), false, clock.instant());
-    }
-
-    private LoanBookingAccounts.Accounts bookingAccounts() {
-        if (bookingFailure != null) {
-            throw bookingFailure;
-        }
-        return bookingAccounts;
     }
 
     @Test
@@ -738,6 +760,27 @@ class LoanManagementServiceTest {
         }
     }
 
+    /** A monolith loan (FLAT_TOTAL): 12 x 1,200.00 of 1,000.00 principal and 200.00 interest, none paid yet. */
+    private Loan migratedFlatRateLoan(String loanId) {
+        LoanId id = LoanId.of(loanId);
+        CustomerId customer = CustomerId.of("CUST-SVC-FLAT");
+        List<LoanInstallment> schedule = new ArrayList<>();
+        for (int n = 1; n <= 12; n++) {
+            schedule.add(LoanInstallment.rehydrate(id, customer, n, Money.aed(new BigDecimal("1200.00")),
+                Money.aed(new BigDecimal("1000.00")), Money.aed(new BigDecimal("200.00")),
+                LocalDate.of(2025, 7, 1).plusMonths(n - 1), Money.aed(new BigDecimal("0.00")), null,
+                InstallmentStatus.PENDING));
+        }
+        Loan loan = Loan.rehydrate(id, customer, Money.aed(new BigDecimal("12000.00")),
+            InterestRate.of(new BigDecimal("20.0")), RateBasis.FLAT_TOTAL, LoanTerm.ofMonths(12), LoanStatus.DISBURSED,
+            LocalDate.of(2025, 6, 1), LocalDate.of(2025, 6, 1), LocalDate.of(2025, 6, 1), LocalDate.of(2026, 6, 1),
+            Money.aed(new BigDecimal("12000.00")), schedule,
+            LocalDateTime.of(2025, 6, 1, 9, 30), LocalDateTime.of(2025, 6, 1, 9, 30), 0L);
+        org.mockito.Mockito.lenient().when(loanRepository.findById(id)).thenReturn(Optional.of(loan));
+        org.mockito.Mockito.lenient().when(loanRepository.save(loan)).thenReturn(loan);
+        return loan;
+    }
+
     private Loan disbursedLoan(String loanId) {
         Loan loan = loan(loanId, "5000.00", 12);
         loan.approve();
@@ -767,6 +810,76 @@ class LoanManagementServiceTest {
         public void record(Repayment repayment) {
             recorded.add(repayment);
         }
+    }
+
+    @Test
+    void repaymentIsBookedInItsOwnTransactionUnderThePaymentReference() {
+        disbursedLoan("LOAN-SVC-BOOK");
+        List<Boolean> transactionOpenAtBooking = new ArrayList<>();
+        doAnswer(invocation -> {
+            transactionOpenAtBooking.add(transactions.active);
+            return null;
+        }).when(repaymentBookings).record(any(RepaymentBooking.class));
+
+        RepayLoanCommand request = new RepayLoanCommand(LoanId.of("LOAN-SVC-BOOK"), Money.aed(new BigDecimal("100.00")),
+            "CUST-SVC-BOOK", "key-book");
+        service.repay(request);
+        service.repay(request);
+
+        ArgumentCaptor<RepaymentBooking> booking = ArgumentCaptor.forClass(RepaymentBooking.class);
+        verify(repaymentBookings).record(booking.capture());
+        RepaymentBooking recorded = booking.getValue();
+        assertThat(recorded.reference())
+            .isEqualTo("loan-repayment:" + ledger.recorded.getFirst().paymentId().getValue());
+        assertThat(recorded.principal().getAmount()).isEqualByComparingTo("100.00");
+        assertThat(recorded.interest().isZero()).isTrue();
+        assertThat(recorded.receivableAccountId()).isEqualTo("LOAN-RECEIVABLE");
+        assertThat(recorded.clearingAccountId()).isEqualTo("DISBURSEMENT-CLEARING");
+        assertThat(recorded.interestIncomeAccountId()).isNull();
+        assertThat(transactionOpenAtBooking).containsExactly(true);
+    }
+
+    @Test
+    void repaymentWithInterestBooksTheInterestToItsIncomeAccount() {
+        migratedFlatRateLoan("LOAN-SVC-INT");
+
+        service.repay(RepayLoanCommand.withoutKey(LoanId.of("LOAN-SVC-INT"), Money.aed(new BigDecimal("1200.00"))));
+
+        ArgumentCaptor<RepaymentBooking> booking = ArgumentCaptor.forClass(RepaymentBooking.class);
+        verify(repaymentBookings).record(booking.capture());
+        assertThat(booking.getValue().principal().getAmount()).isEqualByComparingTo("1000.00");
+        assertThat(booking.getValue().interest().getAmount()).isEqualByComparingTo("200.00");
+        assertThat(booking.getValue().interestIncomeAccountId()).isEqualTo("INTEREST-INCOME");
+    }
+
+    @Test
+    void repaymentWithInterestWithoutAnIncomeAccountIsRefusedAndRolledBack() {
+        migratedFlatRateLoan("LOAN-SVC-NOINC");
+        interestFailure = new AccountsLedgerUnavailableException("No loan interest income account is configured");
+
+        assertThatThrownBy(() -> service.repay(RepayLoanCommand.withoutKey(LoanId.of("LOAN-SVC-NOINC"),
+                Money.aed(new BigDecimal("1200.00")))))
+            .isInstanceOf(AccountsLedgerUnavailableException.class);
+
+        verify(loanRepository, never()).save(any(Loan.class));
+        assertThat(ledger.recorded).isEmpty();
+        verifyNoInteractions(repaymentBookings);
+        assertThat(transactions.rollbacks).isEqualTo(1);
+    }
+
+    @Test
+    void repaymentWithoutBookingAccountsIsRefusedBeforeAnythingIsWritten() {
+        disbursedLoan("LOAN-SVC-NOACC");
+        bookingFailure = new AccountsLedgerUnavailableException("No loan booking accounts are configured");
+
+        assertThatThrownBy(() -> service.repay(RepayLoanCommand.withoutKey(LoanId.of("LOAN-SVC-NOACC"),
+                Money.aed(new BigDecimal("100.00")))))
+            .isInstanceOf(AccountsLedgerUnavailableException.class);
+
+        verify(loanRepository, never()).save(any(Loan.class));
+        assertThat(ledger.recorded).isEmpty();
+        verifyNoInteractions(repaymentBookings, eventPublisher);
+        assertThat(transactions.rollbacks).isEqualTo(1);
     }
 
     @Test

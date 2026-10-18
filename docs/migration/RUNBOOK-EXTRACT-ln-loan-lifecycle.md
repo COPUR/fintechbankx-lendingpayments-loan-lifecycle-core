@@ -552,3 +552,40 @@ squad and the ledger owner; it is never deleted or edited.
    ```
    `DISBURSED` is correct and needs nothing. Any other status is a booking to reverse: the ledger owner posts the
    reversing entry, with the loan squad's decision recorded on the incident.
+
+### Repayments
+
+Every applied repayment is booked as `loan-repayment:<paymentId>`: the amount comes off the disbursement clearing account,
+the principal reduces the loan receivable and the interest is credited to the interest income account. The booking is
+written in the repayment's own transaction, so it exists exactly when the repayment does, and it never waits on the
+ledger. The booking sweep posts it at start-up and then every `LOAN_REPAYMENT_BOOKING_INTERVAL` (default `PT1M`), one
+replica at a time.
+
+Configuration: `LOAN_INTEREST_INCOME_ACCOUNT_ID` (`journal.loan.interest-income-account-id`), an INTERNAL income account
+that operations opens and makes operational before the first repayment with interest. Repayments of loans created here
+(nominal rate) carry no interest and need no income account. The three booking values of the disbursement are needed for
+every repayment too, so set them before this image takes repayments.
+
+| Answer | Where | What happens |
+|---|---|---|
+| 503 `ACCOUNTS_LEDGER_UNAVAILABLE` on the repayment | request path, with the income account or booking accounts unset | nothing changed, retry later |
+| booked | sweep | `booked_at` and the journal entry id are set |
+| not answered by the ledger | sweep | the row stays pending, `attempts` grows, `last_error = ACCOUNTS_LEDGER_UNAVAILABLE`; the sweep stops and retries next run |
+| refused as sent | sweep | the row is parked (`parked = TRUE`), `last_error` holds the ledger's code; it is not sent again |
+
+Parked bookings, read only:
+
+```sql
+SELECT reference, loan_id, last_error, attempts, created_at
+FROM repayment_booking
+WHERE parked AND booked_at IS NULL
+ORDER BY created_at;
+```
+
+To send a parked booking again, the ledger owner first confirms that the account or entry is fixed; only then does an
+operator clear the flag (`UPDATE repayment_booking SET parked = FALSE WHERE reference = '<reference>';`). The next run
+posts the same entry under the same reference, so the ledger replays or books it once. A booking that is wrong in its
+amount or accounts is never edited: the ledger owner reverses it, and the loan squad decides on it, as in the
+disbursement case above.
+
+The booking sweep books repayments only; a repayment that the service has not stored is never booked.

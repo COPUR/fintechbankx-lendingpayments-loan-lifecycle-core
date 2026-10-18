@@ -8,6 +8,7 @@ import com.bank.loan.domain.LoanStatus;
 import com.bank.loan.domain.LoanTerm;
 import com.bank.loan.domain.port.out.LoanEventPublisher;
 import com.bank.loan.domain.port.out.LoanRepository;
+import com.bank.loan.domain.port.out.RepaymentBookings;
 import com.bank.loan.domain.port.out.RepaymentLedger;
 import com.bank.shared.kernel.domain.CustomerId;
 import com.bank.shared.kernel.domain.Money;
@@ -70,8 +71,8 @@ class CancelAfterFailedDisbursementTest {
         Currency.getInstance("AED"), generations, 3);
     private final Loans loans = new Loans();
     private final LoanManagementService service = new LoanManagementService(loans, adapter, mock(LoanEventPublisher.class),
-        mock(RepaymentLedger.class), new InMemoryJournalEntryAdapter(),
-        new ConfiguredLoanBookingAccounts("AED", "LOAN-RECEIVABLE", "DISBURSEMENT-CLEARING"),
+        mock(RepaymentLedger.class), mock(RepaymentBookings.class), new InMemoryJournalEntryAdapter(),
+        new ConfiguredLoanBookingAccounts("AED", "LOAN-RECEIVABLE", "DISBURSEMENT-CLEARING", ""),
         TransactionOperations.withoutTransaction(), Clock.fixed(Instant.parse("2026-10-08T06:00:00Z"), ZoneOffset.UTC));
 
     @Test

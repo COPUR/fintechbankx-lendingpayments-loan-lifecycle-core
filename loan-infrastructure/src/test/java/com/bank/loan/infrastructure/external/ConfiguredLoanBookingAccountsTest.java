@@ -13,7 +13,7 @@ class ConfiguredLoanBookingAccountsTest {
 
     @Test
     void unsetAccountsRefuseEveryCurrency() {
-        ConfiguredLoanBookingAccounts accounts = new ConfiguredLoanBookingAccounts("", "", "");
+        ConfiguredLoanBookingAccounts accounts = new ConfiguredLoanBookingAccounts("", "", "", "");
 
         assertThatThrownBy(() -> accounts.forCurrency(Currency.getInstance("AED")))
             .isInstanceOf(AccountsLedgerUnavailableException.class)
@@ -23,7 +23,7 @@ class ConfiguredLoanBookingAccountsTest {
     @Test
     void configuredAccountsBookTheConfiguredCurrencyOnly() {
         ConfiguredLoanBookingAccounts accounts =
-            new ConfiguredLoanBookingAccounts("AED", "LOAN-RECEIVABLE", "DISBURSEMENT-CLEARING");
+            new ConfiguredLoanBookingAccounts("AED", "LOAN-RECEIVABLE", "DISBURSEMENT-CLEARING", "INTEREST-INCOME");
 
         assertThat(accounts.forCurrency(Currency.getInstance("AED")))
             .isEqualTo(new LoanBookingAccounts.Accounts("LOAN-RECEIVABLE", "DISBURSEMENT-CLEARING"));
@@ -34,14 +34,38 @@ class ConfiguredLoanBookingAccountsTest {
 
     @Test
     void partlyConfiguredAccountsDoNotStart() {
-        assertThatThrownBy(() -> new ConfiguredLoanBookingAccounts("AED", "LOAN-RECEIVABLE", ""))
+        assertThatThrownBy(() -> new ConfiguredLoanBookingAccounts("AED", "LOAN-RECEIVABLE", "", ""))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("must be set together");
     }
 
     @Test
     void receivableAndClearingAccountsMustDiffer() {
-        assertThatThrownBy(() -> new ConfiguredLoanBookingAccounts("AED", "SAME-ACCOUNT", "SAME-ACCOUNT"))
+        assertThatThrownBy(() -> new ConfiguredLoanBookingAccounts("AED", "SAME-ACCOUNT", "SAME-ACCOUNT", ""))
             .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void interestIncomeIsRefusedUnlessConfiguredAndNeverBookedInAnotherCurrency() {
+        ConfiguredLoanBookingAccounts unset =
+            new ConfiguredLoanBookingAccounts("AED", "LOAN-RECEIVABLE", "DISBURSEMENT-CLEARING", "");
+        ConfiguredLoanBookingAccounts configured =
+            new ConfiguredLoanBookingAccounts("AED", "LOAN-RECEIVABLE", "DISBURSEMENT-CLEARING", "INTEREST-INCOME");
+
+        assertThatThrownBy(() -> unset.interestIncomeAccountId(Currency.getInstance("AED")))
+            .isInstanceOf(AccountsLedgerUnavailableException.class)
+            .hasMessageContaining("nothing was booked");
+        assertThat(configured.interestIncomeAccountId(Currency.getInstance("AED"))).isEqualTo("INTEREST-INCOME");
+        assertThatThrownBy(() -> configured.interestIncomeAccountId(Currency.getInstance("USD")))
+            .isInstanceOf(AccountsLedgerUnavailableException.class)
+            .hasMessageContaining("USD");
+    }
+
+    @Test
+    void interestIncomeMustNotBeTheReceivableAccount() {
+        assertThatThrownBy(() -> new ConfiguredLoanBookingAccounts("AED", "LOAN-RECEIVABLE", "DISBURSEMENT-CLEARING",
+                "LOAN-RECEIVABLE"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("must not be the receivable account");
     }
 }

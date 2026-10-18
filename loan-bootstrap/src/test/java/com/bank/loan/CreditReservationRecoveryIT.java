@@ -56,6 +56,7 @@ import static org.assertj.core.api.Assertions.assertThat;
     "journal.loan.currency=AED",
     "journal.loan.receivable-account-id=LOAN-RECEIVABLE",
     "journal.loan.clearing-account-id=DISBURSEMENT-CLEARING",
+    "journal.loan.interest-income-account-id=INTEREST-INCOME",
     "loan.outbox.relay.enabled=false",
     "loan.credit-reservation.sweep.grace=PT10S",
     "loan.credit-reservation.sweep.interval=PT1S",
@@ -90,7 +91,7 @@ class CreditReservationRecoveryIT {
             "--DB_USERNAME=" + PostgresTestDatabase.RUNTIME_ROLE,
             "--DB_MIGRATION_USERNAME=" + PostgresTestDatabase.ownerUser(),
             "--DB_MIGRATION_PASSWORD=" + PostgresTestDatabase.ownerPassword())).isZero();
-        for (String table : List.of("repayment_allocation", "repayment", "inbox_message",
+        for (String table : List.of("repayment_allocation", "repayment", "repayment_booking", "inbox_message",
                 "credit_reservation_generation", "outbox_event", "loan_installment", "loan")) {
             owner.update("delete from " + SCHEMA + "." + table);
         }
