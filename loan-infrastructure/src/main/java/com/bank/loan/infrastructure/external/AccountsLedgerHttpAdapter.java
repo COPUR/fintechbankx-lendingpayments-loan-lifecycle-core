@@ -4,6 +4,7 @@ import com.bank.loan.domain.port.out.AccountsLedgerUnavailableException;
 import com.bank.loan.domain.port.out.JournalEntry;
 import com.bank.loan.domain.port.out.JournalEntryPort;
 import com.bank.loan.domain.port.out.JournalEntryReceipt;
+import com.bank.loan.domain.port.out.JournalEntryReferenceReusedException;
 import com.bank.loan.domain.port.out.JournalEntryRejectedException;
 import com.bank.loan.infrastructure.web.CorrelationIdFilter;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
@@ -131,6 +132,11 @@ public class AccountsLedgerHttpAdapter implements JournalEntryPort {
                     throw new AccountsLedgerUnavailableException("Accounts ledger kept reporting " + code
                         + " for the journal entry");
                 }
+                if (status == HttpStatus.CONFLICT.value() && "IDEMPOTENCY_KEY_REUSED".equals(code)) {
+                    log.info("Accounts ledger holds another entry under this reference: {} {}", status, code);
+                    throw new JournalEntryReferenceReusedException(code, "Accounts ledger answered " + status + " "
+                        + code + " to the journal entry; an entry with this reference exists; not retried");
+                }
                 if (isRejection(status, code)) {
                     log.info("Accounts ledger refused a journal entry: {} {}", status, code);
                     throw new JournalEntryRejectedException(code, "Accounts ledger answered " + status + " " + code
@@ -202,7 +208,6 @@ public class AccountsLedgerHttpAdapter implements JournalEntryPort {
 
     private static boolean isRejection(int status, String code) {
         return (status == HttpStatus.UNPROCESSABLE_ENTITY.value() && REFUSALS.contains(code))
-            || (status == HttpStatus.CONFLICT.value() && "IDEMPOTENCY_KEY_REUSED".equals(code))
             || status == HttpStatus.BAD_REQUEST.value()
             || status == HttpStatus.NOT_FOUND.value();
     }

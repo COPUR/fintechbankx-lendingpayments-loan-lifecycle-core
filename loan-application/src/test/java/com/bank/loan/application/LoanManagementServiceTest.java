@@ -17,6 +17,7 @@ import com.bank.loan.domain.port.out.CustomerCreditUnavailableException;
 import com.bank.loan.domain.port.out.AccountsLedgerUnavailableException;
 import com.bank.loan.domain.port.out.JournalEntry;
 import com.bank.loan.domain.port.out.JournalEntryReceipt;
+import com.bank.loan.domain.port.out.JournalEntryReferenceReusedException;
 import com.bank.loan.domain.port.out.JournalEntryRejectedException;
 import com.bank.loan.domain.port.out.LoanBookingAccounts;
 import com.bank.loan.domain.port.out.LoanBookingNotConfiguredException;
@@ -65,6 +66,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -309,6 +311,25 @@ class LoanManagementServiceTest {
         verify(loanRepository, never()).save(any(Loan.class));
         verify(customerCreditService).cancelReservation(approvedLoan.getId(), approvedLoan.getCustomerId(),
             Money.aed(new BigDecimal("10000.00")));
+    }
+
+    @Test
+    void reusedReferenceIsRefusedButSignalledBecauseTheEntryExists() {
+        Loan approvedLoan = loan("LOAN-SVC-REUSE", "10000.00", 12);
+        approvedLoan.approve();
+        when(loanRepository.findById(LoanId.of("LOAN-SVC-REUSE"))).thenReturn(Optional.of(approvedLoan));
+        when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        when(customerCreditService.cancelReservation(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
+        journalFailure = new JournalEntryReferenceReusedException("IDEMPOTENCY_KEY_REUSED", "other lines");
+
+        assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-REUSE")))
+            .isInstanceOf(JournalEntryRejectedException.class);
+
+        assertThat(approvedLoan.getStatus()).isEqualTo(LoanStatus.APPROVED);
+        verify(unresolvedBookings).raise(LoanId.of("LOAN-SVC-REUSE"), "loan-disbursement:LOAN-SVC-REUSE",
+            UnresolvedBookingSignal.Cause.REFERENCE_REUSED);
+        verifyNoMoreInteractions(unresolvedBookings);
+        verify(loanRepository, never()).save(any(Loan.class));
     }
 
     @Test

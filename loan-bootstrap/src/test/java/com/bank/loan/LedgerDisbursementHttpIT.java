@@ -39,7 +39,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * CustomerCreditHttpIT. Every answer the ledger can give a disbursement is
  * mapped here: the loan stays APPROVED and the reservation is released; an
  * answer that may have booked the entry is also signalled as an unresolved
- * booking (DevSecOps B-1, S-2). A refusal is a 422 and raises no signal.
+ * booking (DevSecOps B-1, S-2), and so is a booking that cannot be stored and a
+ * reused reference. A refusal is a 422 and raises no signal.
  */
 @SpringBootTest(properties = {
     "loan.customer-credit.adapter=http",
@@ -69,6 +70,7 @@ class LedgerDisbursementHttpIT {
     private static final List<Call> calls = new CopyOnWriteArrayList<>();
     private static volatile Stubbed ledgerAnswer;
     private static volatile long ledgerDelayMillis;
+    private static volatile Runnable whileLedgerBooks;
 
     record Stubbed(int status, String body) { }
 
@@ -122,6 +124,7 @@ class LedgerDisbursementHttpIT {
         calls.clear();
         ledgerAnswer = new Stubbed(201, "{}");
         ledgerDelayMillis = 0;
+        whileLedgerBooks = null;
     }
 
     @Test
@@ -173,16 +176,54 @@ class LedgerDisbursementHttpIT {
     }
 
     @Test
-    void anUnauthorizedLedgerFailsClosedAsA503AndTheReservationIsReleased() throws Exception {
+    void anUnauthorizedOrForbiddenLedgerFailsClosedAsA503AndSignalsTheBooking() throws Exception {
+        for (int status : new int[] {401, 403}) {
+            String loanId = approvedLoan();
+            ledgerAnswer = new Stubbed(status, "{\"code\":\"UNAUTHORIZED\",\"message\":\"token rejected\"}");
+            double before = unresolved("ledger_unanswered");
+
+            mvc.perform(asBanker(post("/api/v1/loans/{id}/disburse", loanId)))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code").value("ACCOUNTS_LEDGER_UNAVAILABLE"));
+
+            assertThat(loanStatus(loanId)).as("status " + status).isEqualTo("APPROVED");
+            assertThat(releasedFor(loanId)).as("status " + status).isEqualTo(1);
+            assertThat(unresolved("ledger_unanswered") - before).as("status " + status).isEqualTo(1.0);
+        }
+    }
+
+    @Test
+    void aBookingThatCannotBeStoredIsSignalledAsNotStored() throws Exception {
         String loanId = approvedLoan();
-        ledgerAnswer = new Stubbed(401, "{\"code\":\"UNAUTHORIZED\",\"message\":\"token rejected\"}");
+        ledgerAnswer = new Stubbed(201, receipt(loanId));
+        // The loan is cancelled while the ledger books it, so the disbursement cannot be stored afterwards.
+        whileLedgerBooks = () -> PostgresTestDatabase.owner()
+            .update("update sc_ln_loan_lifecycle.loan set status = 'CANCELLED' where loan_id = ?", loanId);
+        double unanswered = unresolved("ledger_unanswered");
+        double notStored = unresolved("not_stored");
 
         mvc.perform(asBanker(post("/api/v1/loans/{id}/disburse", loanId)))
-            .andExpect(status().isServiceUnavailable())
-            .andExpect(jsonPath("$.code").value("ACCOUNTS_LEDGER_UNAVAILABLE"));
+            .andExpect(status().isConflict());
+
+        only("POST", LEDGER_ENTRIES);
+        assertThat(loanStatus(loanId)).isEqualTo("CANCELLED");
+        assertThat(unresolved("not_stored") - notStored).isEqualTo(1.0);
+        assertThat(unresolved("ledger_unanswered") - unanswered).isZero();
+    }
+
+    @Test
+    void aReusedReferenceIsA422ButSignalledBecauseTheEntryExists() throws Exception {
+        String loanId = approvedLoan();
+        ledgerAnswer = new Stubbed(409, "{\"code\":\"IDEMPOTENCY_KEY_REUSED\",\"message\":\"other lines\"}");
+        double before = unresolved("reference_reused");
+
+        mvc.perform(asBanker(post("/api/v1/loans/{id}/disburse", loanId)))
+            .andExpect(status().isUnprocessableEntity())
+            .andExpect(jsonPath("$.code").value("JOURNAL_ENTRY_REJECTED"));
 
         assertThat(loanStatus(loanId)).isEqualTo("APPROVED");
         assertThat(releasedFor(loanId)).isEqualTo(1);
+        assertThat(unresolved("reference_reused") - before).isEqualTo(1.0);
     }
 
     @Test
@@ -278,6 +319,10 @@ class LedgerDisbursementHttpIT {
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
             }
+        }
+        Runnable sideEffect = whileLedgerBooks;
+        if (sideEffect != null) {
+            sideEffect.run();
         }
         respond(exchange, ledgerAnswer.status(), ledgerAnswer.body());
     }

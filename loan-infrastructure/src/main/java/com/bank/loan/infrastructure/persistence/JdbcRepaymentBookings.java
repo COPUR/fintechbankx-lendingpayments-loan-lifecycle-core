@@ -4,7 +4,10 @@ import com.bank.loan.domain.LoanId;
 import com.bank.loan.domain.port.out.RepaymentBooking;
 import com.bank.loan.domain.port.out.RepaymentBookings;
 import com.bank.shared.kernel.domain.Money;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;
@@ -13,8 +16,10 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Currency;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Repayment bookings in PostgreSQL. {@link #record} joins the repayment's
@@ -55,6 +60,18 @@ public class JdbcRepaymentBookings implements RepaymentBookings {
         WHERE reference = ? AND booked_at IS NULL
         """;
 
+    private static final String COUNT_PARKED = """
+        SELECT count(*) FROM repayment_booking WHERE parked AND booked_at IS NULL
+        """;
+
+    private static final String OLDEST_PENDING = """
+        SELECT min(created_at) FROM repayment_booking WHERE booked_at IS NULL AND NOT parked
+        """;
+
+    static final String UNREADABLE = "UNREADABLE_BOOKING";
+
+    private static final Logger log = LoggerFactory.getLogger(JdbcRepaymentBookings.class);
+
     private final JdbcTemplate jdbc;
 
     public JdbcRepaymentBookings(JdbcTemplate jdbc) {
@@ -76,7 +93,20 @@ public class JdbcRepaymentBookings implements RepaymentBookings {
 
     @Override
     public List<RepaymentBooking> pending(int limit) {
-        return jdbc.query(PENDING, (rs, row) -> toBooking(rs), limit);
+        List<RepaymentBooking> readable = new ArrayList<>();
+        List<String> unreadable = new ArrayList<>();
+        jdbc.query(PENDING, (RowCallbackHandler) rs -> {
+            try {
+                readable.add(toBooking(rs));
+            } catch (RuntimeException unreadableRow) {
+                unreadable.add(rs.getString("reference"));
+            }
+        }, limit);
+        for (String reference : unreadable) {
+            park(reference, UNREADABLE);
+            log.error("Repayment booking {} cannot be read back as a booking; parked for an operator", reference);
+        }
+        return readable;
     }
 
     @Override
@@ -92,6 +122,17 @@ public class JdbcRepaymentBookings implements RepaymentBookings {
     @Override
     public void park(String reference, String code) {
         jdbc.update(PARK, code, reference);
+    }
+
+    @Override
+    public long countParked() {
+        Long parked = jdbc.queryForObject(COUNT_PARKED, Long.class);
+        return parked == null ? 0 : parked;
+    }
+
+    @Override
+    public Optional<Instant> oldestPending() {
+        return Optional.ofNullable(jdbc.queryForObject(OLDEST_PENDING, Timestamp.class)).map(Timestamp::toInstant);
     }
 
     private static RepaymentBooking toBooking(ResultSet rs) throws SQLException {

@@ -17,7 +17,11 @@ import java.util.List;
  * is written, so nothing waits on the ledger here: a booking the ledger cannot
  * answer stays pending and is posted again by a later run, under the same
  * reference, so the ledger replays it rather than booking twice. A booking the
- * ledger refuses as sent is parked for an operator (runbook section 10).
+ * ledger refuses as sent is parked for an operator (runbook section 10), and so
+ * is a booking that fails here for any other reason (building its entry, or
+ * marking it booked), so one bad row cannot hold up every later booking. A
+ * parked booking that was in fact booked is replayed by the ledger when the
+ * operator clears it.
  *
  * One replica sweeps at a time ({@link PostgresAdvisoryLock}). Each run posts
  * one batch, in order, and stops at the first answer that the ledger is
@@ -30,6 +34,8 @@ public class RepaymentBookingSweep {
     public static final long SWEEP_LOCK_KEY = 0x6C6E5F727062L;
 
     static final String LEDGER_UNAVAILABLE = "ACCOUNTS_LEDGER_UNAVAILABLE";
+
+    static final String SWEEP_FAILED = "SWEEP_FAILED";
 
     private static final Logger log = LoggerFactory.getLogger(RepaymentBookingSweep.class);
 
@@ -83,6 +89,11 @@ public class RepaymentBookingSweep {
                 log.warn("Repayment booking {} not booked: the accounts ledger did not answer; retried next run",
                     booking.reference());
                 break;
+            } catch (RuntimeException failure) {
+                bookings.park(booking.reference(), SWEEP_FAILED);
+                parked++;
+                log.error("Repayment booking {} failed in the sweep ({}); parked for an operator",
+                    booking.reference(), failure.getClass().getSimpleName());
             }
         }
         return new Result(true, booked, failed, parked);

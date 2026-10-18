@@ -230,13 +230,13 @@ journal:
   loan:
     # Booking accounts of a disbursement: the loan receivable is debited and the
     # disbursement clearing account credited, both INTERNAL ledger accounts that
-    # operations opens. Set all three together. Unset, every disbursement is
-    # refused with 503 ACCOUNTS_LEDGER_UNAVAILABLE (fail closed).
+    # operations opens. Set all three together. Unset, every disbursement and
+    # repayment is refused with 422 BOOKING_NOT_CONFIGURED (fail closed).
     currency: ${LOAN_BOOKING_CURRENCY:}
     receivable-account-id: ${LOAN_RECEIVABLE_ACCOUNT_ID:}
     clearing-account-id: ${LOAN_DISBURSEMENT_CLEARING_ACCOUNT_ID:}
     # Income account of the interest in a repayment (a flat-rate loan migrated from the monolith).
-    # Unset, a repayment with interest is not booked and the sweep keeps it pending.
+    # Unset, a repayment with interest is refused with 422 BOOKING_NOT_CONFIGURED and nothing is written.
     interest-income-account-id: ${LOAN_INTEREST_INCOME_ACCOUNT_ID:}
 
 fintechbankx:

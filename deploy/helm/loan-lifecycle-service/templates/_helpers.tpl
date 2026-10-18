@@ -128,18 +128,54 @@ Usage: include "loan.guardValues" .
 {{- end -}}
 {{- end -}}
 {{- range $key, $value := .Values.config -}}
-{{- $name := include "fbx.canonicalName" $key -}}
-{{- if regexMatch "^fintechbankx[.]journal([.]|$)" $name -}}
+{{- $readings := include "loan.journalReadings" $key -}}
+{{- if regexMatch "(^|,)fintechbankx[.]journal([.,]|$)" $readings -}}
 {{- fail (printf "config.%s is not allowed: fintechbankx.journal.* is set by the service, and the in-memory journal is for local and test runs only" $key) -}}
 {{- end -}}
-{{- if and (eq $name "journal.adapter") (ne (toString $value) "http") -}}
+{{- if and (regexMatch "(^|,)journal[.]adapter(,|$)" $readings) (ne (toString $value) "http") -}}
 {{- fail (printf "config.%s must be http: the journal is the accounts ledger, and the in-memory journal is refused in a deployed service" $key) -}}
+{{- end -}}
+{{- if include "fbx.isJvmOptionsName" $key -}}
+{{- include "loan.refuseJournalJvmOption" (dict "where" (printf "config.%s" $key) "value" $value) -}}
 {{- end -}}
 {{- end -}}
 {{- range $env := (.Values.extraEnv | default list) -}}
-{{- $journalName := include "fbx.canonicalName" (toString (default "" $env.name)) -}}
-{{- if regexMatch "^(fintechbankx[.]journal([.]|$)|journal[.]adapter$)" $journalName -}}
-{{- fail (printf "extraEnv must not set %s: the journal is the accounts ledger over http, set by the chart" $env.name) -}}
+{{- $envName := toString (default "" $env.name) -}}
+{{- if regexMatch "(^|,)(fintechbankx[.]journal([.,]|$)|journal[.]adapter(,|$))" (include "loan.journalReadings" $envName) -}}
+{{- fail (printf "extraEnv must not set %s: the journal is the accounts ledger over http, set by the chart" $envName) -}}
 {{- end -}}
+{{- if and (include "fbx.isJvmOptionsName" $envName) (hasKey $env "value") -}}
+{{- include "loan.refuseJournalJvmOption" (dict "where" (printf "extraEnv.%s" $envName) "value" $env.value) -}}
+{{- end -}}
+{{- end -}}
+{{- include "loan.refuseJournalJvmOption" (dict "where" "javaToolOptions" "value" (.Values.javaToolOptions | default "")) -}}
+{{- end -}}
+
+{{/*
+The four relaxed-binding readings of a name, comma-separated, that fbx.guard
+checks for its own rules (_fbx_helpers.tpl): the environment reading
+(fbx.canonicalName), the property reading (fbx.propertyName, '_' skipped, so
+fintech_bankx.journal.allow-in-memory and journal.ada_pter bind) and both
+readings of the name with its brackets removed (fbx.bracketlessName).
+*/}}
+{{- define "loan.journalReadings" -}}
+{{- $n := toString . -}}
+{{- $b := include "fbx.bracketlessName" $n -}}
+{{- printf "%s,%s,%s,%s" (include "fbx.canonicalName" $n) (include "fbx.propertyName" $n) (include "fbx.canonicalName" $b) (include "fbx.propertyName" $b) -}}
+{{- end -}}
+
+{{/*
+JVM options (JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS, _JAVA_OPTIONS and
+javaToolOptions) must not mention journal in any spelling: a system property
+such as -Djournal.adapter=in-memory overrides the configuration (DevSecOps
+55a686f B-2). Checked raw, with every character other than [a-z0-9] and white
+space removed, and flat, as fbx.validateJvmOptions reads them.
+*/}}
+{{- define "loan.refuseJournalJvmOption" -}}
+{{- $v := toString .value -}}
+{{- $alt := regexReplaceAll "[^a-z0-9\\s]+" (lower $v) "" -}}
+{{- $flat := regexReplaceAll "[^a-z0-9]+" (lower $v) "" -}}
+{{- if or (regexMatch "(?i)journal" $v) (contains "journal" $alt) (contains "journal" $flat) -}}
+{{- fail (printf "%s must not mention journal: the journal is the accounts ledger over http, set by the chart, and a system property would override it" .where) -}}
 {{- end -}}
 {{- end -}}

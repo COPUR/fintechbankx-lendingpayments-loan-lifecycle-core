@@ -5,6 +5,7 @@ import com.bank.loan.domain.port.out.JournalEntry;
 import com.bank.loan.domain.port.out.JournalEntry.Line;
 import com.bank.loan.domain.port.out.JournalEntry.Side;
 import com.bank.loan.domain.port.out.JournalEntryReceipt;
+import com.bank.loan.domain.port.out.JournalEntryReferenceReusedException;
 import com.bank.loan.domain.port.out.JournalEntryRejectedException;
 import com.bank.loan.infrastructure.web.CorrelationIdFilter;
 import com.bank.shared.kernel.domain.Money;
@@ -159,7 +160,7 @@ class AccountsLedgerHttpAdapterTest {
                 .message().doesNotContain("LOAN-HTTP-7", "ACC-", "1250", "12.34", "available");
         }
         assertThatThrownBy(() -> adapter.post(ENTRY))
-            .isInstanceOf(JournalEntryRejectedException.class)
+            .isInstanceOf(JournalEntryReferenceReusedException.class)
             .hasMessageContaining("409 IDEMPOTENCY_KEY_REUSED")
             .message().doesNotContain("LOAN-HTTP-7", "ACC-", "12.34");
         assertThatThrownBy(() -> adapter.post(ENTRY))

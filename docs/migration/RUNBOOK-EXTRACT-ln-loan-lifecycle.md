@@ -540,12 +540,13 @@ both settings.
 |---|---|---|
 | 503 `ACCOUNTS_LEDGER_UNAVAILABLE` | not disbursed. The ledger gave no usable answer: down, timeout, 5xx, an unreadable answer, or 401/403. The entry may have been booked. | yes; a retry replays the same entry |
 | 422 `JOURNAL_ENTRY_REJECTED` | the ledger refused the entry as sent (for example an account is not operational). Nothing was booked. | no, until the ledger's side is fixed |
+| 422 `JOURNAL_ENTRY_REJECTED`, ledger code `IDEMPOTENCY_KEY_REUSED` | the ledger already holds an entry under `loan-disbursement:<loanId>` with other lines, for example from an earlier attempt that timed out before the booking accounts were changed. An entry exists. Signalled (`cause="reference_reused"`). | no; reconcile the loan |
 | 422 `BOOKING_NOT_CONFIGURED` | no booking accounts for the loan's currency. Nothing was sent. | no, until the configuration is set |
 | 409 `CONCURRENT_UPDATE` or `INVALID_LOAN_STATE` after a booking | the entry was booked, then the disbursement could not be stored (a store conflict, or the loan was cancelled meanwhile) | yes, if the loan is still APPROVED; the replay books nothing new |
 | 503 `CUSTOMER_SERVICE_UNAVAILABLE` / 422 `INSUFFICIENT_CREDIT` | the credit step (section 8 and earlier) | as before |
 
-In every row the loan stays APPROVED and the credit reservation is released. Only the 422 rows are certain that nothing
-was booked.
+In every row the loan stays APPROVED and the credit reservation is released. Only the 422 rows without a signal
+(`JOURNAL_ENTRY_REJECTED` with any other ledger code, and `BOOKING_NOT_CONFIGURED`) are certain that nothing was booked.
 
 ### Signals
 
@@ -557,6 +558,8 @@ A disbursement whose entry may exist while the loan is not disbursed raises one 
 - `cause="not_stored"`: the entry was booked, then the loan could not be stored (an optimistic-lock conflict, or the
   loan was cancelled meanwhile). Two disbursements racing on one loan can also raise it; reconciliation settles it by
   the loan's status.
+- `cause="reference_reused"`: the ledger answered 409 `IDEMPOTENCY_KEY_REUSED`, so an entry with this reference and
+  other lines exists. The caller gets 422; reconciliation compares the ledger's entry with the loan.
 
 Each signal carries the loan id and the reference only: never an account id, an amount or the ledger's text. A refused
 entry raises no signal, because nothing was booked.
@@ -611,6 +614,12 @@ every repayment too, so set them before this image takes repayments.
 | booked | sweep | `booked_at` and the journal entry id are set |
 | not answered by the ledger | sweep | the row stays pending, `attempts` grows, `last_error = ACCOUNTS_LEDGER_UNAVAILABLE`; the sweep stops and retries on its next run. A repayment needs no reconciliation: its replay is the sweep's own retry |
 | refused as sent | sweep | the row is parked (`parked = TRUE`), `last_error` holds the ledger's code; it is not sent again |
+| failed in the sweep for another reason | sweep | the row is parked with `last_error = SWEEP_FAILED` (an ERROR line names the reference and the exception class), so it cannot hold up the bookings after it. It may have been booked; clearing it replays it |
+| cannot be read back as a booking | sweep | the row is parked with `last_error = UNREADABLE_BOOKING` (for example an amount with more decimals than its currency); the ledger owner and the loan squad decide on it |
+
+Signals: `loan_repayment_bookings_parked` (alert on any value above zero) and
+`loan_repayment_bookings_oldest_pending_age_seconds` (alert when it stays above a few sweep intervals: the ledger does
+not answer, or the sweep does not run).
 
 Parked bookings, read only:
 

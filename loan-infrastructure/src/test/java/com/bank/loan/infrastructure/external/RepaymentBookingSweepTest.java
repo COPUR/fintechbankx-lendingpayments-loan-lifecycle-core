@@ -75,6 +75,21 @@ class RepaymentBookingSweepTest {
     }
 
     @Test
+    void aBookingThatFailsInTheSweepIsParkedSoItCannotHoldUpTheRest() {
+        when(bookings.pending(2)).thenReturn(List.of(booking("loan-repayment:PAY-7"), booking("loan-repayment:PAY-8")));
+        when(journal.post(any(JournalEntry.class)))
+            .thenReturn(new JournalEntryReceipt("JE-7", false, BOOKED))
+            .thenReturn(new JournalEntryReceipt("JE-8", false, BOOKED));
+        org.mockito.Mockito.doThrow(new IllegalStateException("column changed"))
+            .when(bookings).markBooked("loan-repayment:PAY-7", "JE-7", BOOKED);
+
+        assertThat(sweep.bookPending()).isEqualTo(new RepaymentBookingSweep.Result(true, 1, 0, 1));
+
+        verify(bookings).park("loan-repayment:PAY-7", RepaymentBookingSweep.SWEEP_FAILED);
+        verify(bookings).markBooked("loan-repayment:PAY-8", "JE-8", BOOKED);
+    }
+
+    @Test
     void nothingPendingMeansNothingPosted() {
         when(bookings.pending(2)).thenReturn(List.of());
 

@@ -10,8 +10,8 @@ import java.util.Objects;
  * (ADR-030). Implemented from configuration in loan-infrastructure.
  *
  * Asked for a currency with no configured accounts, the implementation throws
- * {@link AccountsLedgerUnavailableException}: a disbursement that cannot be
- * booked must not proceed.
+ * {@link LoanBookingNotConfiguredException}: a disbursement or repayment that
+ * cannot be booked must not proceed, and retrying does not help.
  */
 public interface LoanBookingAccounts {
 
@@ -21,7 +21,7 @@ public interface LoanBookingAccounts {
     /**
      * The income account interest of a repayment is booked to, in the given
      * currency. Asked only for a repayment that has interest; without one
-     * configured it throws {@link AccountsLedgerUnavailableException}.
+     * configured it throws {@link LoanBookingNotConfiguredException}.
      */
     String interestIncomeAccountId(Currency currency);
 

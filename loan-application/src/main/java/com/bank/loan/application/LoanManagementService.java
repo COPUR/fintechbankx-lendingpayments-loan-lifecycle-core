@@ -21,6 +21,7 @@ import com.bank.loan.domain.port.out.CustomerCreditService.UnusedReservation;
 import com.bank.loan.domain.port.out.EventCausation;
 import com.bank.loan.domain.port.out.JournalEntry;
 import com.bank.loan.domain.port.out.JournalEntryPort;
+import com.bank.loan.domain.port.out.JournalEntryReferenceReusedException;
 import com.bank.loan.domain.port.out.LoanBookingAccounts;
 import com.bank.loan.domain.port.out.LoanEventPublisher;
 import com.bank.loan.domain.port.out.LoanRepository;
@@ -209,6 +210,9 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
             if (failure instanceof AccountsLedgerUnavailableException) {
                 unresolvedBooking.raise(approved.getId(), disbursementReference(approved),
                     UnresolvedBookingSignal.Cause.LEDGER_UNANSWERED);
+            } else if (failure instanceof JournalEntryReferenceReusedException) {
+                unresolvedBooking.raise(approved.getId(), disbursementReference(approved),
+                    UnresolvedBookingSignal.Cause.REFERENCE_REUSED);
             } else if (booked) {
                 unresolvedBooking.raise(approved.getId(), disbursementReference(approved),
                     UnresolvedBookingSignal.Cause.NOT_STORED);
