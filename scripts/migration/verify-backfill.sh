@@ -47,11 +47,20 @@ done
 expect_refusal_by() {
   local label="$1" pattern="$2" err; shift 2
   if err="$("$@" 2>&1 > /dev/null)"; then
-    echo "FAIL $label: the backfill ran" >&2
+    echo "FAIL $label: not refused, it ran" >&2
     exit 1
   fi
   if ! grep -q "$pattern" <<< "$err"; then
     echo "FAIL $label: refused, but not by the expected check: $err" >&2
+    exit 1
+  fi
+  echo "ok   $label"
+}
+
+expect_pass() {
+  local label="$1" out; shift
+  if ! out="$("$@" 2>&1)"; then
+    echo "FAIL $label: $out" >&2
     exit 1
   fi
   echo "ok   $label"
@@ -82,7 +91,8 @@ B="22222222-2222-2222-2222-222222222222"
 C="33333333-3333-3333-3333-333333333333"
 D="44444444-4444-4444-4444-444444444444"
 E="55555555-5555-5555-5555-555555555555"
-guard_refusal="BACKFILL REFUSED: [0-9][0-9]* loan(s) hold a balance written under the old schedule rule"
+# Each guard case leaves exactly one loan holding a balance under the old schedule rule.
+guard_refusal="BACKFILL REFUSED: 1 loan(s) hold a balance written under the old schedule rule (runbook section 2)"
 inflight_refusal="BACKFILL REFUSED: [0-9][0-9]* monolith payment(s) are INITIATED or PROCESSING"
 
 echo "--- preconditions"
@@ -165,5 +175,17 @@ psql_q -d "$dst_db" -c "UPDATE $L.loan SET outstanding_balance = 9000.00 WHERE l
 "$backfill" "dbname=$src_db" "dbname=$dst_db" "$currency" > /dev/null
 check "guard passes once the balance is the principal again" \
   "SELECT status || ' ' || outstanding_balance::numeric(19,2) FROM $L.loan WHERE loan_id = '$B'" "DISBURSED 9000.00"
+
+echo "--- per-environment check (runbook section 2): the runbook command, three ways"
+assert_sql="$root/db/backfill/00_assert_read_only_session.sql"
+guard_sql="$root/db/backfill/00_guard_old_schedule_balance.sql"
+expect_pass "PGOPTIONS read-only, plain conninfo: passes" \
+  env PGOPTIONS='-c default_transaction_read_only=on' psql "dbname=$dst_db" -v ON_ERROR_STOP=1 -f "$assert_sql" -f "$guard_sql"
+expect_refusal_by "PGOPTIONS, but options= in the conninfo replaces it: refused" "session is not read-only" \
+  env PGOPTIONS='-c default_transaction_read_only=on' psql "dbname=$dst_db options='-c statement_timeout=60000'" -v ON_ERROR_STOP=1 -f "$assert_sql" -f "$guard_sql"
+expect_refusal_by "neither PGOPTIONS nor options=: refused" "session is not read-only" \
+  env -u PGOPTIONS psql "dbname=$dst_db" -v ON_ERROR_STOP=1 -f "$assert_sql" -f "$guard_sql"
+expect_refusal_by "PGOPTIONS, but options= sets read-only off: refused" "session is not read-only" \
+  env PGOPTIONS='-c default_transaction_read_only=on' psql "dbname=$dst_db options='-c default_transaction_read_only=off'" -v ON_ERROR_STOP=1 -f "$assert_sql" -f "$guard_sql"
 
 echo "Backfill rehearsal passed."

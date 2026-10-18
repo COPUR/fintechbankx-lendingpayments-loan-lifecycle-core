@@ -9,7 +9,7 @@
 DO $$
 BEGIN
     IF current_setting('transaction_read_only') <> 'on' THEN
-        RAISE EXCEPTION 'session is not read-only: connect with PGOPTIONS=-c default_transaction_read_only=on, and without an options= keyword in the conninfo';
+        RAISE EXCEPTION 'session is not read-only: run the check as the service role with PGOPTIONS=-c default_transaction_read_only=on, and without an options= keyword in the conninfo';
     END IF;
 END
 $$;
