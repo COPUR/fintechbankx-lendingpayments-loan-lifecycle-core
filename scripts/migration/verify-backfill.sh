@@ -42,6 +42,19 @@ for migration in $(ls "$root"/loan-infrastructure/src/main/resources/db/migratio
     | PGOPTIONS="-c search_path=sc_ln_loan_lifecycle" psql_q -d "$dst_db" -f -
 done
 
+expect_guard_refusal() {
+  local label="$1" err; shift
+  if err="$("$@" 2>&1 > /dev/null)"; then
+    echo "FAIL $label: the backfill ran" >&2
+    exit 1
+  fi
+  if ! grep -q "BACKFILL REFUSED: [0-9]* loan(s) hold a balance written under the old schedule rule" <<< "$err"; then
+    echo "FAIL $label: refused, but not by the guard: $err" >&2
+    exit 1
+  fi
+  echo "ok   $label"
+}
+
 check() {
   local label="$1" sql="$2" expected="$3" actual
   actual="$(psql -X -At -d "$dst_db" -c "$sql")"
@@ -137,12 +150,12 @@ psql_q -d "$dst_db" -c "INSERT INTO $L.loan (loan_id, customer_id, principal_amo
                                              outstanding_balance, created_at, updated_at, rate_basis)
                         VALUES ('LOAN-OLD-SCHEDULE', '1', 12000.00, '$currency', 6.0000, 12, 'DISBURSED', '2026-06-01',
                                 '2026-06-01', '2026-06-01', '2027-06-01', 12393.58, now(), now(), 'NOMINAL_ANNUAL')"
-expect_refusal "created loan on the old schedule balance refuses the backfill" \
+expect_guard_refusal "created loan on the old schedule balance refuses the backfill" \
   "$backfill" "dbname=$src_db" "dbname=$dst_db" "$currency"
 psql_q -d "$dst_db" -c "DELETE FROM $L.loan WHERE loan_id = 'LOAN-OLD-SCHEDULE'"
 # A migrated loan the service changed, holding the schedule still due (10,800.00) instead of its principal (9,000.00).
 psql_q -d "$dst_db" -c "UPDATE $L.loan SET outstanding_balance = 10800.00 WHERE loan_id = '$B'"
-expect_refusal "changed migrated loan on the old schedule balance refuses the backfill" \
+expect_guard_refusal "changed migrated loan on the old schedule balance refuses the backfill" \
   "$backfill" "dbname=$src_db" "dbname=$dst_db" "$currency"
 psql_q -d "$dst_db" -c "UPDATE $L.loan SET outstanding_balance = 9000.00 WHERE loan_id = '$B'"
 "$backfill" "dbname=$src_db" "dbname=$dst_db" "$currency" > /dev/null

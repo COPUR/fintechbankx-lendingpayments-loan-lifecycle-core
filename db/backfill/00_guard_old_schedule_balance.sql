@@ -4,7 +4,8 @@
 --   * a loan created here (rate_basis NOMINAL_ANNUAL) must hold its principal less the repayments applied;
 --   * a migrated loan the service has changed (version > 0) must hold its principal less the principal part
 --     paid on its installments (interest first).
--- Changes nothing. No environment is deployed yet, so none holds such rows (docs/migration runbook, section 2).
+-- Changes nothing. Nothing has checked the environments yet: each must pass this guard before cutover
+-- (docs/migration runbook, section 2).
 
 \set ON_ERROR_STOP on
 
