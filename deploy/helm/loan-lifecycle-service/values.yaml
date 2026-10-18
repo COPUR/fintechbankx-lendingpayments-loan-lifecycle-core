@@ -133,6 +133,17 @@ config:
   # REQUIRED ISO 4217 currency the customer service holds credit in. No
   # default: the book's currency is a business decision, never assumed.
   CUSTOMER_CREDIT_LEDGER_CURRENCY: ""
+  # The journal is the accounts ledger over http (ADR-030). Anything else is refused at render time,
+  # and the service refuses the in-memory journal outside local and test (DevSecOps B-2).
+  JOURNAL_ADAPTER: "http"
+  # Loan booking accounts: INTERNAL ledger accounts that operations opens before this image is deployed
+  # (runbook section 10). Set all three or none. None: every disbursement and repayment is refused with
+  # 422 BOOKING_NOT_CONFIGURED. Partly set: the chart does not render.
+  LOAN_BOOKING_CURRENCY: ""
+  LOAN_RECEIVABLE_ACCOUNT_ID: ""
+  LOAN_DISBURSEMENT_CLEARING_ACCOUNT_ID: ""
+  # Income account of repayment interest. Required before any repayment with interest is applied.
+  LOAN_INTEREST_INCOME_ACCOUNT_ID: ""
   # Off until evt.ln.loan.v1 is in the platform catalog (runbook step 1).
   OUTBOX_RELAY_ENABLED: "false"
   # Off until the loan and payments writes cut over together (runbook step 3).

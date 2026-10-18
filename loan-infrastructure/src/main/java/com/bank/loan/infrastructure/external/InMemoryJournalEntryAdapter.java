@@ -21,8 +21,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * other lines it is IDEMPOTENCY_KEY_REUSED. It keeps no balances, so nothing
  * is ever INSUFFICIENT_FUNDS or ACCOUNT_NOT_OPERATIONAL here.
  *
- * Enabled only with {@code journal.adapter=in-memory}. Every deployed
- * environment uses {@link AccountsLedgerHttpAdapter}.
+ * Enabled only with {@code journal.adapter=in-memory}, which
+ * {@code JournalAdapterGuard} refuses unless {@code fintechbankx.journal.allow-in-memory}
+ * is set (local and test only). Every deployed environment uses
+ * {@link AccountsLedgerHttpAdapter}.
  */
 @Component
 @ConditionalOnProperty(name = "journal.adapter", havingValue = "in-memory")

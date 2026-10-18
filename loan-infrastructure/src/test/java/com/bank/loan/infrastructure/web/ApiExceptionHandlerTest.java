@@ -21,15 +21,26 @@ class ApiExceptionHandlerTest {
     @Test
     void anUnbookedDisbursementIsA503AndALedgerRefusalIsA422WithTheirOwnCodes() {
         var unbooked = handler.ledgerUnavailable(new com.bank.loan.domain.port.out.AccountsLedgerUnavailableException(
-            "No loan booking accounts are configured; nothing was booked"));
+            "Accounts ledger answered 500 to the journal entry"));
         var refused = handler.journalRejected(new com.bank.loan.domain.port.out.JournalEntryRejectedException(
             "ACCOUNT_NOT_OPERATIONAL", "account LOAN-RECEIVABLE is frozen"));
 
         assertThat(unbooked.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
         assertThat(unbooked.getBody().code()).isEqualTo("ACCOUNTS_LEDGER_UNAVAILABLE");
+        assertThat(unbooked.getBody().message()).isEqualTo("not disbursed; the entry may have been booked; a retry replays it");
         assertThat(refused.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
         assertThat(refused.getBody().code()).isEqualTo("JOURNAL_ENTRY_REJECTED");
         assertThat(refused.getBody().message()).doesNotContain("LOAN-RECEIVABLE", "frozen", "ACCOUNT_NOT_OPERATIONAL");
+    }
+
+    @Test
+    void aBookingWithoutConfiguredAccountsIsA422NotARetryableOutage() {
+        var notConfigured = handler.bookingNotConfigured(
+            new com.bank.loan.domain.port.out.LoanBookingNotConfiguredException("No loan booking accounts are configured for USD"));
+
+        assertThat(notConfigured.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+        assertThat(notConfigured.getBody().code()).isEqualTo("BOOKING_NOT_CONFIGURED");
+        assertThat(notConfigured.getBody().message()).doesNotContain("USD");
     }
 
     @Test

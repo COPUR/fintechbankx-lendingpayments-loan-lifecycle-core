@@ -127,4 +127,19 @@ Usage: include "loan.guardValues" .
 {{- fail (printf "extraEnv must not set %s: the Kafka client properties (spring.kafka.properties.*) come from the kafka.profile, never from values" $envName) -}}
 {{- end -}}
 {{- end -}}
+{{- range $key, $value := .Values.config -}}
+{{- $name := include "fbx.canonicalName" $key -}}
+{{- if regexMatch "^fintechbankx[.]journal([.]|$)" $name -}}
+{{- fail (printf "config.%s is not allowed: fintechbankx.journal.* is set by the service, and the in-memory journal is for local and test runs only" $key) -}}
+{{- end -}}
+{{- if and (eq $name "journal.adapter") (ne (toString $value) "http") -}}
+{{- fail (printf "config.%s must be http: the journal is the accounts ledger, and the in-memory journal is refused in a deployed service" $key) -}}
+{{- end -}}
+{{- end -}}
+{{- range $env := (.Values.extraEnv | default list) -}}
+{{- $journalName := include "fbx.canonicalName" (toString (default "" $env.name)) -}}
+{{- if regexMatch "^(fintechbankx[.]journal([.]|$)|journal[.]adapter$)" $journalName -}}
+{{- fail (printf "extraEnv must not set %s: the journal is the accounts ledger over http, set by the chart" $env.name) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}

@@ -7,3 +7,5 @@
 fintechbankx:
   tls:
     enforce: false
+  journal:
+    allow-in-memory: true

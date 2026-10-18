@@ -19,6 +19,7 @@ import com.bank.loan.domain.port.out.JournalEntry;
 import com.bank.loan.domain.port.out.JournalEntryReceipt;
 import com.bank.loan.domain.port.out.JournalEntryRejectedException;
 import com.bank.loan.domain.port.out.LoanBookingAccounts;
+import com.bank.loan.domain.port.out.LoanBookingNotConfiguredException;
 import com.bank.loan.domain.InstallmentStatus;
 import com.bank.loan.domain.LoanInstallment;
 import com.bank.loan.domain.LoanStatus;
@@ -29,6 +30,7 @@ import com.bank.loan.domain.port.out.LoanEventPublisher;
 import com.bank.loan.domain.port.out.RepaymentBooking;
 import com.bank.loan.domain.port.out.RepaymentBookings;
 import com.bank.loan.domain.port.out.RepaymentLedger;
+import com.bank.loan.domain.port.out.UnresolvedBookingSignal;
 import com.bank.shared.kernel.domain.DomainEvent;
 import com.bank.shared.kernel.domain.CustomerId;
 import com.bank.shared.kernel.domain.Money;
@@ -81,6 +83,9 @@ class LoanManagementServiceTest {
     @Mock
     private RepaymentBookings repaymentBookings;
 
+    @Mock
+    private UnresolvedBookingSignal unresolvedBookings;
+
     private final InMemoryRepaymentLedger ledger = new InMemoryRepaymentLedger();
     private final FakeTransactions transactions = new FakeTransactions();
     private final Clock clock = Clock.fixed(Instant.parse("2026-10-08T06:00:00Z"), ZoneOffset.UTC);
@@ -113,7 +118,7 @@ class LoanManagementServiceTest {
     @BeforeEach
     void setUp() {
         service = new LoanManagementService(loanRepository, customerCreditService, eventPublisher, ledger,
-            repaymentBookings, this::journal, loanBookingAccounts, transactions, clock);
+            repaymentBookings, this::journal, loanBookingAccounts, unresolvedBookings, transactions, clock);
     }
 
     private JournalEntryReceipt journal(JournalEntry entry) {
@@ -279,6 +284,8 @@ class LoanManagementServiceTest {
             .isInstanceOf(AccountsLedgerUnavailableException.class);
 
         assertThat(approvedLoan.getStatus()).isEqualTo(LoanStatus.APPROVED);
+        verify(unresolvedBookings).raise(LoanId.of("LOAN-SVC-LDG"), "loan-disbursement:LOAN-SVC-LDG",
+            UnresolvedBookingSignal.Cause.LEDGER_UNANSWERED);
         verify(loanRepository, never()).save(any(Loan.class));
         verify(customerCreditService, never()).markReservationUsed(any());
         verify(customerCreditService).cancelReservation(approvedLoan.getId(), approvedLoan.getCustomerId(),
@@ -298,6 +305,7 @@ class LoanManagementServiceTest {
             .isInstanceOf(JournalEntryRejectedException.class);
 
         assertThat(approvedLoan.getStatus()).isEqualTo(LoanStatus.APPROVED);
+        verifyNoInteractions(unresolvedBookings);
         verify(loanRepository, never()).save(any(Loan.class));
         verify(customerCreditService).cancelReservation(approvedLoan.getId(), approvedLoan.getCustomerId(),
             Money.aed(new BigDecimal("10000.00")));
@@ -310,13 +318,14 @@ class LoanManagementServiceTest {
         when(loanRepository.findById(LoanId.of("LOAN-SVC-NOACC"))).thenReturn(Optional.of(approvedLoan));
         when(customerCreditService.reserveCredit(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
         when(customerCreditService.cancelReservation(any(), any(), any())).thenReturn(CreditDecision.ACCEPTED);
-        bookingFailure = new AccountsLedgerUnavailableException("No loan booking accounts are configured");
+        bookingFailure = new LoanBookingNotConfiguredException("No loan booking accounts are configured for AED");
 
         assertThatThrownBy(() -> service.disburse(LoanId.of("LOAN-SVC-NOACC")))
-            .isInstanceOf(AccountsLedgerUnavailableException.class);
+            .isInstanceOf(LoanBookingNotConfiguredException.class);
 
         assertThat(journalled).isEmpty();
         assertThat(approvedLoan.getStatus()).isEqualTo(LoanStatus.APPROVED);
+        verifyNoInteractions(unresolvedBookings);
         verify(customerCreditService).cancelReservation(approvedLoan.getId(), approvedLoan.getCustomerId(),
             Money.aed(new BigDecimal("10000.00")));
     }
@@ -519,6 +528,8 @@ class LoanManagementServiceTest {
             Money.aed(new BigDecimal("10000.00")));
         assertThat(transactions.rollbacks).isEqualTo(1);
         verifyNoInteractions(eventPublisher);
+        verify(unresolvedBookings).raise(LoanId.of("LOAN-SVC-COMP"), "loan-disbursement:LOAN-SVC-COMP",
+            UnresolvedBookingSignal.Cause.NOT_STORED);
     }
 
     @Test
@@ -855,11 +866,11 @@ class LoanManagementServiceTest {
     @Test
     void repaymentWithInterestWithoutAnIncomeAccountIsRefusedAndRolledBack() {
         migratedFlatRateLoan("LOAN-SVC-NOINC");
-        interestFailure = new AccountsLedgerUnavailableException("No loan interest income account is configured");
+        interestFailure = new LoanBookingNotConfiguredException("No loan interest income account is configured");
 
         assertThatThrownBy(() -> service.repay(RepayLoanCommand.withoutKey(LoanId.of("LOAN-SVC-NOINC"),
                 Money.aed(new BigDecimal("1200.00")))))
-            .isInstanceOf(AccountsLedgerUnavailableException.class);
+            .isInstanceOf(LoanBookingNotConfiguredException.class);
 
         verify(loanRepository, never()).save(any(Loan.class));
         assertThat(ledger.recorded).isEmpty();
@@ -870,11 +881,11 @@ class LoanManagementServiceTest {
     @Test
     void repaymentWithoutBookingAccountsIsRefusedBeforeAnythingIsWritten() {
         disbursedLoan("LOAN-SVC-NOACC");
-        bookingFailure = new AccountsLedgerUnavailableException("No loan booking accounts are configured");
+        bookingFailure = new LoanBookingNotConfiguredException("No loan booking accounts are configured for AED");
 
         assertThatThrownBy(() -> service.repay(RepayLoanCommand.withoutKey(LoanId.of("LOAN-SVC-NOACC"),
                 Money.aed(new BigDecimal("100.00")))))
-            .isInstanceOf(AccountsLedgerUnavailableException.class);
+            .isInstanceOf(LoanBookingNotConfiguredException.class);
 
         verify(loanRepository, never()).save(any(Loan.class));
         assertThat(ledger.recorded).isEmpty();

@@ -256,6 +256,11 @@ fintechbankx:
     # sets it and refuses fintechbankx.tls.*, every profile name and the JVM
     # options in any spelling (deploy/helm, _helpers.tpl loan.guardValues).
     enforce: true
+  journal:
+    # The in-memory journal (journal.adapter=in-memory) books nothing the ledger keeps: refused at
+    # start-up unless this is set, which only the local profile and the test resources do (DevSecOps
+    # B-2). The chart refuses fintechbankx.journal.* and JOURNAL_ADAPTER other than http.
+    allow-in-memory: false
 
 logging:
   pattern:

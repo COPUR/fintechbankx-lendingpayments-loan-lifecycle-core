@@ -511,47 +511,86 @@ Steps:
    count against the loan is a loan-squad decision and goes through the recorded decision above.
 6. Close the incident with the payment owner's decision and the refund reference, if any.
 
-## 10. Disbursement booking in the accounts ledger
+## 10. Loan bookings in the accounts ledger
 
 A disbursement reserves credit, books `loan-disbursement:<loanId>` in the accounts ledger (debit the loan receivable,
 credit the disbursement clearing account), and only then stores the loan as DISBURSED. Nothing is booked for a loan
-that is not disbursed by this service, and a ledger that does not answer fails the disbursement with the loan APPROVED.
+that is not disbursed by this service. A ledger that gives no usable answer fails the disbursement with the loan
+APPROVED, and the entry may still have been booked (see "Signals" and "Booked but not disbursed" below).
 
 ### Configuration
 
 Set all three together (`journal.loan.*`, env `LOAN_BOOKING_CURRENCY`, `LOAN_RECEIVABLE_ACCOUNT_ID`,
 `LOAN_DISBURSEMENT_CLEARING_ACCOUNT_ID`). Both accounts are INTERNAL ledger accounts that operations opens with
-`POST /api/v1/accounts` and that are operational before the first disbursement. Unset, every disbursement is refused with
-503 `ACCOUNTS_LEDGER_UNAVAILABLE`. The service does not start when only some of the three are set.
+`POST /api/v1/accounts` and that are operational before the first disbursement. The chart renders only when the three
+are all set or all unset. Set partly, the service does not start. Unset, every disbursement and every repayment is
+refused with 422 `BOOKING_NOT_CONFIGURED`: nothing is sent to the ledger, and retrying cannot succeed until operations
+configure the service.
 
 Deploy order: the ledger accounts exist and the three values are set, then this service's image with the booking.
+`LOAN_INTEREST_INCOME_ACCOUNT_ID` is set before any repayment with interest is applied (section "Repayments").
+
+A deployed service never books in memory: `journal.adapter` is `http`, and the service refuses `journal.adapter=in-memory`
+unless `fintechbankx.journal.allow-in-memory` is set. Only the local profile and the tests set it, and the chart refuses
+both settings.
 
 ### What a caller sees
 
 | Answer | Meaning | Retry? |
 |---|---|---|
-| 503 `ACCOUNTS_LEDGER_UNAVAILABLE` | not booked (ledger down, timeout, no booking accounts for the currency) | yes, nothing changed |
-| 422 `JOURNAL_ENTRY_REJECTED` | the ledger refused the entry (for example an account is not operational) | no, until the ledger's side is fixed |
+| 503 `ACCOUNTS_LEDGER_UNAVAILABLE` | not disbursed. The ledger gave no usable answer: down, timeout, 5xx, an unreadable answer, or 401/403. The entry may have been booked. | yes; a retry replays the same entry |
+| 422 `JOURNAL_ENTRY_REJECTED` | the ledger refused the entry as sent (for example an account is not operational). Nothing was booked. | no, until the ledger's side is fixed |
+| 422 `BOOKING_NOT_CONFIGURED` | no booking accounts for the loan's currency. Nothing was sent. | no, until the configuration is set |
+| 409 `CONCURRENT_UPDATE` or `INVALID_LOAN_STATE` after a booking | the entry was booked, then the disbursement could not be stored (a store conflict, or the loan was cancelled meanwhile) | yes, if the loan is still APPROVED; the replay books nothing new |
 | 503 `CUSTOMER_SERVICE_UNAVAILABLE` / 422 `INSUFFICIENT_CREDIT` | the credit step (section 8 and earlier) | as before |
 
-Both booking answers leave the loan APPROVED and the credit reservation released.
+In every row the loan stays APPROVED and the credit reservation is released. Only the 422 rows are certain that nothing
+was booked.
+
+### Signals
+
+A disbursement whose entry may exist while the loan is not disbursed raises one signal. It writes a WARN line and counts
+`loan_disbursement_booking_unresolved_total{cause}`:
+
+- `cause="ledger_unanswered"`: the ledger gave no usable answer (the 503 row above). A 401 or 403 from the ledger fails
+  closed and counts here too, so an alert can be a false alarm; reconciliation settles it.
+- `cause="not_stored"`: the entry was booked, then the loan could not be stored (an optimistic-lock conflict, or the
+  loan was cancelled meanwhile). Two disbursements racing on one loan can also raise it; reconciliation settles it by
+  the loan's status.
+
+Each signal carries the loan id and the reference only: never an account id, an amount or the ledger's text. A refused
+entry raises no signal, because nothing was booked.
 
 ### Booked but not disbursed
 
-A disbursement that books and then cannot store the loan (for example an optimistic-lock conflict) leaves a booking
-under `loan-disbursement:<loanId>` while the loan is still APPROVED. A retry of the disbursement replays that booking
-under the same reference, so nothing is booked twice. If the loan is never disbursed (cancelled or rejected after
-such a failure), the booking stays in the ledger and is reversed with a reversing entry, a decision for the loan
-squad and the ledger owner; it is never deleted or edited.
+Trigger:
 
-1. The ledger owner lists the journal entries whose reference starts with `loan-disbursement:` (the ledger contract
-   has no lookup by reference yet, so this is a query on the ledger's own journal table, not an API call).
-2. For each loan id in that list, check its status in this service:
+- any increase of `loan_disbursement_booking_unresolved_total`;
+- a 503 `ACCOUNTS_LEDGER_UNAVAILABLE` or a 409 after a booking, reported by a customer or by the loan squad;
+- any deploy that changes the disbursement booking.
+
+Cadence: a reconciliation run each working day at 09:00 (Europe/Istanbul), and one run within the working day of each
+trigger. The loan squad runs it with the ledger owner.
+
+Procedure:
+
+1. List the loans that were approved and are not disbursed (a read-only query on this service's database):
    ```sql
-   SELECT status FROM loan WHERE loan_id = '<loan id>';
+   SELECT loan_id, status
+   FROM sc_ln_loan_lifecycle.loan
+   WHERE approval_date IS NOT NULL AND status <> 'DISBURSED';
    ```
-   `DISBURSED` is correct and needs nothing. Any other status is a booking to reverse: the ledger owner posts the
-   reversing entry, with the loan squad's decision recorded on the incident.
+2. For each loan id, ask the accounts ledger whether its disbursement was booked, by reference:
+   `GET /api/v1/journal-entries?reference=loan-disbursement:<loanId>` (the ledger contract). `200` returns the entry;
+   `404 JOURNAL_ENTRY_NOT_FOUND` means nobody booked that reference. Do not read the ledger's journal table.
+3. Decide per loan, and record the decision on the incident:
+   - not booked: nothing to do;
+   - booked and still APPROVED: the loan squad either retries the disbursement (the replay books nothing new) or cancels
+     the loan;
+   - booked and CANCELLED or REJECTED: the ledger owner posts a reversing entry. Never delete or edit the entry.
+
+The lookup by reference is part of the ledger contract. The ledger owner deploys it before the first run; until then the
+run waits and does not read the ledger's table.
 
 ### Repayments
 
@@ -568,9 +607,9 @@ every repayment too, so set them before this image takes repayments.
 
 | Answer | Where | What happens |
 |---|---|---|
-| 503 `ACCOUNTS_LEDGER_UNAVAILABLE` on the repayment | request path, with the income account or booking accounts unset | nothing changed, retry later |
+| 422 `BOOKING_NOT_CONFIGURED` on the repayment | request path, with the booking accounts or the interest income account unset | nothing applied; not retryable until configured |
 | booked | sweep | `booked_at` and the journal entry id are set |
-| not answered by the ledger | sweep | the row stays pending, `attempts` grows, `last_error = ACCOUNTS_LEDGER_UNAVAILABLE`; the sweep stops and retries next run |
+| not answered by the ledger | sweep | the row stays pending, `attempts` grows, `last_error = ACCOUNTS_LEDGER_UNAVAILABLE`; the sweep stops and retries on its next run. A repayment needs no reconciliation: its replay is the sweep's own retry |
 | refused as sent | sweep | the row is parked (`parked = TRUE`), `last_error` holds the ledger's code; it is not sent again |
 
 Parked bookings, read only:

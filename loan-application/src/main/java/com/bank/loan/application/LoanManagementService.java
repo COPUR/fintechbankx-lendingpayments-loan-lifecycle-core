@@ -14,6 +14,7 @@ import com.bank.loan.domain.port.in.LoanQueryUseCase;
 import com.bank.loan.domain.port.in.LoanRepaymentUseCase;
 import com.bank.loan.domain.port.in.RecordCompletedLoanPaymentCommand;
 import com.bank.loan.domain.port.in.RepayLoanCommand;
+import com.bank.loan.domain.port.out.AccountsLedgerUnavailableException;
 import com.bank.loan.domain.port.out.CustomerCreditService;
 import com.bank.loan.domain.port.out.CustomerCreditService.CreditDecision;
 import com.bank.loan.domain.port.out.CustomerCreditService.UnusedReservation;
@@ -26,6 +27,7 @@ import com.bank.loan.domain.port.out.LoanRepository;
 import com.bank.loan.domain.port.out.RepaymentBooking;
 import com.bank.loan.domain.port.out.RepaymentBookings;
 import com.bank.loan.domain.port.out.RepaymentLedger;
+import com.bank.loan.domain.port.out.UnresolvedBookingSignal;
 import com.bank.shared.kernel.domain.DomainEvent;
 import com.bank.shared.kernel.domain.Money;
 import org.slf4j.Logger;
@@ -77,6 +79,7 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
     private final RepaymentBookings repaymentBookings;
     private final JournalEntryPort journal;
     private final LoanBookingAccounts bookingAccounts;
+    private final UnresolvedBookingSignal unresolvedBooking;
     private final TransactionOperations transactions;
     private final Clock clock;
 
@@ -87,6 +90,7 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
                                  RepaymentBookings repaymentBookings,
                                  JournalEntryPort journal,
                                  LoanBookingAccounts bookingAccounts,
+                                 UnresolvedBookingSignal unresolvedBooking,
                                  TransactionOperations transactions,
                                  Clock clock) {
         this.loanRepository = loanRepository;
@@ -96,6 +100,7 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
         this.repaymentBookings = repaymentBookings;
         this.journal = journal;
         this.bookingAccounts = bookingAccounts;
+        this.unresolvedBooking = unresolvedBooking;
         this.transactions = transactions;
         this.clock = clock;
     }
@@ -173,9 +178,10 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
      * ledger, both before the loan changes. A refusal leaves the loan APPROVED
      * and raises no LoanDisbursed. A ledger that cannot book the disbursement,
      * or refuses it, fails it the same way: the loan stays APPROVED and the
-     * reservation is cancelled. If the disbursement cannot be stored after the
-     * booking, the reservation is cancelled too; the booking stays under the
-     * loan's reference, so a retry replays it rather than booking again.
+     * reservation is cancelled. An unanswered ledger may still have booked it,
+     * and so may a disbursement that cannot be stored after its booking; both
+     * raise an unresolved booking (runbook section 10). A retry replays the
+     * booking under the same reference.
      */
     @Override
     public Loan disburse(LoanId loanId) {
@@ -187,8 +193,10 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
             throw new InsufficientCreditException(String.format(
                 "Customer service refused to reserve %s for the loan", approved.getPrincipalAmount()));
         }
+        boolean booked = false;
         try {
-            book(approved);
+            journal.post(disbursementBooking(approved));
+            booked = true;
             return inTransaction(() -> {
                 Loan loan = load(loanId);
                 loan.disburse();
@@ -198,6 +206,13 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
                 return disbursed;
             });
         } catch (RuntimeException failure) {
+            if (failure instanceof AccountsLedgerUnavailableException) {
+                unresolvedBooking.raise(approved.getId(), disbursementReference(approved),
+                    UnresolvedBookingSignal.Cause.LEDGER_UNANSWERED);
+            } else if (booked) {
+                unresolvedBooking.raise(approved.getId(), disbursementReference(approved),
+                    UnresolvedBookingSignal.Cause.NOT_STORED);
+            }
             cancelReservationUnlessDisbursed(approved, failure);
             throw failure;
         }
@@ -205,19 +220,24 @@ public class LoanManagementService implements LoanApplicationUseCase, LoanDecisi
 
     /**
      * The disbursement's double entry: the principal is debited to the loan
-     * receivable and credited to the clearing account. The reference is the
-     * loan id, so a retried disbursement replays this booking instead of making
-     * a second one. Runs with no transaction open: the ledger is a remote call.
+     * receivable and credited to the clearing account. Built before the call,
+     * so a configuration fault is raised with nothing sent. Runs with no
+     * transaction open: the ledger is a remote call.
      */
-    private void book(Loan approved) {
+    private JournalEntry disbursementBooking(Loan approved) {
         Money principal = approved.getPrincipalAmount();
         LoanBookingAccounts.Accounts accounts = bookingAccounts.forCurrency(principal.getCurrency());
-        journal.post(new JournalEntry(
-            "loan-disbursement:" + approved.getId().getValue(),
+        return new JournalEntry(
+            disbursementReference(approved),
             principal.getCurrency(),
             "Loan disbursement " + approved.getId().getValue(),
             List.of(new JournalEntry.Line(accounts.receivableAccountId(), JournalEntry.Side.DEBIT, principal),
-                new JournalEntry.Line(accounts.clearingAccountId(), JournalEntry.Side.CREDIT, principal))));
+                new JournalEntry.Line(accounts.clearingAccountId(), JournalEntry.Side.CREDIT, principal)));
+    }
+
+    /** The reference is the loan id, so a retried disbursement replays its booking instead of making a second one. */
+    private static String disbursementReference(Loan loan) {
+        return "loan-disbursement:" + loan.getId().getValue();
     }
 
     private void cancelReservationUnlessDisbursed(Loan approved, RuntimeException failure) {

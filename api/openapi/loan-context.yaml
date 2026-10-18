@@ -255,7 +255,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '409':
-          description: INVALID_LOAN_STATE (the loan is not in a state that allows this), CONCURRENT_UPDATE (retry) or CREDIT_RESERVATION_HELD_FOR_OPERATOR (the customer service refused to release an earlier reservation of this loan with RELEASE_EXCEEDS_RESERVATION; the loan stays APPROVED and nothing is reserved until an operator resolves it, so do not retry)
+          description: INVALID_LOAN_STATE (the loan is not in a state that allows this), CONCURRENT_UPDATE (retry; if the disbursement was booked before the store failed, the entry may be booked and a retry replays it) or CREDIT_RESERVATION_HELD_FOR_OPERATOR (the customer service refused to release an earlier reservation of this loan with RELEASE_EXCEEDS_RESERVATION; the loan stays APPROVED and nothing is reserved until an operator resolves it, so do not retry)
           content:
             application/json:
               schema:
@@ -269,13 +269,13 @@ paths:
                     interactionId: 6f1c2a9e-3b4d-4e8f-9a7b-1c2d3e4f5a6b
                     timestamp: '2026-10-10T09:00:00Z'
         '422':
-          description: INSUFFICIENT_CREDIT (the customer service refused the reservation; the loan stays APPROVED), CURRENCY_MISMATCH, CUSTOMER_NOT_FOUND, CREDIT_MOVEMENT_REJECTED (the customer service rejected the reservation as invalid; the loan stays APPROVED) or JOURNAL_ENTRY_REJECTED (the accounts ledger refused the disbursement entry; the loan stays APPROVED and the reservation is released, so do not retry until the ledger's side is fixed)
+          description: INSUFFICIENT_CREDIT (the customer service refused the reservation; the loan stays APPROVED), CURRENCY_MISMATCH, CUSTOMER_NOT_FOUND, CREDIT_MOVEMENT_REJECTED (the customer service rejected the reservation as invalid; the loan stays APPROVED) or JOURNAL_ENTRY_REJECTED (the accounts ledger refused the disbursement entry; the loan stays APPROVED and the reservation is released, so do not retry until the ledger's side is fixed) or BOOKING_NOT_CONFIGURED (the service has no booking accounts for the loan's currency; nothing was sent to the ledger, the loan stays APPROVED, and retrying will not help until operations configure it)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '503':
-          description: CUSTOMER_SERVICE_UNAVAILABLE - the credit could not be reserved; ACCOUNTS_LEDGER_UNAVAILABLE - the disbursement could not be booked in the accounts ledger (or no booking accounts are configured for the currency); in both the loan stays APPROVED and nothing changed, retry
+          description: CUSTOMER_SERVICE_UNAVAILABLE - the credit could not be reserved; ACCOUNTS_LEDGER_UNAVAILABLE - not disbursed; the entry may have been booked in the accounts ledger, and a retry replays it under the same reference; the loan stays APPROVED and the reservation is released
           content:
             application/json:
               schema:
@@ -343,13 +343,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
-          description: IDEMPOTENCY_KEY_REUSED
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: ACCOUNTS_LEDGER_UNAVAILABLE (a repayment with interest needs an interest income account, and every repayment needs the loan booking accounts; without them, or when the repayment cannot be stored in the ledger, nothing changed and the request can be retried)
+          description: IDEMPOTENCY_KEY_REUSED, or BOOKING_NOT_CONFIGURED (the service has no booking accounts for the loan's currency, or no interest income account while the repayment carries interest; nothing was applied, and retrying will not help until operations configure it)
           content:
             application/json:
               schema:
@@ -575,7 +569,7 @@ components:
             Stable machine-readable code: INVALID_REQUEST, FORBIDDEN, LOAN_NOT_FOUND, INVALID_LOAN_STATE,
             CONCURRENT_UPDATE, DUPLICATE_REQUEST, INSUFFICIENT_CREDIT, CURRENCY_MISMATCH, CUSTOMER_NOT_FOUND,
             CREDIT_MOVEMENT_REJECTED, CREDIT_RESERVATION_HELD_FOR_OPERATOR, IDEMPOTENCY_KEY_REUSED,
-            CUSTOMER_SERVICE_UNAVAILABLE, ACCOUNTS_LEDGER_UNAVAILABLE, JOURNAL_ENTRY_REJECTED, INTERNAL_ERROR.
+            CUSTOMER_SERVICE_UNAVAILABLE, ACCOUNTS_LEDGER_UNAVAILABLE, JOURNAL_ENTRY_REJECTED, BOOKING_NOT_CONFIGURED, INTERNAL_ERROR.
         message:
           type: string
         interactionId:

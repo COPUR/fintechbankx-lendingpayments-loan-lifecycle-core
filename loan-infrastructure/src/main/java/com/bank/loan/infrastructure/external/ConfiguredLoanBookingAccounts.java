@@ -1,6 +1,6 @@
 package com.bank.loan.infrastructure.external;
 
-import com.bank.loan.domain.port.out.AccountsLedgerUnavailableException;
+import com.bank.loan.domain.port.out.LoanBookingNotConfiguredException;
 import com.bank.loan.domain.port.out.LoanBookingAccounts;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -11,8 +11,9 @@ import java.util.Currency;
  * Loan booking accounts from configuration (journal.loan.*): one currency, one
  * receivable account and one clearing account, all three unset by default, and
  * one interest income account for repayments. Set partly, the service does not
- * start. Unset, every disbursement is refused (fail closed), and so is a
- * repayment with interest, as is any booking in another currency.
+ * start. A booking the configuration does not cover (unset, another currency,
+ * no income account for interest) is refused as a configuration fault, before
+ * anything is sent to the ledger.
  */
 @Component
 public class ConfiguredLoanBookingAccounts implements LoanBookingAccounts {
@@ -56,17 +57,17 @@ public class ConfiguredLoanBookingAccounts implements LoanBookingAccounts {
     public String interestIncomeAccountId(Currency requested) {
         requireConfiguredCurrency(requested);
         if (interestIncomeAccountId.isEmpty()) {
-            throw new AccountsLedgerUnavailableException("No interest income account is configured; nothing was booked");
+            throw new LoanBookingNotConfiguredException("No interest income account is configured; nothing was booked");
         }
         return interestIncomeAccountId;
     }
 
     private void requireConfiguredCurrency(Currency requested) {
         if (currency.isEmpty()) {
-            throw new AccountsLedgerUnavailableException("No loan booking accounts are configured; nothing was booked");
+            throw new LoanBookingNotConfiguredException("No loan booking accounts are configured; nothing was booked");
         }
         if (!requested.getCurrencyCode().equals(currency)) {
-            throw new AccountsLedgerUnavailableException(
+            throw new LoanBookingNotConfiguredException(
                 "No loan booking accounts are configured for " + requested.getCurrencyCode() + "; nothing was booked");
         }
     }

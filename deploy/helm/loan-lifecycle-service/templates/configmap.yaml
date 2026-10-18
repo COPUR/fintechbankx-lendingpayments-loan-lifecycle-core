@@ -5,6 +5,14 @@
 {{- if not (has .Values.config.CUSTOMER_CREDIT_ADAPTER (list "http" "in-memory")) }}
 {{- fail "config.CUSTOMER_CREDIT_ADAPTER must be http or in-memory" }}
 {{- end }}
+{{- $bookingKeys := list "LOAN_BOOKING_CURRENCY" "LOAN_RECEIVABLE_ACCOUNT_ID" "LOAN_DISBURSEMENT_CLEARING_ACCOUNT_ID" }}
+{{- $bookingSet := 0 }}
+{{- range $key := $bookingKeys }}
+{{- if index $.Values.config $key }}{{- $bookingSet = add1 $bookingSet }}{{- end }}
+{{- end }}
+{{- if and (gt $bookingSet 0) (lt $bookingSet 3) }}
+{{- fail "config LOAN_BOOKING_CURRENCY, LOAN_RECEIVABLE_ACCOUNT_ID and LOAN_DISBURSEMENT_CLEARING_ACCOUNT_ID must be set together: all three, or none (none refuses every booking with 422 BOOKING_NOT_CONFIGURED)" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

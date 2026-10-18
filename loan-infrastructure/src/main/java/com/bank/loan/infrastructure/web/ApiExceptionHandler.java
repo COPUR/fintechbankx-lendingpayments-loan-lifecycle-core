@@ -7,6 +7,7 @@ import com.bank.loan.domain.port.out.CreditMovementRejectedException;
 import com.bank.loan.domain.port.out.CreditReservationNeedsOperatorException;
 import com.bank.loan.domain.port.out.CustomerCreditUnavailableException;
 import com.bank.loan.domain.port.out.JournalEntryRejectedException;
+import com.bank.loan.domain.port.out.LoanBookingNotConfiguredException;
 import com.bank.loan.application.IdempotencyKeyReusedException;
 import com.bank.loan.application.InsufficientCreditException;
 import com.bank.loan.application.LoanNotFoundException;
@@ -53,16 +54,28 @@ public class ApiExceptionHandler {
     }
 
     /**
-     * The accounts ledger could not take the booking of a disbursement or a
-     * repayment (or no booking accounts are configured for it): nothing changed,
-     * retry later. Only a request path answers this; a repayment booked later by
-     * the sweep never does.
+     * The accounts ledger gave no usable answer to a disbursement's booking. The
+     * loan is not disbursed, but the booking may exist: a retry replays it under
+     * the same reference (runbook section 10).
      */
     @ExceptionHandler(AccountsLedgerUnavailableException.class)
     ResponseEntity<ErrorResponse> ledgerUnavailable(AccountsLedgerUnavailableException ex) {
-        log.warn("Accounts ledger unavailable for a loan operation: {}", ex.getMessage());
+        log.warn("Accounts ledger gave no usable answer for a disbursement: {}", ex.getMessage());
         return error(HttpStatus.SERVICE_UNAVAILABLE, "ACCOUNTS_LEDGER_UNAVAILABLE",
-            "The loan operation could not be booked in the accounts ledger; nothing changed, retry later");
+            "not disbursed; the entry may have been booked; a retry replays it");
+    }
+
+    /**
+     * No booking accounts (or interest income account) are configured for the
+     * booking's currency: a configuration fault that retrying cannot fix. Nothing
+     * was sent to the ledger.
+     */
+    @ExceptionHandler(LoanBookingNotConfiguredException.class)
+    ResponseEntity<ErrorResponse> bookingNotConfigured(LoanBookingNotConfiguredException ex) {
+        log.error("Loan booking is not configured: {}", ex.getMessage());
+        return error(HttpStatus.UNPROCESSABLE_ENTITY, "BOOKING_NOT_CONFIGURED",
+            "The loan cannot be booked in the accounts ledger: the service has no booking accounts for it; "
+                + "retrying will not help until operations configure them");
     }
 
     /**

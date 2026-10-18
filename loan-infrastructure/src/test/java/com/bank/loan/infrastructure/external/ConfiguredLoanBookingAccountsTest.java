@@ -1,6 +1,6 @@
 package com.bank.loan.infrastructure.external;
 
-import com.bank.loan.domain.port.out.AccountsLedgerUnavailableException;
+import com.bank.loan.domain.port.out.LoanBookingNotConfiguredException;
 import com.bank.loan.domain.port.out.LoanBookingAccounts;
 import org.junit.jupiter.api.Test;
 
@@ -16,7 +16,7 @@ class ConfiguredLoanBookingAccountsTest {
         ConfiguredLoanBookingAccounts accounts = new ConfiguredLoanBookingAccounts("", "", "", "");
 
         assertThatThrownBy(() -> accounts.forCurrency(Currency.getInstance("AED")))
-            .isInstanceOf(AccountsLedgerUnavailableException.class)
+            .isInstanceOf(LoanBookingNotConfiguredException.class)
             .hasMessageContaining("nothing was booked");
     }
 
@@ -28,7 +28,7 @@ class ConfiguredLoanBookingAccountsTest {
         assertThat(accounts.forCurrency(Currency.getInstance("AED")))
             .isEqualTo(new LoanBookingAccounts.Accounts("LOAN-RECEIVABLE", "DISBURSEMENT-CLEARING"));
         assertThatThrownBy(() -> accounts.forCurrency(Currency.getInstance("USD")))
-            .isInstanceOf(AccountsLedgerUnavailableException.class)
+            .isInstanceOf(LoanBookingNotConfiguredException.class)
             .hasMessageContaining("USD");
     }
 
@@ -53,11 +53,11 @@ class ConfiguredLoanBookingAccountsTest {
             new ConfiguredLoanBookingAccounts("AED", "LOAN-RECEIVABLE", "DISBURSEMENT-CLEARING", "INTEREST-INCOME");
 
         assertThatThrownBy(() -> unset.interestIncomeAccountId(Currency.getInstance("AED")))
-            .isInstanceOf(AccountsLedgerUnavailableException.class)
+            .isInstanceOf(LoanBookingNotConfiguredException.class)
             .hasMessageContaining("nothing was booked");
         assertThat(configured.interestIncomeAccountId(Currency.getInstance("AED"))).isEqualTo("INTEREST-INCOME");
         assertThatThrownBy(() -> configured.interestIncomeAccountId(Currency.getInstance("USD")))
-            .isInstanceOf(AccountsLedgerUnavailableException.class)
+            .isInstanceOf(LoanBookingNotConfiguredException.class)
             .hasMessageContaining("USD");
     }
 
